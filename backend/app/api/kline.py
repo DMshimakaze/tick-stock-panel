@@ -1334,7 +1334,9 @@ def sync_symbol(
     repo = request.app.state.repo
     capset = request.app.state.capabilities
     zero: list[str] = []
-    n = kline_sync.sync_and_persist_daily_batch([symbol], repo, capset, count=days, zero_row_out=zero)
+    from app.services.index_sync import sync_daily_assets
+
+    n = sync_daily_assets([symbol], repo, capset, days=days, zero_row_out=zero)
     resp = {"symbol": symbol, "rows_written": n}
     if zero:
         resp["zero_row_symbols"] = zero
@@ -1350,7 +1352,9 @@ def sync_batch(
     repo = request.app.state.repo
     capset = request.app.state.capabilities
     zero: list[str] = []
-    n = kline_sync.sync_and_persist_daily_batch(symbols, repo, capset, count=days, zero_row_out=zero)
+    from app.services.index_sync import sync_daily_assets
+
+    n = sync_daily_assets(symbols, repo, capset, days=days, zero_row_out=zero)
     resp = {"symbols": symbols, "rows_written": n}
     if zero:
         # fail-loud (#302): 裸符号被跳过/上游 200 空数据的标的显式列出,

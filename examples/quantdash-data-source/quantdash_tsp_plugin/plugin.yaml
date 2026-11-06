@@ -1,5 +1,5 @@
 name: quantdash_user
-version: 1.2.2
+version: 1.2.5
 plugin_api_version: 1
 display_name: "QuantDash（个人订阅）"
 author: "TSP QuantDash Adapter"

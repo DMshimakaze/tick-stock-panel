@@ -37,12 +37,26 @@ def collect_universe(data_dir: Path, asset_type: str) -> list[dict]:
     for file in sorted((data_dir / dimension).glob("*.parquet")):
         for symbol in pl.read_parquet(file, columns=["symbol"])["symbol"].to_list():
             universe[symbol] = {"symbol": symbol, "dimension": True}
-    for kind, table, column in (("daily", daily, "date"), ("minute", minute, "datetime")):
+    etf_files = sorted((data_dir / "instruments_etf").glob("*.parquet"))
+    index_files = sorted((data_dir / "instruments_index").glob("*.parquet"))
+    etfs = set(pl.read_parquet(etf_files, columns=["symbol"])["symbol"]) if etf_files else set()
+    indices = set(pl.read_parquet(index_files, columns=["symbol"])["symbol"]) if index_files else set()
+    sources = [("daily", daily, "date"), ("minute", minute, "datetime")]
+    if asset_type == "etf":
+        # Existing ETF minutes may live in the old stock directory. Classify by
+        # dimensions and leave those original partitions in place.
+        sources.append(("minute", "kline_minute", "datetime"))
+    for kind, table, column in sources:
         files = sorted((data_dir / table).glob("date=*/*.parquet"))
         if not files:
             continue
+        scan = scan_parquet_compat(files, hive_partitioning=False).select("symbol", column)
+        if asset_type == "stock":
+            scan = scan.filter(~pl.col("symbol").is_in(etfs | indices))
+        elif table == "kline_minute":
+            scan = scan.filter(pl.col("symbol").is_in(etfs))
         spans = (
-            scan_parquet_compat(files, hive_partitioning=False).select("symbol", column)
+            scan
             .group_by("symbol")
             .agg(pl.col(column).min().cast(pl.Date).alias("start"),
                  pl.col(column).max().cast(pl.Date).alias("end"), pl.len().alias("rows"))
@@ -50,8 +64,9 @@ def collect_universe(data_dir: Path, asset_type: str) -> list[dict]:
         )
         for row in spans.iter_rows(named=True):
             record = universe.setdefault(row["symbol"], {"symbol": row["symbol"], "dimension": False})
-            record.update({kind + "_start": row["start"].isoformat(),
-                           kind + "_end": row["end"].isoformat(), kind + "_rows": row["rows"]})
+            record[kind + "_start"] = min(record.get(kind + "_start", row["start"].isoformat()), row["start"].isoformat())
+            record[kind + "_end"] = max(record.get(kind + "_end", row["end"].isoformat()), row["end"].isoformat())
+            record[kind + "_rows"] = record.get(kind + "_rows", 0) + row["rows"]
     for record in universe.values():
         starts = [record[k] for k in ("daily_start", "minute_start") if k in record]
         record["history_start"] = min(starts) if starts else None
@@ -96,8 +111,10 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
         # Extending local history requires re-verifying the expanded window.
         if record.get("history_start") != item["history_start"]:
             record["status"] = "UNVERIFIED"
+            record["through"] = None
+            record["history_start"] = item["history_start"]
     requested = [r for r in universe if refresh or records[r["symbol"]].get("through") != today
-                 or records[r["symbol"]]["status"] not in VERIFIED]
+                 or records[r["symbol"]]["status"] == "FAILED"]
     batches = [requested[i:i + BATCH_SIZE] for i in range(0, len(requested), BATCH_SIZE)]
     added = corrected = calls = retries = 0
     changed: set[str] = set()
@@ -114,6 +131,7 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
             retries += "error" in record
             record["attempts"] += 1
             record["status"] = "UNVERIFIED"
+            record["through"] = None
         save()
         calls += 1
         try:
@@ -144,7 +162,10 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
                         selected.append(events)
                 records[symbol].update(status=status, events=events.height,
                                        history_start=item["history_start"], through=today)
-                records[symbol].pop("error", None)
+                if status == "FAILED":
+                    records[symbol]["error"] = result.get("errors", {}).get(symbol, "无效的源事件因子")
+                else:
+                    records[symbol].pop("error", None)
             incoming = pl.concat(selected, how="diagonal_relaxed") if selected else pl.DataFrame()
             if not incoming.is_empty():
                 incoming = incoming.with_columns(pl.lit(provider_name).alias("source"),
@@ -189,7 +210,7 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
     for item in universe:
         group = exchange_counts.setdefault(item["exchange"], Counter())
         group[records[item["symbol"]]["status"]] += 1
-    return {"asset_type": asset_type, "universe": len(universe), "requests": calls,
+    result = {"asset_type": asset_type, "universe": len(universe), "requests": calls,
             "requested_symbols": len(requested), "retries": retries,
             "counts": dict(counts), "by_exchange": {k: dict(v) for k, v in exchange_counts.items()},
             "events": sum(records[r["symbol"]].get("events", 0) for r in universe
@@ -197,6 +218,9 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
             "new_events": added, "corrected_events": corrected, "changed_symbols": sorted(changed),
             "recomputed_symbols": len(to_recompute), "recomputed_rows": rows,
             "pending_recompute": sorted(pending)}
+    state.setdefault("runs", []).append({"time_beijing": cn_now().isoformat(), **result})
+    save()
+    return result
 
 
 def run_unified_sync(repo, on_progress=None, *, refresh=False) -> dict:

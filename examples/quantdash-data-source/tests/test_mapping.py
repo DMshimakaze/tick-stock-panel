@@ -134,6 +134,12 @@ class MappingTests(unittest.TestCase):
         self.assertEqual(rows[0]["ex_factor"], 0.97)
         self.assertEqual(rows[0]["trade_date"].isoformat(), "2026-11-06")
 
+    def test_factor_history_accepts_millisecond_epochs_before_2001(self):
+        stamp = ms(datetime(1991, 4, 3))
+        self.assertLess(stamp, 1_000_000_000_000)
+        row = factor_rows([{"symbol": "000001.SZ", "timestamp": stamp, "ex_factor": 1.2}])[0]
+        self.assertEqual(row["trade_date"].isoformat(), "1991-04-03")
+
     def test_depth_rows(self):
         rows = depth_rows({"600519.SH": {"bid_prices": [100] * 5, "bid_volumes": [2] * 5,
                                            "ask_prices": [101] * 5, "ask_volumes": [3] * 5,

@@ -1915,12 +1915,20 @@ def sync_and_persist_minute(
     # 全量攒内存曾导致 1 年全市场分钟 K OOM 卡死 (3 亿行 / 数十 GB)。
     minute_dir = repo.store.data_dir / "kline_minute"
     written_box = [0]  # list 闭包, 绕过 Python 闭包外层赋值
+    etf_symbols = set(repo.get_etf_symbol_set())
+    etf_written = [0]
 
     def _persist(seg_df: pl.DataFrame) -> None:
         # 单股自动补齐可能与另一个补齐请求同时写同一日期分区。Windows 不允许
         # 替换仍被另一写入占用的临时文件,因此读-改-写必须复用仓库写锁。
         with repo._write_lock:
-            written_box[0] += _write_minute_partition(seg_df, minute_dir)
+            etf_frame = seg_df.filter(pl.col("symbol").is_in(etf_symbols))
+            stock_frame = seg_df.filter(~pl.col("symbol").is_in(etf_symbols))
+            written_box[0] += _write_minute_partition(stock_frame, minute_dir)
+            if not etf_frame.is_empty():
+                count = _write_minute_partition(etf_frame, repo.store.data_dir / "kline_etf_minute")
+                etf_written[0] += count
+                written_box[0] += count
 
     segment_days = preferences.get_minute_sync_segment_days()
     sync_minute_batch(
@@ -1940,6 +1948,8 @@ def sync_and_persist_minute(
     # 刷新视图
     d = repo.store.data_dir.as_posix()
     repo.refresh_view("kline_minute", f"{d}/kline_minute/**/*.parquet")
+    if etf_written[0]:
+        repo.refresh_view("kline_etf_minute", f"{d}/kline_etf_minute/**/*.parquet")
 
     logger.info("minute K synced: %d rows (%d symbols)", written, len(symbols))
     return written

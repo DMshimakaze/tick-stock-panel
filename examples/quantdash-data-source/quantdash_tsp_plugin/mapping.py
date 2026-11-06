@@ -68,7 +68,7 @@ def parse_bj_timestamp(value):
     """Input QuantDash UTC epoch milliseconds -> local naive Asia/Shanghai."""
     if value is None:
         raise ValueError("missing kline timestamp")
-    if isinstance(value, (int, float)) and 1_000_000_000_000 <= value < 10_000_000_000_000:
+    if isinstance(value, (int, float)) and 0 <= value < 10_000_000_000_000:
         return datetime.fromtimestamp(value / 1000, timezone.utc).astimezone(_BJ).replace(tzinfo=None)
     if isinstance(value, datetime):
         return value.astimezone(_BJ).replace(tzinfo=None) if value.tzinfo else value

@@ -146,6 +146,11 @@ def test_omitted_symbol_is_unverified_not_empty(setup):
     result = audit.sync_asset_factors(repo, asset_type="stock")
     assert result["counts"]["UNVERIFIED"] == 1
     assert result["counts"]["CONFIRMED_NO_EVENTS"] == 1
+    # A completed HTTP response with omitted coverage remains visible, without
+    # repeatedly spending the same day's quota. Explicit refresh can recheck it.
+    repeated = audit.sync_asset_factors(repo, asset_type="stock")
+    assert repeated["requests"] == 0
+    assert repeated["counts"]["UNVERIFIED"] == 1
 
 
 @pytest.mark.parametrize("factor", [0, -1, float("nan"), float("inf")])
@@ -234,3 +239,57 @@ def test_daily_api_fallback_uses_factor_route_without_tickflow_permission(setup,
     assert [row["close"] for row in response.json()["rows"]] == pytest.approx([5.0, 5.0, 5.2])
     source.get_adj_factors = lambda *a, **k: (_ for _ in ()).throw(ProviderRequestError("failed"))
     assert TestClient(app).get("/api/kline/daily", params={"symbol": A}).status_code == 502
+
+
+def test_manual_etf_history_sync_loads_factors_before_enriched(setup, monkeypatch):
+    from app.services import index_sync
+
+    repo, source = setup
+    repo.save_etf_instruments(pl.DataFrame({"symbol": [A], "name": ["ETF"]}))
+    source.get_adj_factors = lambda *a, **k: pl.DataFrame([event()])
+    source.get_daily = lambda *a, **k: bars(A, [10.0, 5.0, 5.2])
+    monkeypatch.setattr(audit.custom, "provider_has_dataset", lambda *a: True)
+    monkeypatch.setattr(audit.preferences, "get_daily_data_provider", lambda: "quantdash_user")
+    count = index_sync.sync_daily_assets([A], repo, SimpleNamespace(has=lambda cap: False), days=730)
+    assert count == 3
+    assert stored(repo, "etf")["close"].to_list() == pytest.approx([5.0, 5.0, 5.2])
+    assert not list((repo.store.data_dir / "kline_daily").glob("date=*/*.parquet"))
+
+
+def test_universe_classifies_legacy_etf_minutes_by_dimensions(setup):
+    repo, _ = setup
+    seed(repo)
+    etf = "588000.SH"
+    repo.save_etf_instruments(pl.DataFrame({"symbol": [etf], "name": ["ETF"]}))
+    part = repo.store.data_dir / "kline_minute" / "date=2025-01-02"
+    part.mkdir()
+    pl.DataFrame({"symbol": [etf], "datetime": [datetime(2025, 1, 2, 9, 31)]}).write_parquet(part / "part.parquet")
+    assert etf not in {r["symbol"] for r in audit.collect_universe(repo.store.data_dir, "stock")}
+    got = audit.collect_universe(repo.store.data_dir, "etf")
+    assert got == [{"symbol": etf, "dimension": True, "minute_start": "2025-01-02",
+                    "minute_end": "2025-01-02", "minute_rows": 1,
+                    "history_start": "2025-01-02", "exchange": "SH"}]
+
+
+def test_new_mixed_minute_batch_persists_etf_separately(setup, monkeypatch):
+    from app.services import minute_adjust
+
+    repo, _ = setup
+    etf = "588000.SH"
+    repo.save_etf_instruments(pl.DataFrame({"symbol": [etf], "name": ["ETF"]}))
+    minute_adjust.mark_minute_basis_raw(repo.store.data_dir)
+    frame = pl.concat([bars(A, [10.0] * 3), bars(etf, [1.0] * 3)]).rename({"date": "datetime"}).with_columns(pl.col("datetime").cast(pl.Datetime))
+    monkeypatch.setattr(kline_sync, "_selected_minute_provider_name", lambda: "quantdash_user")
+    monkeypatch.setattr(kline_sync, "_resolve_minute_provider", lambda name: (object(), False, None))
+    monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **k: SimpleNamespace(batch=100, rpm=30))
+
+    def fetch(symbols, **kwargs):
+        kwargs["on_segment"](frame)
+        return frame
+
+    monkeypatch.setattr(kline_sync, "sync_minute_batch", fetch)
+    assert kline_sync.sync_and_persist_minute([A, etf], repo, SimpleNamespace(has=lambda cap: True)) == 6
+    stocks = pl.read_parquet(sorted((repo.store.data_dir / "kline_minute").glob("date=*/*.parquet")))
+    etfs = pl.read_parquet(sorted((repo.store.data_dir / "kline_etf_minute").glob("date=*/*.parquet")))
+    assert set(stocks["symbol"]) == {A}
+    assert set(etfs["symbol"]) == {etf}

@@ -2081,20 +2081,13 @@ def compute_enriched_today(
     df = today_ohlcv.join(live_state, on="symbol", how="left")
     has_history_state = pl.col("_has_history_state").fill_null(False)
 
-    # ---- 前复权: 保存原始价 → 调整 OHLCV ----
+    # 当日是前复权的最新锚点, 原始 OHLC 的 ratio=1。历史状态已经复权;
+    # 不能再把上一有效交易日的比例乘给当日, 否则除权日会被复权两次。
     df = df.with_columns([
         pl.col("close").alias("raw_close"),
         pl.col("high").alias("raw_high"),
         pl.col("low").alias("raw_low"),
     ])
-    if "_adj_factor" in df.columns:
-        af = pl.col("_adj_factor").fill_null(1.0)
-        df = df.with_columns([
-            (pl.col("open") * af).alias("open"),
-            (pl.col("high") * af).alias("high"),
-            (pl.col("low") * af).alias("low"),
-            (pl.col("close") * af).alias("close"),
-        ])
 
     # ---- volume 统一 Float64 ----
     df = df.with_columns(pl.col("volume").cast(pl.Float64))

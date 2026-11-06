@@ -136,6 +136,28 @@ def test_factor_correction_invalidates_minute_cache(tmp_path):
     assert minute_adjust.apply_minute_adjustment(raw, tmp_path)["close"][0] == 20.0
 
 
+def test_legacy_etf_minutes_use_etf_factors_once_and_prefer_dedicated_table(tmp_path):
+    day = date(2026, 6, 30)
+    _write_factor_table(tmp_path, [(AA, EX_DATE, 2.0)])
+    factor_dir = tmp_path / "adj_factor_etf"
+    factor_dir.mkdir()
+    pl.DataFrame({"symbol": [AA], "trade_date": [EX_DATE], "ex_factor": [3.0]}).write_parquet(factor_dir / "all.parquet")
+    original = _minute_frame(AA, day, 60.0)
+    _write_minute_partition(tmp_path, day, original)
+    minute_adjust.mark_minute_basis_raw(tmp_path)
+    repo = KlineRepository(DataStore(tmp_path))
+
+    def reads():
+        return [repo.get_minute(AA, day, "etf"), repo.get_minute_batch([AA], day, "etf"),
+                repo.get_minute_range([AA], day, day, "etf"), repo.get_minute_by_dates([AA], [day], "etf")]
+
+    assert all(frame["close"][0] == 20.0 for frame in reads())
+    stored = pl.read_parquet(tmp_path / "kline_minute" / f"date={day}" / "part.parquet")
+    assert stored.equals(original)
+    _write_minute_partition(tmp_path, day, _minute_frame(AA, day, 90.0), etf=True)
+    assert all(frame["close"][0] == 30.0 for frame in reads())
+
+
 # ================================================================
 # 基准标记与读取门控
 # ================================================================

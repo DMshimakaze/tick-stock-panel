@@ -198,6 +198,36 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "SDK request failed"):
             self.obj.audit_adj_factors(["600519.SH"])
 
+    def test_adjustment_reference_uses_shared_client_and_never_persists(self):
+        sdk = self.obj._api._ensure_sdk()
+        original = sdk.klines.batch
+        adjustments = []
+
+        def batch(symbols, **kwargs):
+            adjustments.append(kwargs["adjust"])
+            kwargs["adjust"] = "none"
+            return original(symbols, **kwargs)
+
+        sdk.klines.batch = batch
+        result = self.obj.test_dataset("adjustment_reference", ["600519.SH"])
+        self.assertNotIn("error", result)
+        self.assertEqual(adjustments, ["none", "forward"])
+        self.assertEqual(len(result["raw"]), 1)
+        self.assertEqual(len(result["forward"]), 1)
+        self.assertEqual(len(result["factors"]), 1)
+
+    def test_invalid_factor_isolated_to_one_symbol_in_batch(self):
+        sdk = self.obj._api._ensure_sdk()
+        sdk.klines.ex_factors = lambda *a, **k: {
+            "600519.SH": [{"trade_date": "2026-06-01", "ex_factor": 0}],
+            "000001.SZ": [{"trade_date": "2026-06-01", "ex_factor": 1.1}],
+        }
+        result = self.obj.audit_adj_factors(["600519.SH", "000001.SZ"])
+        self.assertEqual(result["statuses"], {"600519.SH": "FAILED", "000001.SZ": "HAS_EVENTS"})
+        self.assertEqual(result["errors"]["600519.SH"], "nonpositive ex_factor")
+        self.assertEqual(result["factors"].height, 1)
+        self.assertEqual(result["factors"].rows[0]["symbol"], "000001.SZ")
+
     def test_depth_uses_authorized_single_access_without_batch_permission(self):
         with patch.object(FakeDepth, "batch", side_effect=PermissionError("batch access denied")) as batch:
             rows = self.obj.get_depth_batch(["600519.SH", "000001.SZ"])

@@ -241,6 +241,8 @@ class QuantDashProvider:
                                         asset_type, on_chunk_done)
         if "UNVERIFIED" in result["statuses"].values():
             raise ProviderRequestError("QuantDash incomplete factor coverage; missing symbol response")
+        if "FAILED" in result["statuses"].values():
+            raise ProviderRequestError("QuantDash invalid factor events; audit reports affected symbols")
         return result["factors"]
 
     def audit_adj_factors(self, symbols, start_time=None, end_time=None,
@@ -257,6 +259,7 @@ class QuantDashProvider:
         chunks = [symbols[i:i + BATCH] for i in range(0, len(symbols), BATCH)]
         frames = []
         statuses = {}
+        errors = {}
         start_day = parse_bj_timestamp(start_time).date() if start_time else None
         end_day = parse_bj_timestamp(end_time).date() if end_time else None
         for i, chunk in enumerate(chunks, 1):
@@ -273,7 +276,14 @@ class QuantDashProvider:
                     if code not in raw or raw[code] is None:
                         statuses[code] = "UNVERIFIED"
                         continue
-                    events = factor_rows([{"symbol": code, **event} for event in raw[code]])
+                    try:
+                        events = factor_rows([{"symbol": code, **event} for event in raw[code]])
+                    except ValueError as exc:
+                        # A bad event for one security must not hide the other
+                        # <=99 successful securities in the same HTTP response.
+                        statuses[code] = "FAILED"
+                        errors[code] = _safe_error(exc)
+                        continue
                     if any(r["symbol"] != code for r in events):
                         raise ValueError("unrequested factor symbol")
                     events = [r for r in events if
@@ -290,7 +300,7 @@ class QuantDashProvider:
                     on_chunk_done(i, len(chunks))
         good = [df for df in frames if not df.is_empty()]
         return {"factors": pl.concat(good, how="vertical_relaxed") if good else pl.DataFrame(),
-                "statuses": statuses}
+                "statuses": statuses, "errors": errors}
 
     def get_depth_batch(self, symbols):
         symbols = [symbol_code(s) for s in symbols]
@@ -353,6 +363,25 @@ class QuantDashProvider:
                     out["warnings"] = [f"ETF 实时未启用：{self._etf_permission_error}"]
             elif dataset == "adj_factor":
                 data = self.get_adj_factors(samples, now - timedelta(days=365), now)
+            elif dataset == "adjustment_reference":
+                # Read-only acceptance reference, using this instance's shared
+                # HTTP budget. Never publish vendor-adjusted bars as raw data.
+                start = now - timedelta(days=730)
+                raw = self.get_daily(samples, start, now)
+                reference = self._api.call(lambda sdk: sdk.klines.batch(
+                    samples, period="1d", start_time=request_ms(start),
+                    end_time=request_ms(now, end_of_day=True), count=KLINE_COUNT,
+                    adjust="forward", to_dataframe=False, batch_size=BATCH,
+                    max_workers=1, show_progress=False,
+                ))
+                forward = _frame(kline_rows(reference, freq="daily"), DAILY_COLUMNS)
+                factors = self.get_adj_factors(samples, start, now)
+                out["rows"] = raw.height
+                out["columns"] = DAILY_COLUMNS
+                for name, frame in (("raw", raw), ("forward", forward), ("factors", factors)):
+                    out[name] = [{k: (v.isoformat() if hasattr(v, "isoformat") else v)
+                                  for k, v in row.items()} for row in frame.to_dicts()]
+                return out
             elif dataset == "depth5":
                 result = self.get_depth_batch(samples)
                 out["rows"] = len(result)
