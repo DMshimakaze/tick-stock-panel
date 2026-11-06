@@ -247,15 +247,18 @@ def audit_trade_units(rows):
 
 
 def factor_rows(data):
-    rows = []
+    events = {}
     for row in _records(data):
         sym = symbol_code(_value(row, "symbol", "ts_code"))
         day = parse_bj_timestamp(_value(row, "trade_date", "timestamp", "date")).date()
         ex = number(_value(row, "ex_factor"), allow_none=False)
         if ex <= 0:
             raise ValueError("nonpositive ex_factor")
-        rows.append({"symbol": sym, "trade_date": day, "ex_factor": ex})
-    return rows
+        key = (sym, day)
+        if key in events and events[key]["ex_factor"] != ex:
+            raise ValueError("duplicate conflicting factor event")
+        events[key] = {"symbol": sym, "trade_date": day, "ex_factor": ex}
+    return list(events.values())
 
 
 def depth_rows(data, symbols):

@@ -52,7 +52,7 @@ class FakeKlines:
                     "low": [99], "close": [100.5], "volume": [30],
                     "amount": [300300]} for s in symbols}
     def ex_factors(self, symbols, **kwargs):
-        return [{"symbol": s, "trade_date": "2026-11-06", "ex_factor": 1.0} for s in symbols]
+        return {s: [{"trade_date": "2026-11-06", "ex_factor": 1.0}] for s in symbols}
     def get(self, symbol, **kwargs):
         return FakeDF([{"symbol": symbol}])
 
@@ -126,7 +126,7 @@ class ProviderTests(unittest.TestCase):
     def test_manifest_entry_and_status(self):
         import yaml
         from pathlib import Path
-        doc = yaml.safe_load((Path(__file__).parents[1] / "quantdash_tsp_plugin" / "plugin.yaml").read_text())
+        doc = yaml.safe_load((Path(__file__).parents[1] / "quantdash_tsp_plugin" / "plugin.yaml").read_text(encoding="utf-8"))
         self.assertEqual(doc["name"], "quantdash_user")
         self.assertEqual(doc["entry"], "provider:QuantDashProvider")
         self.assertIn("full_minute", doc["datasets"])
@@ -186,6 +186,17 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(df.height, 1)
         self.assertEqual(df.rows[0]["ex_factor"], 1)
         self.assertEqual(self.obj.get_depth_batch(["600519.SH"])["600519.SH"]["bid_volumes"], [1]*5)
+
+    def test_factor_audit_distinguishes_empty_missing_and_failure(self):
+        sdk = self.obj._api._ensure_sdk()
+        sdk.klines.ex_factors = lambda symbols, **kw: {"600519.SH": []}
+        result = self.obj.audit_adj_factors(["600519.SH", "000001.SZ"])
+        self.assertEqual(result["statuses"], {"600519.SH": "CONFIRMED_NO_EVENTS", "000001.SZ": "UNVERIFIED"})
+        with self.assertRaisesRegex(RuntimeError, "incomplete factor coverage"):
+            self.obj.get_adj_factors(["600519.SH", "000001.SZ"])
+        sdk.klines.ex_factors = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("network"))
+        with self.assertRaisesRegex(RuntimeError, "SDK request failed"):
+            self.obj.audit_adj_factors(["600519.SH"])
 
     def test_depth_uses_authorized_single_access_without_batch_permission(self):
         with patch.object(FakeDepth, "batch", side_effect=PermissionError("batch access denied")) as batch:

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 import shutil
 import threading
@@ -581,6 +582,13 @@ def sync_daily_by_quotes(repo: KlineRepository) -> int:
 # 存量 all.parquet 只有规范三列, 合并用 how="diagonal" 自动补 null;
 # 读取方 (_apply_adj_factor / minute_adjust) 只按规范三列消费, 不受影响。
 ADJ_DETAIL_COLS = ("dividend", "bonus", "allot", "allot_price", "prev_close")
+VERIFIED_FACTOR_STATES = {"HAS_EVENTS", "CONFIRMED_NO_EVENTS"}
+
+
+def read_adj_factor_coverage(data_dir: Path, asset_type: str) -> dict:
+    folder = "adj_factor_etf" if asset_type == "etf" else "adj_factor"
+    path = data_dir / folder / "audit.json"
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
 
 
 def _normalize_adj_factor(raw) -> pl.DataFrame:
@@ -647,10 +655,23 @@ def _align_adj_factor_frame(df: pl.DataFrame) -> pl.DataFrame:
         pl.lit(None, dtype=pl.Float64).alias(c)
         for c in ADJ_DETAIL_COLS if c not in df.columns
     ])
-    return df.select(["symbol", "trade_date", "ex_factor", *ADJ_DETAIL_COLS])
+    df = df.select(["symbol", "trade_date", "ex_factor", *ADJ_DETAIL_COLS,
+                    *[c for c in ("source", "updated_at") if c in df.columns]])
+    if df.filter(pl.any_horizontal(
+        pl.col("symbol").is_null(), pl.col("trade_date").is_null(),
+        pl.col("ex_factor").is_null(), ~pl.col("ex_factor").is_finite(),
+        pl.col("ex_factor") <= 0,
+    )).height:
+        raise ValueError("除权事件必须含有效代码、交易日及正的有限事件因子")
+    conflicts = df.group_by(["symbol", "trade_date"]).agg(pl.col("ex_factor").n_unique().alias("n"))
+    if conflicts.filter(pl.col("n") > 1).height:
+        raise ValueError("同一证券同一交易日存在冲突的除权事件因子")
+    return df.unique(subset=["symbol", "trade_date"], keep="last").sort(["symbol", "trade_date"])
 
 
-def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame) -> tuple[int, list[str]]:
+def _merge_adj_factor_store(
+    out: Path, new_data: pl.DataFrame, *, on_changed: Callable[[list[str]], None] | None = None,
+) -> tuple[int, list[str]]:
     """合并写入 adj_factor 的 all.parquet, 返回 (新增行数, 因子发生变化的 symbol 列表)。
 
     how="diagonal" 兼容存量三列 schema (旧行明细自动为 null);
@@ -661,12 +682,17 @@ def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame) -> tuple[int, lis
     (dividend/prev_close 等补 null) 不改变复权价格 → 不计入变化列表,
     enriched 局部重算因此不会被明细回填触发全市场重算。
     """
+    if new_data.is_empty():
+        return 0, []
     out.parent.mkdir(parents=True, exist_ok=True)
     new_data = _align_adj_factor_frame(new_data)
     if not out.exists():
+        changed = sorted(new_data["symbol"].unique().to_list())
+        if on_changed:
+            on_changed(changed)
         _atomic_write_parquet(new_data.sort(["symbol", "trade_date"]), out)
-        return new_data.height, sorted(new_data["symbol"].unique().to_list())
-    existing = pl.read_parquet(out)
+        return new_data.height, changed
+    existing = _align_adj_factor_frame(pl.read_parquet(out))
     before = existing.height
     # ex_factor 变化判定 (明细回填不算): 与存量按 (symbol, trade_date) 对齐,
     # 旧值缺失 (新事件) 或值差超容差即视为变化。
@@ -678,9 +704,23 @@ def _merge_adj_factor_store(out: Path, new_data: pl.DataFrame) -> tuple[int, lis
         | ((pl.col("ex_factor") - pl.col("ex_factor_old")).abs() > 1e-9)
     )
     changed_symbols = sorted(set(diffed["symbol"].to_list()))
-    merged = pl.concat([existing, new_data], how="diagonal").unique(
+    # 容差内保留原数值, 避免日K不重算但分钟投影使用另一组因子。
+    new_data = new_data.join(
+        existing.select("symbol", "trade_date", pl.col("ex_factor").alias("_old")),
+        on=["symbol", "trade_date"], how="left",
+    ).with_columns(
+        pl.when((pl.col("ex_factor") - pl.col("_old")).abs() <= 1e-9)
+        .then(pl.col("_old")).otherwise(pl.col("ex_factor")).alias("ex_factor")
+    ).drop("_old")
+    merged = pl.concat([existing, new_data], how="diagonal_relaxed").unique(
         subset=["symbol", "trade_date"], keep="last",
     ).sort(["symbol", "trade_date"])
+    # 重复同步不能改 mtime / 失效分钟缓存; 更新时间本身不构成数据变化。
+    compared = [c for c in merged.columns if c != "updated_at"]
+    if set(compared).issubset(existing.columns) and merged.select(compared).equals(existing.select(compared)):
+        return 0, []
+    if on_changed and changed_symbols:
+        on_changed(changed_symbols)
     _atomic_write_parquet(merged, out)
     return merged.height - before, changed_symbols
 
@@ -716,7 +756,7 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
             if new_data.is_empty():
                 # 扶摇等自定义源对 ETF 直接空返回, 与「该 ETF 无除权」无法区分;
                 # 有 TickFlow 除权能力时回退, 否则 ETF 日K永远不复权。
-                if asset_type == "etf":
+                if asset_type == "etf" and provider_name == "fuyao":
                     logger.info(
                         "custom adj_factor provider %s returned no ETF rows, falling back to TickFlow",
                         provider_name,
@@ -729,7 +769,8 @@ def sync_adj_factor(symbols: list[str], repo: KlineRepository,
                     repo.store.data_dir / factor_dir / "all.parquet", new_data
                 )
                 return added, affected
-        # 自定义源未配置 adj_factor → 回退 TickFlow
+        else:
+            raise ProviderRequestError(f"所选数据源 {provider_name} 未提供除权因子能力")
 
     if not capset.has(Cap.ADJ_FACTOR):
         _log_cap_unavailable("adj_factor", "除权因子同步")
@@ -1626,19 +1667,54 @@ def fetch_minute_single(
     return _normalize_minute(_compact_klines_to_df(raw, default_symbol=symbol))
 
 
-def fetch_adj_factor_single(symbol: str) -> pl.DataFrame:
-    """从 TickFlow 实时拉取单股除权因子(不写入本地), 用于单股 K 线即时前复权。
-
-    返回结构: symbol, trade_date, ex_factor (空 DataFrame 表示无除权事件或拉取失败)。
-    与 _apply_adj_factor / compute_enriched 的 factors 参数格式一致。
-    """
-    tf = get_client()
-    try:
-        raw = tf.klines.ex_factors([symbol], as_dataframe=False, show_progress=False)
-    except Exception as e:  # noqa: BLE001
-        logger.warning("fetch_adj_factor_single(%s) failed: %s", symbol, e)
+def fetch_adj_factor_single(
+    symbol: str, *, repo=None, asset_type="stock", capset=None,
+    start_time: datetime | None = None, end_time: datetime | None = None,
+) -> pl.DataFrame:
+    """查询选定因子源; 已确认覆盖的本地历史无需再次远程请求。失败向上传播。"""
+    if asset_type == "index":
         return pl.DataFrame()
+    provider_name = preferences.get_adj_factor_provider()
+    if repo is not None:
+        root = Path(repo.store.data_dir)
+        coverage = read_adj_factor_coverage(root, asset_type)
+        record = coverage.get("records", {}).get(symbol, {})
+        earliest = record.get("history_start")
+        covered_start = earliest is None or (start_time and earliest <= start_time.date().isoformat())
+        if (coverage.get("source") == provider_name and record.get("status") in VERIFIED_FACTOR_STATES
+                and record.get("through", "") >= (end_time or cn_now()).date().isoformat()
+                and covered_start):
+            path = root / ("adj_factor_etf" if asset_type == "etf" else "adj_factor") / "all.parquet"
+            return pl.read_parquet(path).filter(pl.col("symbol") == symbol) if path.exists() else pl.DataFrame()
+    if provider_name != "tickflow":
+        from app.data_providers import custom
+
+        if not custom.provider_has_dataset(provider_name, "adj_factor"):
+            raise ProviderRequestError(f"所选数据源 {provider_name} 未提供除权因子能力")
+        return custom.get_provider(provider_name).get_adj_factors(
+            [symbol], start_time=start_time, end_time=end_time, asset_type=asset_type,
+        )
+    if capset is not None and not capset.has(Cap.ADJ_FACTOR):
+        return pl.DataFrame()
+    raw = get_client().klines.ex_factors([symbol], as_dataframe=False, show_progress=False)
     return _normalize_adj_factor(raw)
+
+
+def fetch_daily_for_chart(repo, capset, symbol, asset_type, start_time, end_time):
+    """优先读本地原始日K, 缺失时复用正式的按能力路由取数入口。"""
+    from app.parquet import scan_daily_parquet
+    from app.tickflow.repository import daily_dirname
+
+    files = sorted((Path(repo.store.data_dir) / daily_dirname(asset_type)).glob("date=*/*.parquet"))
+    if files:
+        raw = scan_daily_parquet(files).filter(
+            (pl.col("symbol") == symbol) & (pl.col("date") <= end_time.date())
+        ).collect(engine="streaming")
+        if not raw.is_empty():
+            return raw
+    frames = list(iter_daily_frames([symbol], capset, start_time=start_time,
+                                   end_time=end_time, asset_type=asset_type))
+    return pl.concat(frames, how="diagonal_relaxed") if frames else pl.DataFrame()
 
 
 def _as_beijing(d: datetime) -> datetime:

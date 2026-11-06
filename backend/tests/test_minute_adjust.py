@@ -118,6 +118,24 @@ def test_apply_adjustment_etf_routing(tmp_path):
     assert abs(out["close"][0] - 10.0 * RATIO_BEFORE) < 1e-9
 
 
+def test_reverse_split_adjusts_prices_and_vwap_without_changing_raw(tmp_path):
+    _write_factor_table(tmp_path, [(AA, EX_DATE, 0.5)])
+    raw = _minute_frame(AA, date(2026, 6, 30), 10.0)
+    out = minute_adjust.apply_minute_adjustment(raw, tmp_path)
+    assert out["close"][0] == 20.0
+    assert out["amount"][0] / (out["volume"][0] * 100) == 20.0
+    assert raw["close"][0] == 10.0
+    assert raw["amount"][0] == 100000.0
+
+
+def test_factor_correction_invalidates_minute_cache(tmp_path):
+    raw = _minute_frame(AA, date(2026, 6, 30), 10.0)
+    _write_factor_table(tmp_path, [(AA, EX_DATE, 1.25)])
+    assert minute_adjust.apply_minute_adjustment(raw, tmp_path)["close"][0] == 8.0
+    _write_factor_table(tmp_path, [(AA, EX_DATE, 0.5)])
+    assert minute_adjust.apply_minute_adjustment(raw, tmp_path)["close"][0] == 20.0
+
+
 # ================================================================
 # 基准标记与读取门控
 # ================================================================

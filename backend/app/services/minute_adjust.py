@@ -36,7 +36,7 @@ _MARKER_NAME = ".raw_basis"
 
 # 因子表内存缓存: (data_dir, 表名) -> (源文件最新 mtime, fs帧, total帧)。
 # 因子表仅数千行 (全市场一年 ~5000 事件), 读盘 ~10ms, 按 mtime 失效。
-_factor_cache: dict[tuple[str, str], tuple[float, pl.DataFrame, pl.DataFrame]] = {}
+_factor_cache: dict[tuple[str, str], tuple[tuple, pl.DataFrame, pl.DataFrame]] = {}
 _factor_cache_lock = threading.Lock()
 
 
@@ -78,11 +78,11 @@ def _load_factor_frames(data_dir: Path, asset_type: str) -> tuple[pl.DataFrame, 
     files = sorted(table_dir.glob("*.parquet")) if table_dir.exists() else []
     if not files:
         return (pl.DataFrame(), pl.DataFrame())
-    newest = max(f.stat().st_mtime for f in files)
+    signature = tuple((f.name, f.stat().st_mtime_ns, f.stat().st_size) for f in files)
     key = (str(data_dir), table_dir.name)
     with _factor_cache_lock:
         cached = _factor_cache.get(key)
-        if cached is not None and cached[0] == newest:
+        if cached is not None and cached[0] == signature:
             return cached[1], cached[2]
 
     factors = pl.read_parquet([str(f) for f in files])
@@ -103,7 +103,7 @@ def _load_factor_frames(data_dir: Path, asset_type: str) -> tuple[pl.DataFrame, 
         total = fs.group_by("symbol").agg(pl.col("cum").last().alias("total"))
         frames = (fs.select("symbol", "trade_date", "cum"), total)
     with _factor_cache_lock:
-        _factor_cache[key] = (newest, frames[0], frames[1])
+        _factor_cache[key] = (signature, frames[0], frames[1])
     return frames
 
 
@@ -151,7 +151,7 @@ def apply_minute_adjustment(
     if not cols or "datetime" not in df.columns:
         return df
     pairs = compute_ratio_pairs(df, data_dir, asset_type)
-    if pairs.is_empty() or pairs["_ratio"].min() >= 1.0 - 1e-12:
+    if pairs.is_empty() or ((pairs["_ratio"] - 1.0).abs() <= 1e-12).all():
         return df
     out = (
         df.with_columns(pl.col("datetime").dt.date().alias("_d"))

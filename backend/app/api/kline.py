@@ -5,7 +5,7 @@ import gzip
 import json
 import logging
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -505,27 +505,32 @@ def get_daily(
     df = repo.get_daily_asset(asset_type, symbol, start, end)
 
     if df.is_empty():
+        capset = getattr(request.app.state, "capabilities", None)
         try:
-            raw = kline_sync.sync_daily_batch([symbol], count=days + 30)
+            raw = kline_sync.fetch_daily_for_chart(
+                repo, capset, symbol, asset_type,
+                datetime.combine(start, datetime.min.time()), datetime.combine(end, datetime.max.time()),
+            )
         except Exception as e:
-            raise HTTPException(status_code=502, detail=f"TickFlow fetch failed: {e}") from e
+            raise HTTPException(status_code=502, detail=f"日K获取失败: {e}") from e
         if raw.is_empty():
             return _gzip_payload(
                 request,
                 {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": []},
                 pref_key="daily_batch_compress",
             )
-        # 拉除权因子做前复权 (Starter+ 有权限), 否则空 df → compute_enriched 退回未复权
         factors = pl.DataFrame()
-        capset = getattr(request.app.state, "capabilities", None)
         try:
-            from app.tickflow.capabilities import Cap
-            if capset and capset.has(Cap.ADJ_FACTOR):
-                factors = kline_sync.fetch_adj_factor_single(symbol)
-        except Exception as e:  # noqa: BLE001
-            logger.debug("单股除权因子拉取失败 %s: %s", symbol, e)
+            factors = kline_sync.fetch_adj_factor_single(
+                symbol, repo=repo, asset_type=asset_type, capset=capset,
+                start_time=datetime.combine(raw["date"].min(), datetime.min.time()),
+                end_time=datetime.combine(end, datetime.max.time()),
+            )
+        except Exception as e:
+            logger.warning("单股除权因子拉取失败 %s: %s", symbol, e)
+            raise HTTPException(status_code=502, detail="除权因子未核实，无法计算前复权日K") from e
         enriched = compute_enriched(raw, factors=factors)
-        rows = enriched.tail(days).to_dicts()
+        rows = enriched.filter((pl.col("date") >= start) & (pl.col("date") <= end)).to_dicts()
         # 即使 live 模式也尝试追加实时蜡烛
         rows = _maybe_inject_live_candle(request, symbol, rows, asset_type)
         resp = {"symbol": symbol, "name": stock_name, "stock_info": stock_info, "rows": rows, "source": "live"}

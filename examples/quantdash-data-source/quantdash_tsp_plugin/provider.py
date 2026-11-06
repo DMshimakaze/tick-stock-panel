@@ -18,7 +18,7 @@ import polars as pl
 from app import secrets_store
 from app.data_providers.base import ProviderRequestError
 from .client import BudgetUnavailableError, QuantDashClient, probe_candidate
-from .mapping import (depth_rows, factor_rows, kline_rows, quote_rows,
+from .mapping import (depth_rows, factor_rows, kline_rows, quote_rows, parse_bj_timestamp,
                       request_ms, symbol_code, audit_trade_units)
 
 logger = logging.getLogger(__name__)
@@ -237,19 +237,50 @@ class QuantDashProvider:
 
     def get_adj_factors(self, symbols, start_time=None, end_time=None,
                         asset_type="stock", on_chunk_done=None):
+        result = self.audit_adj_factors(symbols, start_time, end_time,
+                                        asset_type, on_chunk_done)
+        if "UNVERIFIED" in result["statuses"].values():
+            raise ProviderRequestError("QuantDash incomplete factor coverage; missing symbol response")
+        return result["factors"]
+
+    def audit_adj_factors(self, symbols, start_time=None, end_time=None,
+                          asset_type="stock", on_chunk_done=None):
+        """Keep explicit empty symbol entries distinct from omitted coverage.
+
+        The SDK has no count/pagination limit for ex_factors. Request the complete
+        event chain in one HTTP call per <=100 symbols, then select the local
+        history window. This also picks up corrections to older events.
+        """
+        if asset_type not in ("stock", "etf"):
+            raise ProviderRequestError("QuantDash factors only support stocks and ETFs")
         symbols = [symbol_code(s) for s in symbols]
         chunks = [symbols[i:i + BATCH] for i in range(0, len(symbols), BATCH)]
         frames = []
+        statuses = {}
+        start_day = parse_bj_timestamp(start_time).date() if start_time else None
+        end_day = parse_bj_timestamp(end_time).date() if end_time else None
         for i, chunk in enumerate(chunks, 1):
             try:
-                raw = self._api.call(lambda sdk: sdk.klines.ex_factors(chunk, to_dataframe=True))
-                rows = factor_rows(raw)
-                if any(row["symbol"] not in chunk for row in rows):
+                raw = self._api.call(lambda sdk: sdk.klines.ex_factors(
+                    chunk, to_dataframe=False, batch_size=BATCH, max_workers=1,
+                ))
+                if not isinstance(raw, dict):
+                    raise ValueError("invalid factor coverage response")
+                if any(code not in chunk for code in raw):
                     raise ValueError("unrequested factor symbol")
-                if start_time:
-                    rows = [r for r in rows if r["trade_date"] >= start_time.date()]
-                if end_time:
-                    rows = [r for r in rows if r["trade_date"] <= end_time.date()]
+                rows = []
+                for code in chunk:
+                    if code not in raw or raw[code] is None:
+                        statuses[code] = "UNVERIFIED"
+                        continue
+                    events = factor_rows([{"symbol": code, **event} for event in raw[code]])
+                    if any(r["symbol"] != code for r in events):
+                        raise ValueError("unrequested factor symbol")
+                    events = [r for r in events if
+                              (start_day is None or r["trade_date"] >= start_day) and
+                              (end_day is None or r["trade_date"] <= end_day)]
+                    statuses[code] = "HAS_EVENTS" if events else "CONFIRMED_NO_EVENTS"
+                    rows.extend(events)
                 frames.append(_frame(rows, FACTOR_COLUMNS))
             except Exception as exc:
                 logger.warning("QuantDash adj_factor batch failed: %s", _safe_error(exc))
@@ -258,7 +289,8 @@ class QuantDashProvider:
                 if on_chunk_done:
                     on_chunk_done(i, len(chunks))
         good = [df for df in frames if not df.is_empty()]
-        return pl.concat(good, how="vertical_relaxed") if good else pl.DataFrame()
+        return {"factors": pl.concat(good, how="vertical_relaxed") if good else pl.DataFrame(),
+                "statuses": statuses}
 
     def get_depth_batch(self, symbols):
         symbols = [symbol_code(s) for s in symbols]
