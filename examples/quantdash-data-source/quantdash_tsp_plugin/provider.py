@@ -17,7 +17,7 @@ import polars as pl
 
 from app import secrets_store
 from app.data_providers.base import ProviderRequestError
-from .client import QuantDashClient, probe_candidate
+from .client import BudgetUnavailableError, QuantDashClient, probe_candidate
 from .mapping import (depth_rows, factor_rows, kline_rows, quote_rows,
                       request_ms, symbol_code, audit_trade_units)
 
@@ -90,7 +90,7 @@ def _safe_error(exc):
         return "QuantDash 429 限流；请减少数据能力或降低实时轮询频率"
     if status in (401, 403):
         return "QuantDash 身份验证失败或数据集无访问权限"
-    if isinstance(exc, ValueError):
+    if isinstance(exc, (ValueError, ProviderRequestError, BudgetUnavailableError)):
         # Locally authored messages only; avoid returning vendor URLs or credentials.
         msg = str(exc)
         allowed = ("QuantDash ", "unrequested ", "minute Kline", "daily Kline",
@@ -111,6 +111,7 @@ class QuantDashProvider:
         if not self._key:
             raise ValueError("QuantDash key not configured")
         self._api = QuantDashClient(self._key)
+        self._etf_permission_error = None
 
     def close(self):
         self._api.close()
@@ -198,22 +199,37 @@ class QuantDashProvider:
 
     def get_realtime(self):
         try:
-            df = self._api.call(lambda sdk: sdk.quotes.get(universes="CN_Stock", to_dataframe=True))
+            df = self._api.call(lambda sdk: sdk.quotes.get(universes="CN_Stock", to_dataframe=True),
+                                realtime=True)
             rows = quote_rows(df)
             audit_trade_units(rows)
             if df is not None and hasattr(df, "empty") and not df.empty and not rows:
                 raise ValueError("non-empty snapshot mapped to no rows")
-            return rows
         except Exception as exc:
             logger.warning("QuantDash realtime fetch failed: %s", _safe_error(exc))
             return []
+        if self._etf_permission_error is None:
+            try:
+                etfs = self._api.call(lambda sdk: sdk.quotes.get(universes="CN_ETF", to_dataframe=True),
+                                     realtime=True)
+                etf_rows = quote_rows(etfs)
+                audit_trade_units(etf_rows)
+                if not etf_rows:
+                    raise ValueError("QuantDash ETF realtime returned no valid rows")
+                rows.extend(etf_rows)
+            except Exception as exc:  # noqa: BLE001 - ETF SDK failure must preserve successful stock quotes.
+                error = _safe_error(exc)
+                if getattr(exc, "status_code", None) in (401, 403):
+                    self._etf_permission_error = error
+                logger.warning("QuantDash ETF realtime unavailable; stock snapshot retained: %s", error)
+        return rows
 
     def get_realtime_indices(self, symbols):
         if not symbols:
             return []
         try:
             syms = [symbol_code(s) for s in symbols]
-            df = self._api.call(lambda sdk: sdk.quotes.get(symbols=syms, to_dataframe=True))
+            df = self._api.call(lambda sdk: sdk.quotes.get(symbols=syms, to_dataframe=True), realtime=True)
             return quote_rows(df)
         except Exception as exc:
             logger.warning("QuantDash index quotes unavailable: %s", _safe_error(exc))
@@ -247,15 +263,34 @@ class QuantDashProvider:
     def get_depth_batch(self, symbols):
         symbols = [symbol_code(s) for s in symbols]
         result = {}
-        for symbol in symbols:
+        failed = []
+        skipped = []
+        for index, symbol in enumerate(symbols):
             try:
                 # The personal plan grants single-depth access, but rejects batch.
                 # Keep TSP's batch contract and charge each stock to the shared budget.
-                raw = self._api.call(lambda sdk, code=symbol: sdk.depth.get(code))
-                result.update(depth_rows({symbol: raw}, [symbol]))
+                raw = self._api.call(lambda sdk, code=symbol: sdk.depth.get(code), wait=False)
+                book = depth_rows({symbol: raw}, [symbol])[symbol]
+                if not any(book["bid_prices"] + book["ask_prices"]) or not any(book["bid_volumes"] + book["ask_volumes"]):
+                    raise ValueError("QuantDash empty depth book")
+                result[symbol] = book
+            except BudgetUnavailableError:
+                skipped = symbols[index:]
+                break
             except Exception as exc:
+                failed.append(symbol)
                 logger.warning("QuantDash depth for %s failed: %s", symbol, _safe_error(exc))
-                raise ProviderRequestError(_safe_error(exc)) from None
+                if getattr(exc, "status_code", None) in (401, 429):
+                    skipped = symbols[index + 1:]
+                    break
+        if failed or skipped:
+            logger.warning("QuantDash depth incomplete: requested=%d received=%d failed=%d skipped=%d",
+                           len(symbols), len(result), len(failed), len(skipped))
+        if symbols and not result:
+            raise ProviderRequestError(
+                f"QuantDash depth unavailable: requested={len(symbols)} failed={len(failed)} "
+                f"skipped={len(skipped)}; small queries only, background budget shared with minutes"
+            )
         return result
 
     def test_dataset(self, dataset, symbols=None):
@@ -263,7 +298,7 @@ class QuantDashProvider:
         out = {"provider": self.name, "dataset": dataset, "rows": 0,
                "columns": [], "preview": []}
         try:
-            now = datetime.now()
+            now = datetime.now(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
             if dataset == "daily":
                 data = self.get_daily(samples, now - timedelta(days=15), now)
             elif dataset == "minute":
@@ -282,6 +317,8 @@ class QuantDashProvider:
                     raise ValueError("empty/failed universe snapshot")
                 data = _frame(result[:5], list(result[0]))
                 out["rows"] = len(result)
+                if self._etf_permission_error:
+                    out["warnings"] = [f"ETF 实时未启用：{self._etf_permission_error}"]
             elif dataset == "adj_factor":
                 data = self.get_adj_factors(samples, now - timedelta(days=365), now)
             elif dataset == "depth5":
@@ -289,6 +326,10 @@ class QuantDashProvider:
                 out["rows"] = len(result)
                 out["columns"] = ["symbol", "bid_prices", "bid_volumes", "ask_prices", "ask_volumes", "timestamp"]
                 out["preview"] = [{"symbol": code, **r} for code, r in result.items()][:2]
+                out["requested_symbols"] = samples
+                out["missing_symbols"] = [s for s in samples if s not in result]
+                if out["missing_symbols"]:
+                    out["warnings"] = ["五档仅返回部分标的；缺失标的可能无盘口、无权限或请求预算不足"]
                 return out
             else:
                 out["error"] = "unsupported/undeclared QuantDash dataset"

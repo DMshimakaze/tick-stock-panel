@@ -28,24 +28,39 @@ def _rpm():
 class RollingLimiter:
     """Count actual HTTP requests within a rolling 60s window, including 429s."""
 
-    def __init__(self, limit: int | None = None, *, clock=time.monotonic, sleep=time.sleep):
+    def __init__(self, limit: int | None = None, *, realtime_reserve=0,
+                 clock=time.monotonic, sleep=time.sleep):
         self.limit = limit or _rpm()
+        self.realtime_reserve = min(realtime_reserve, self.limit - 1)
         self.clock = clock
         self.sleep = sleep
         self._lock = threading.Lock()
         self._events = deque()
 
-    def acquire(self):
+    def acquire(self, *, realtime=False, wait=True):
         while True:
             with self._lock:
                 now = self.clock()
-                while self._events and now - self._events[0] >= 60:
+                while self._events and now - self._events[0][0] >= 60:
                     self._events.popleft()
-                if len(self._events) < self.limit:
-                    self._events.append(now)
-                    return
-                delay = max(0.01, 60 - (now - self._events[0]) + 0.05)
+                background = [stamp for stamp, priority in self._events if not priority]
+                background_full = not realtime and len(background) >= self.limit - self.realtime_reserve
+                if len(self._events) < self.limit and not background_full:
+                    self._events.append((now, realtime))
+                    return True
+                if not wait:
+                    return False
+                releases = []
+                if len(self._events) >= self.limit:
+                    releases.append(self._events[0][0] + 60)
+                if background_full:
+                    releases.append(background[0] + 60)
+                delay = max(0.01, max(releases) - now + 0.05)
             self.sleep(delay)
+
+
+class BudgetUnavailableError(RuntimeError):
+    """A nonblocking background request cannot use the reserved quote capacity."""
 
 
 class QuantDashClient:
@@ -55,7 +70,10 @@ class QuantDashClient:
         self._key = key
         self._qd = None
         self._lock = threading.RLock()
-        self.budget = RollingLimiter(rpm)
+        limit = rpm or _rpm()
+        # Stock, ETF and index snapshots every 30s need six requests/minute.
+        self.budget = RollingLimiter(limit, realtime_reserve=6)
+        self._request_context = threading.local()
         self._hooked = False
 
     def _ensure_sdk(self):
@@ -79,15 +97,33 @@ class QuantDashClient:
         return self._qd
 
     def _before_http_request(self, request):  # noqa: ARG002
-        self.budget.acquire()
+        realtime = getattr(self._request_context, "realtime", False)
+        wait = getattr(self._request_context, "wait", True)
+        started = time.monotonic()
+        if not self.budget.acquire(realtime=realtime, wait=wait):
+            raise BudgetUnavailableError("QuantDash background request budget unavailable; realtime capacity is reserved")
+        elapsed = time.monotonic() - started
+        if elapsed > 0.5:
+            logger.info("QuantDash %s waited %.3fs for request budget",
+                        "realtime" if realtime else "background", elapsed)
 
-    def call(self, fn):
-        """Single SDK call. The lock ensures shared SDK session safety."""
+    def call(self, fn, *, realtime=False, wait=True):
+        """HTTPX Client supports threads; only SDK construction needs our lock.
+
+        In particular, a request hook waiting for quota must not hold the SDK
+        initialization lock and block independently authorized quote requests.
+        """
         with self._lock:
             qd = self._ensure_sdk()
+        previous = (getattr(self._request_context, "realtime", False),
+                    getattr(self._request_context, "wait", True))
+        self._request_context.realtime, self._request_context.wait = realtime, wait
+        try:
             if not self._hooked:
-                self.budget.acquire()
+                self._before_http_request(None)
             return fn(qd)
+        finally:
+            self._request_context.realtime, self._request_context.wait = previous
 
     def close(self):
         with self._lock:

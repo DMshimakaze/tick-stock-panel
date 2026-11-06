@@ -59,7 +59,8 @@ class FakeKlines:
 
 class FakeQuotes:
     def get(self, **kwargs):
-        return [{"symbol": "600519.SH", "last_price": 102,
+        symbol = "588170.SH" if kwargs.get("universes") == "CN_ETF" else "600519.SH"
+        return [{"symbol": symbol, "last_price": 102,
                  "prev_close": 100, "open": 100, "high": 103, "low": 99,
                  "volume": 100, "amount": 1020000, "ext": {"name": "茅台"}}]
 
@@ -113,7 +114,7 @@ for name, module in (("polars", polars), ("app", app), ("app.secrets_store", sec
     sys.modules[name] = module
 
 from quantdash_tsp_plugin.provider import QuantDashProvider, availability, probe_api_key
-from quantdash_tsp_plugin.client import RollingLimiter
+from quantdash_tsp_plugin.client import BudgetUnavailableError, RollingLimiter
 
 
 class ProviderTests(unittest.TestCase):
@@ -193,11 +194,66 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.obj._api._qd.depth.single_calls, ["600519.SH", "000001.SZ"])
         batch.assert_not_called()
 
-    def test_depth_single_failure_does_not_return_partial_success(self):
+    def test_depth_single_failure_preserves_other_success_and_reports_missing(self):
         good = FakeDepth().get("600519.SH")
         with (patch.object(FakeDepth, "get", side_effect=[good, PermissionError("single access denied")]),
-              self.assertRaises(RuntimeError)):
-            self.obj.get_depth_batch(["600519.SH", "000001.SZ"])
+              self.assertLogs("quantdash_tsp_plugin.provider", level="WARNING")):
+            result = self.obj.test_dataset("depth5", ["600519.SH", "000001.SZ"])
+        self.assertEqual(result["rows"], 1)
+        self.assertEqual(result["missing_symbols"], ["000001.SZ"])
+        self.assertTrue(result["warnings"])
+
+    def test_etf_failure_keeps_stock_snapshot_and_does_not_repeat_permission_error(self):
+        good = FakeQuotes().get(universes="CN_Stock")
+        denied = RuntimeError("ETF forbidden")
+        denied.status_code = 403
+        with patch.object(FakeQuotes, "get", side_effect=[good, denied, good]) as fetch:
+            first = self.obj.get_realtime()
+            second = self.obj.get_realtime()
+        self.assertEqual([r["symbol"] for r in first], ["600519.SH"])
+        self.assertEqual(second, first)
+        self.assertEqual(fetch.call_count, 3)
+
+    def test_etf_snapshot_is_merged_independently(self):
+        self.assertEqual({r["symbol"] for r in self.obj.get_realtime()}, {"600519.SH", "588170.SH"})
+
+    def test_depth_empty_and_forbidden_symbols_do_not_discard_good_symbol(self):
+        denied = RuntimeError("forbidden")
+        denied.status_code = 403
+        good = FakeDepth().get("600519.SH")
+        with patch.object(FakeDepth, "get", side_effect=[{}, denied, good]):
+            rows = self.obj.get_depth_batch(["000001.SZ", "000002.SZ", "600519.SH"])
+        self.assertEqual(set(rows), {"600519.SH"})
+
+    def test_depth_429_stops_further_requests_and_reports_incomplete(self):
+        limited = RuntimeError("rate limited")
+        limited.status_code = 429
+        good = FakeDepth().get("600519.SH")
+        with patch.object(FakeDepth, "get", side_effect=[good, limited]) as fetch:
+            rows = self.obj.get_depth_batch(["600519.SH", "000001.SZ", "000002.SZ"])
+        self.assertEqual(set(rows), {"600519.SH"})
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_depth_budget_exhaustion_returns_partial_without_waiting(self):
+        good = FakeDepth().get("600519.SH")
+        with patch.object(self.obj._api, "call", side_effect=[good, BudgetUnavailableError()]) as fetch:
+            rows = self.obj.get_depth_batch(["600519.SH", "000001.SZ", "000002.SZ"])
+        self.assertEqual(set(rows), {"600519.SH"})
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_empty_budget_is_reported_as_failure_not_empty_success(self):
+        with patch.object(self.obj._api, "call", side_effect=BudgetUnavailableError()):
+            result = self.obj.test_dataset("depth5", ["600519.SH"])
+        self.assertEqual(result["rows"], 0)
+        self.assertIn("skipped=1", result["error"])
+
+    def test_etf_empty_response_keeps_stocks_and_warns(self):
+        stock = FakeQuotes().get(universes="CN_Stock")
+        with (patch.object(FakeQuotes, "get", side_effect=[stock, []]),
+              self.assertLogs("quantdash_tsp_plugin.provider", level="WARNING") as logs):
+            rows = self.obj.get_realtime()
+        self.assertEqual([r["symbol"] for r in rows], ["600519.SH"])
+        self.assertIn("stock snapshot retained", logs.output[0])
 
     def test_full_minute_uses_host_fallback_and_minute_rejects_other_freq(self):
         self.assertIn("full_minute", self.obj.config.datasets)
@@ -222,6 +278,21 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(call["period"], "1m")
         self.assertEqual(call["start_time"], int(datetime(2026, 11, 6,
                          tzinfo=ZoneInfo("Asia/Shanghai")).timestamp() * 1000))
+
+    def test_trial_windows_use_beijing_on_non_beijing_host(self):
+        class ElsewhereClock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                instant = datetime(2026, 11, 7, 0, 15, tzinfo=ZoneInfo("Asia/Shanghai"))
+                return instant.astimezone(tz) if tz else instant.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+        for dataset, method in (("daily", "get_daily"), ("minute", "get_minute")):
+            with (self.subTest(dataset=dataset),
+                  patch("quantdash_tsp_plugin.provider.datetime", ElsewhereClock),
+                  patch.object(self.obj, method, return_value=FakeDF([{"symbol": "600519.SH"}])) as fetch):
+                result = self.obj.test_dataset(dataset)
+                self.assertNotIn("error", result)
+                self.assertEqual(fetch.call_args.args[2], datetime(2026, 11, 7, 0, 15))
 
     def test_probe_api_key_without_env_side_effect(self):
         result = probe_api_key("candidate-key")
