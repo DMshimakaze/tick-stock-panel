@@ -19,8 +19,10 @@ import sys
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
-from datetime import date
+from datetime import date, datetime
+from datetime import time as dt_time
 from pathlib import Path
 
 import duckdb
@@ -36,7 +38,7 @@ from app.enriched_generation import (
     get_enriched_generation,
     get_enriched_generation_snapshot,
 )
-from app.market_time import cn_today
+from app.market_time import CN_TZ, cn_today
 from app.parquet import scan_enriched_parquet
 from app.polars_guard import guarded_collect
 from app.services.minute_adjust import apply_minute_adjustment, minute_basis_is_raw
@@ -446,6 +448,9 @@ class KlineRepository:
         # 序列化 parquet 分区的读-改-写: 实时轮询线程、手动 refresh、盘后管道
         # 可能并发 merge/flush 同一分区文件, 无锁会互相覆盖丢数据
         self._write_lock = threading.Lock()
+        # 自选/详情定向补齐的最新行。只供展示回退，不能混入全市场当日策略快照。
+        self._prepared_daily_lock = threading.Lock()
+        self._prepared_daily: OrderedDict = OrderedDict()
 
         # ---- Polars 缓存 ----
         self._enriched_cache: pl.DataFrame | None = None       # 最新一天 (~5500行)
@@ -660,6 +665,8 @@ class KlineRepository:
         导致内存里的旧缓存残留 (clear 数据后看板仍显示旧数据的根因)。
         本方法无条件清空, 供清除数据/重置场景调用。
         """
+        with self._prepared_daily_lock:
+            self._prepared_daily.clear()
         self._enriched_cache = None
         self._enriched_cache_date = None
         self._enriched_history_cache = None
@@ -769,7 +776,7 @@ class KlineRepository:
                 from app.indicators.pipeline import compute_enriched_history_window
                 start_full = latest - timedelta(days=300)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                         "volume", "amount", "raw_close", "raw_high", "raw_low"]
+                                         "volume", "amount", "quote_ts", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
                 lf = (
                     scan_enriched_parquet(self._enriched_glob)
@@ -1219,7 +1226,7 @@ class KlineRepository:
             from app.indicators.pipeline import compute_indicators, compute_signals
             start_full = latest - timedelta(days=300)
             read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                     "volume", "amount", "raw_close", "raw_high", "raw_low"]
+                                     "volume", "amount", "quote_ts", "raw_close", "raw_high", "raw_low"]
                          if c in df_latest.columns]
             df_hist = guarded_collect(
                 scan_enriched_parquet(self._etf_enriched_glob,
@@ -1263,7 +1270,7 @@ class KlineRepository:
             from datetime import timedelta
             start_full = latest - timedelta(days=300)
             read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                     "volume", "amount"]
+                                     "volume", "amount", "quote_ts"]
                          if c in df_latest.columns]
             df_hist = guarded_collect(
                 scan_enriched_parquet(self._index_enriched_glob,
@@ -1377,6 +1384,38 @@ class KlineRepository:
                 return pl.DataFrame(), self._index_enriched_cache_date
             return self._index_enriched_cache, self._index_enriched_cache_date
         return pl.DataFrame(), None
+
+    def remember_prepared_daily(self, asset_type: str, frame: pl.DataFrame) -> None:
+        """保留定向补齐的最新展示行，按已有 generation 验证有效性。"""
+        if frame.is_empty():
+            return
+        snapshot = self.get_enriched_generation_snapshot(asset_type)
+        latest = frame.sort("date").unique(subset=["symbol"], keep="last")
+        with self._prepared_daily_lock:
+            for part in latest.partition_by("symbol"):
+                key = (asset_type, part["symbol"][0])
+                day = part["date"][0]
+                self._prepared_daily[key] = (day, snapshot.through(day), part)
+                self._prepared_daily.move_to_end(key)
+            while len(self._prepared_daily) > 1024:
+                self._prepared_daily.popitem(last=False)
+
+    def get_prepared_daily(self, asset_type: str, symbols: list[str]) -> pl.DataFrame:
+        """热路径仅读有界快照与版本标记，不扫描历史文件或访问上游。"""
+        snapshot = self.get_enriched_generation_snapshot(asset_type)
+        parts = []
+        with self._prepared_daily_lock:
+            for symbol in symbols:
+                key = (asset_type, symbol)
+                entry = self._prepared_daily.get(key)
+                if entry is None:
+                    continue
+                day, version, frame = entry
+                if snapshot.through(day) != version:
+                    del self._prepared_daily[key]
+                else:
+                    parts.append(frame)
+        return pl.concat(parts, how="diagonal_relaxed") if parts else pl.DataFrame()
 
     def get_enriched_history(self, target_date: date, lookback_days: int) -> pl.DataFrame | None:
         """返回预计算的 enriched 历史数据 (仅 lookback 范围, 不含 warmup)。
@@ -2359,7 +2398,7 @@ class KlineRepository:
 
     def replace_daily_rows(
         self, asset_type: str, day: date, incoming: pl.DataFrame, *,
-        symbols: list[str] | None, backup_dir: Path,
+        symbols: list[str] | None, backup_dir: Path, remove_symbols: list[str] | None = None,
     ) -> None:
         """修正一个日期的指定股票; symbols=None 仅用于无法读取的整日分区。
 
@@ -2370,12 +2409,22 @@ class KlineRepository:
         part = self.store.data_dir / daily_dirname(asset_type) / f"date={day}"
         self._validate_repair_path(part)
         self._validate_repair_path(backup_dir)
-        if incoming.is_empty() or incoming.filter(pl.col("date") != day).height:
+        removals = set(remove_symbols or [])
+        if ((incoming.is_empty() and not removals)
+                or not {"symbol", "date"}.issubset(incoming.columns)
+                or incoming.filter(pl.col("date") != day).height):
             raise ValueError("修补日K为空或日期与目标分区不符")
-        if symbols is not None and not set(incoming["symbol"].to_list()).issubset(symbols):
+        received = set(incoming["symbol"].to_list())
+        if symbols is not None and not (received | removals).issubset(symbols):
             raise ValueError("修补日K超出目标股票范围")
+        if received & removals:
+            raise ValueError("修补和清理的股票不能重叠")
+        if symbols is not None and set(symbols) != received | removals:
+            raise ValueError("修补日K不完整, 不能丢弃尚未获取的股票")
         paths = sorted(part.glob("*.parquet"))
         fingerprints = {p: self._partition_fingerprint(p) for p in paths}
+        if removals - self.daily_repair_nontrading_symbols(asset_type, day, sorted(removals)):
+            raise ValueError("无法确认待清理记录为非交易记录, 原数据保持不变")
         base = pl.DataFrame()
         if symbols is not None and paths:
             base = pl.concat([pl.read_parquet(p) for p in paths], how="diagonal_relaxed")
@@ -2383,6 +2432,8 @@ class KlineRepository:
         merged = pl.concat([base, incoming], how="diagonal_relaxed").unique(
             subset=["symbol", "date"], keep="last",
         ).sort(["symbol", "date"])
+        if merged.is_empty():
+            raise ValueError("清理后整日日K为空, 需要完整日K数据, 原数据保持不变")
         with self._write_lock:
             if {p: self._partition_fingerprint(p) for p in part.glob("*.parquet")} != fingerprints:
                 raise ValueError("日K在修补期间发生变化, 请重新自检")
@@ -2399,6 +2450,46 @@ class KlineRepository:
 
     def validate_daily_repair_target(self, asset_type: str, day: date) -> None:
         self._validate_repair_path(self.store.data_dir / daily_dirname(asset_type) / f"date={day}")
+
+    def daily_repair_nontrading_symbols(self, asset_type: str, day: date, symbols: list[str]) -> set[str]:
+        """仅确认本地已有的上市前、零成交及旧日快照遗留, 不从源的空返回推断停牌。
+
+        零成交判据沿用 filter_halt_days; 重复行必须全部有依据, 防止删掉同股真实成交。
+        指数的零成交量可能是源缺字段, 不套用股票/ETF 的清理规则。
+        """
+        if not symbols or asset_type not in {"stock", "etf"}:
+            return set()
+        part = self.store.data_dir / daily_dirname(asset_type) / f"date={day}"
+        self._validate_repair_path(part)
+        frames = []
+        for path in sorted(part.glob("*.parquet")):
+            self._validate_repair_path(path)
+            scan = pl.scan_parquet(path)
+            columns = set(scan.collect_schema().names())
+            if "symbol" not in columns:
+                return set()
+            frames.append(scan.filter(pl.col("symbol").is_in(symbols)).select(
+                [c for c in ("symbol", "volume", "amount", "quote_ts") if c in columns],
+            ).collect())
+        if not frames:
+            return set()
+        rows = pl.concat(frames, how="diagonal_relaxed")
+        eligible = pl.lit(False)
+        if {"volume", "amount"}.issubset(rows.columns):
+            eligible = eligible | ((pl.col("volume").cast(pl.Float64, strict=False) == 0)
+                                   & (pl.col("amount").cast(pl.Float64, strict=False) == 0))
+        if "quote_ts" in rows.columns:
+            start_ms = int(datetime.combine(day, dt_time.min, tzinfo=CN_TZ).timestamp() * 1000)
+            ts = pl.col("quote_ts").cast(pl.Int64, strict=False)
+            eligible = eligible | ((ts > 0) & (ts < start_ms))
+        instruments = self.get_instruments_asset(asset_type)
+        if {"symbol", "listing_date"}.issubset(instruments.columns):
+            prelisting = instruments.filter(
+                pl.col("listing_date").cast(pl.Date, strict=False) > day,
+            )["symbol"].to_list()
+            eligible = eligible | pl.col("symbol").is_in(prelisting)
+        confirmed = rows.group_by("symbol").agg(eligible.fill_null(False).all().alias("nontrading"))
+        return set(confirmed.filter(pl.col("nontrading"))["symbol"].to_list())
 
     def daily_repair_files(self, asset_type: str) -> list[Path]:
         """重算原始历史前验证全部输入路径, 不沿目录或文件链接读取。"""

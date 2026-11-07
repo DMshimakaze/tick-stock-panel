@@ -889,7 +889,7 @@ def run_adj_factor_sync(
     repo: KlineRepository,
     capset: CapabilitySet,
     on_progress: ProgressCb | None = None,
-    *, refresh: bool = False,
+    *, refresh: bool = False, retry_only: bool = False,
 ) -> dict:
     """独立同步除权因子(数据页单独按钮)。
 
@@ -921,13 +921,16 @@ def run_adj_factor_sync(
         if callable(getattr(custom.get_provider(adj_provider), "audit_adj_factors", None)):
             from app.services.adjustment_audit import run_unified_sync
 
-            result = run_unified_sync(repo, emit, refresh=refresh)
+            result = run_unified_sync(repo, emit, refresh=refresh, retry_only=retry_only)
             _refresh_single_view(repo, "adj_factor")
             _invalidate("adj_factor")
             _invalidate("enriched")
             unresolved = sum(a["counts"].get(s, 0) for a in result["assets"] for s in ("FAILED", "UNVERIFIED"))
             if unresolved:
                 raise PipelineStageError([f"全市场因子仍有 {unresolved} 只失败或未核实；覆盖记录已保存，可重试未完成批次"])
+            pending = sum(len(a["pending_recompute"]) for a in result["assets"])
+            if pending:
+                raise PipelineStageError([f"因子历史重算仍有 {pending} 只未完成；待重算记录已保留"])
             emit("done", 100, "股票及 ETF 因子审计、受影响历史重算完成")
             return result
 

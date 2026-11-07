@@ -146,11 +146,60 @@ def test_omitted_symbol_is_unverified_not_empty(setup):
     result = audit.sync_asset_factors(repo, asset_type="stock")
     assert result["counts"]["UNVERIFIED"] == 1
     assert result["counts"]["CONFIRMED_NO_EVENTS"] == 1
-    # A completed HTTP response with omitted coverage remains visible, without
-    # repeatedly spending the same day's quota. Explicit refresh can recheck it.
+    # A same-day omitted response is unfinished work, not confirmed coverage.
     repeated = audit.sync_asset_factors(repo, asset_type="stock")
-    assert repeated["requests"] == 0
+    assert repeated["requests"] == 1
+    assert source.calls[-1][0] == [B]
     assert repeated["counts"]["UNVERIFIED"] == 1
+
+
+def test_retry_only_does_not_refresh_verified_symbols_on_next_day(setup, monkeypatch):
+    repo, source = setup
+    seed(repo)
+    source.omit = {B}
+    audit.sync_asset_factors(repo, asset_type="stock")
+    monkeypatch.setattr(audit, "cn_now", lambda: datetime(2026, 11, 7, 21, tzinfo=CN_TZ))
+    source.omit = set()
+    result = audit.sync_asset_factors(repo, asset_type="stock", retry_only=True)
+    assert source.calls[-1][0] == [B]
+    assert result["requested_symbols"] == 1
+    assert result["counts"] == {"HAS_EVENTS": 1, "CONFIRMED_NO_EVENTS": 2}
+
+
+def test_pending_cleared_only_for_successfully_recomputed_symbols(setup, monkeypatch):
+    repo, _ = setup
+    seed(repo)
+    audit.sync_asset_factors(repo, asset_type="stock")
+    state_path = repo.store.data_dir / "adj_factor" / "audit.json"
+    import json
+
+    state = json.loads(state_path.read_text(encoding="utf-8"))
+    state["pending_recompute"] = [A, C]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def partial(repo, asset_type, *, on_symbols_done=None, **kwargs):
+        if on_symbols_done:
+            on_symbols_done([A])
+        return 3
+
+    monkeypatch.setattr(audit, "recompute_daily_symbols", partial)
+    result = audit.sync_asset_factors(repo, asset_type="stock", retry_only=True)
+    assert result["pending_recompute"] == [C]
+
+
+def test_disappearing_event_is_retained_and_reported(setup):
+    repo, source = setup
+    seed(repo)
+    audit.sync_asset_factors(repo, asset_type="stock")
+    factor_path = repo.store.data_dir / "adj_factor" / "all.parquet"
+    before = factor_path.stat().st_mtime_ns
+    source.events = []
+    result = audit.sync_asset_factors(repo, asset_type="stock", refresh=True)
+    assert result["counts"]["UNVERIFIED"] == 1
+    assert factor_path.stat().st_mtime_ns == before
+    assert pl.read_parquet(factor_path)["ex_factor"][0] == 2.0
+    record = kline_sync.read_adj_factor_coverage(repo.store.data_dir, "stock")["records"][A]
+    assert "已保存事件" in record["error"]
 
 
 @pytest.mark.parametrize("factor", [0, -1, float("nan"), float("inf")])
@@ -217,18 +266,19 @@ def test_daily_api_fallback_uses_factor_route_without_tickflow_permission(setup,
     from fastapi.testclient import TestClient
 
     from app.api import kline
+    from app.tickflow.capabilities import CapabilitySet
 
     repo, source = setup
     app = FastAPI()
     app.include_router(kline.router)
     app.state.repo = repo
-    app.state.capabilities = SimpleNamespace(has=lambda cap: False)
+    app.state.capabilities = CapabilitySet()
     monkeypatch.setattr(repo, "resolve_asset_type", lambda symbol: asset_type)
     monkeypatch.setattr(repo, "get_daily_asset", lambda *a: pl.DataFrame())
     monkeypatch.setattr(kline, "_get_stock_info", lambda *a: {})
     monkeypatch.setattr(kline, "_get_asset_info", lambda *a: {})
     monkeypatch.setattr(kline, "_maybe_inject_live_candle", lambda request, symbol, rows, asset: rows)
-    monkeypatch.setattr(kline_sync, "fetch_daily_for_chart", lambda *a: bars(A, [10.0, 5.0, 5.2]))
+    monkeypatch.setattr(kline_sync, "fetch_daily_for_chart", lambda *a, **k: bars(A, [10.0, 5.0, 5.2]))
     monkeypatch.setattr(audit.custom, "provider_has_dataset", lambda *a: True)
     monkeypatch.setattr(kline_sync, "get_client", lambda: pytest.fail("must not call TickFlow"))
     source.get_adj_factors = lambda *a, **k: pl.DataFrame([event()])
@@ -284,8 +334,9 @@ def test_new_mixed_minute_batch_persists_etf_separately(setup, monkeypatch):
     monkeypatch.setattr(kline_sync, "resolve_limit", lambda *a, **k: SimpleNamespace(batch=100, rpm=30))
 
     def fetch(symbols, **kwargs):
-        kwargs["on_segment"](frame)
-        return frame
+        selected = frame.filter(pl.col("symbol").is_in(symbols))
+        kwargs["on_segment"](selected)
+        return selected
 
     monkeypatch.setattr(kline_sync, "sync_minute_batch", fetch)
     assert kline_sync.sync_and_persist_minute([A, etf], repo, SimpleNamespace(has=lambda cap: True)) == 6

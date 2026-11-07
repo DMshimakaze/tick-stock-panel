@@ -1529,6 +1529,7 @@ def _compute_storage_batches(
 def recompute_daily_symbols(
     repo, asset_type: str, *, start: date, symbols: list[str] | None,
     on_batch_done: Callable[[int, int], None] | None = None,
+    on_symbols_done: Callable[[list[str]], None] | None = None,
 ) -> int:
     """修补后按股票重算: 输入使用完整本地原始历史, 只发布 start 起的受影响行。
 
@@ -1554,6 +1555,7 @@ def recompute_daily_symbols(
                                      claim_wait_s=_PUBLICATION_CLAIM_WAIT_S, purpose="daily_repair")
     written = 0
     total = (len(selected) + batch_size - 1) // batch_size
+    completed = set()
     try:
         for offset in range(0, len(selected), batch_size):
             batch = selected[offset:offset + batch_size]
@@ -1579,6 +1581,8 @@ def recompute_daily_symbols(
             )
             output = _select_storage_cols(enriched.filter(pl.col("date") >= start))
             written += repo.replace_enriched_rows(asset_type, output, start=start, symbols=batch, publication=publication)
+            if not output.is_empty():
+                completed.update(output["symbol"].unique().to_list())
             publication.heartbeat()
             if on_batch_done:
                 on_batch_done(offset // batch_size + 1, total)
@@ -1589,6 +1593,8 @@ def recompute_daily_symbols(
     table = enriched_dirname(asset_type)
     repo.refresh_view("kline_enriched" if asset_type == "stock" else table, str(root / table / "**/*.parquet"))
     repo.invalidate_enriched_asset(asset_type)
+    if on_symbols_done:
+        on_symbols_done(sorted(completed))
     return written
 
 

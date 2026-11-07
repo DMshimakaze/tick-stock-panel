@@ -108,7 +108,7 @@ async def _submit_job(repo, quote_service, make_run) -> dict:
 
 
 @router.post("/adj-factor/run")
-async def run_adj_factor_now(request: Request, refresh: bool = False) -> dict:
+async def run_adj_factor_now(request: Request, refresh: bool = False, retry_only: bool = False) -> dict:
     """独立同步除权因子(全历史 + 受影响个股 enriched 局部重算), 任务化+进度轮询。
 
     与盘后管道共用单飞与重任务槽 (两者写同一批 parquet); 门控与矩阵
@@ -127,7 +127,9 @@ async def run_adj_factor_now(request: Request, refresh: bool = False) -> dict:
     return await _submit_job(
         repo,
         getattr(request.app.state, "quote_service", None),
-        lambda progress: (lambda: daily_pipeline.run_adj_factor_sync(repo, capset, on_progress=progress, refresh=refresh)),
+        lambda progress: (lambda: daily_pipeline.run_adj_factor_sync(
+            repo, capset, on_progress=progress, refresh=refresh, retry_only=retry_only,
+        )),
     )
 
 

@@ -74,7 +74,7 @@ def collect_universe(data_dir: Path, asset_type: str) -> list[dict]:
     return [universe[s] for s in sorted(universe)]
 
 
-def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False) -> dict:
+def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False, retry_only=False) -> dict:
     """Audit all symbols, persist unfinished work, then rebuild changed histories.
 
     A completed same-day symbol is reused. On subsequent trading days the source
@@ -113,8 +113,10 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
             record["status"] = "UNVERIFIED"
             record["through"] = None
             record["history_start"] = item["history_start"]
-    requested = [r for r in universe if refresh or records[r["symbol"]].get("through") != today
-                 or records[r["symbol"]]["status"] == "FAILED"]
+    requested = [r for r in universe
+                 if (not retry_only or records[r["symbol"]]["status"] not in VERIFIED)
+                 and (refresh or records[r["symbol"]].get("through") != today
+                      or records[r["symbol"]]["status"] in {"UNVERIFIED", "FAILED"})]
     batches = [requested[i:i + BATCH_SIZE] for i in range(0, len(requested), BATCH_SIZE)]
     added = corrected = calls = retries = 0
     changed: set[str] = set()
@@ -147,6 +149,7 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
                 if item["history_start"] and not events.is_empty():
                     events = events.filter(pl.col("trade_date") >= date.fromisoformat(item["history_start"]))
                 status = statuses.get(symbol, "UNVERIFIED")
+                coverage_error = result.get("errors", {}).get(symbol)
                 if status in VERIFIED:
                     status = "HAS_EVENTS" if not events.is_empty() else "CONFIRMED_NO_EVENTS"
                     previous = existing.filter(pl.col("symbol") == symbol) if not existing.is_empty() else pl.DataFrame()
@@ -158,12 +161,15 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
                         events, on=["symbol", "trade_date"], how="anti",
                     ).height):
                         status = "UNVERIFIED"
+                        coverage_error = "源响应缺少已保存事件；旧事件保留，撤销未确认"
                     if not events.is_empty():
                         selected.append(events)
                 records[symbol].update(status=status, events=events.height,
                                        history_start=item["history_start"], through=today)
-                if status == "FAILED":
-                    records[symbol]["error"] = result.get("errors", {}).get(symbol, "无效的源事件因子")
+                if status in {"FAILED", "UNVERIFIED"}:
+                    records[symbol]["error"] = coverage_error or (
+                        "无效的源事件因子" if status == "FAILED" else "源未返回该证券的明确事件列表"
+                    )
                 else:
                     records[symbol].pop("error", None)
             incoming = pl.concat(selected, how="diagonal_relaxed") if selected else pl.DataFrame()
@@ -179,7 +185,7 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
 
                 def remember_changed(symbols_changed):
                     changed.update(symbols_changed)
-                    pending.update(symbols_changed)
+                    pending.update(s for s in symbols_changed if by_symbol[s].get("daily_start"))
                     # Persist before factor publication: interruption must never lose rebuild work.
                     save()
 
@@ -198,12 +204,18 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
 
     to_recompute = [s for s in sorted(pending) if s in by_symbol and by_symbol[s].get("daily_start")]
     rows = 0
+    completed = set()
+
+    def remember_completed(symbols_done):
+        completed.update(symbols_done)
+        pending.difference_update(symbols_done)
+        save()
+
     if to_recompute:
         rows = recompute_daily_symbols(
             repo, asset_type, start=date.fromisoformat(min(by_symbol[s]["daily_start"] for s in to_recompute)),
-            symbols=to_recompute, on_batch_done=on_progress,
+            symbols=to_recompute, on_batch_done=on_progress, on_symbols_done=remember_completed,
         )
-    pending.difference_update(s for s in pending.copy() if s in by_symbol)
     save()
     counts = Counter(records[r["symbol"]]["status"] for r in universe)
     exchange_counts = {}
@@ -216,14 +228,15 @@ def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False
             "events": sum(records[r["symbol"]].get("events", 0) for r in universe
                           if records[r["symbol"]]["status"] in VERIFIED),
             "new_events": added, "corrected_events": corrected, "changed_symbols": sorted(changed),
-            "recomputed_symbols": len(to_recompute), "recomputed_rows": rows,
+            "recomputed_symbols": len(completed), "recompute_attempted_symbols": len(to_recompute),
+            "recomputed_rows": rows,
             "pending_recompute": sorted(pending)}
     state.setdefault("runs", []).append({"time_beijing": cn_now().isoformat(), **result})
     save()
     return result
 
 
-def run_unified_sync(repo, on_progress=None, *, refresh=False) -> dict:
+def run_unified_sync(repo, on_progress=None, *, refresh=False, retry_only=False) -> dict:
     results = []
     for asset_type in ("stock", "etf"):
         def progress(current, total, asset=asset_type):
@@ -231,7 +244,7 @@ def run_unified_sync(repo, on_progress=None, *, refresh=False) -> dict:
                 on_progress("sync_adj", 10 + int(75 * current / max(1, total)),
                             f"{asset} 因子审计/历史重算 {current}/{total}", skip_log=True)
         results.append(sync_asset_factors(repo, asset_type=asset_type,
-                                          on_progress=progress, refresh=refresh))
+                                          on_progress=progress, refresh=refresh, retry_only=retry_only))
     return {"assets": results, "universe_size": sum(r["universe"] for r in results),
             "adj_factor_symbols": sum(len(r["changed_symbols"]) for r in results),
             "adj_written": sum(r["new_events"] for r in results),
