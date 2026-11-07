@@ -258,6 +258,39 @@ class ProviderTests(unittest.TestCase):
     def test_etf_snapshot_is_merged_independently(self):
         self.assertEqual({r["symbol"] for r in self.obj.get_realtime()}, {"600519.SH", "588170.SH"})
 
+    def test_on_demand_quotes_are_deduplicated_bounded_and_nonblocking(self):
+        symbols = ["588170.SH", "588170.SH"] + [f"{588200+i}.SH" for i in range(110)]
+        row = FakeQuotes().get(universes="CN_ETF")
+        with (patch.object(FakeQuotes, "get", return_value=row) as fetch,
+              patch.object(self.obj._api, "call", wraps=self.obj._api.call) as budget):
+            rows = self.obj.get_realtime_symbols(symbols, asset_type="etf")
+        self.assertEqual([r["symbol"] for r in rows], ["588170.SH"])
+        self.assertEqual(len(fetch.call_args.kwargs["symbols"]), 100)
+        self.assertEqual(len(set(fetch.call_args.kwargs["symbols"])), 100)
+        self.assertEqual(budget.call_args.kwargs, {"wait": False})
+
+    def test_on_demand_budget_exhaustion_returns_without_waiting(self):
+        with patch.object(self.obj._api, "call", side_effect=BudgetUnavailableError()) as fetch:
+            self.assertIsNone(self.obj.get_realtime_symbols(["600519.SH"]))
+        self.assertEqual(fetch.call_args.kwargs, {"wait": False})
+
+    def test_on_demand_etf_permission_failure_preserves_stock_access(self):
+        denied = RuntimeError("ETF forbidden")
+        denied.status_code = 403
+        stock = FakeQuotes().get(universes="CN_Stock")
+        with patch.object(FakeQuotes, "get", side_effect=[denied, stock]) as fetch:
+            self.assertIsNone(self.obj.get_realtime_symbols(["588170.SH"], asset_type="etf"))
+            self.assertIsNone(self.obj.get_realtime_symbols(["588170.SH"], asset_type="etf"))
+            self.assertEqual(len(self.obj.get_realtime_symbols(["600519.SH"])), 1)
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_on_demand_empty_request_and_unrequested_response(self):
+        with patch.object(self.obj._api, "call") as fetch:
+            self.assertEqual(self.obj.get_realtime_symbols([]), [])
+            fetch.assert_not_called()
+        with patch.object(FakeQuotes, "get", return_value=FakeQuotes().get(universes="CN_ETF")):
+            self.assertIsNone(self.obj.get_realtime_symbols(["600519.SH"]))
+
     def test_depth_empty_and_forbidden_symbols_do_not_discard_good_symbol(self):
         denied = RuntimeError("forbidden")
         denied.status_code = 403

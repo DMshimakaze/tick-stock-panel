@@ -58,7 +58,9 @@ def bundle(version="1.0.0", *, code=CODE, extra=None, **changes):
         archive.writestr("provider.py", code)
         archive.writestr("client.py", f"price = {int(version.split('.')[0])}\n")
         for name, value in (extra or {}).items():
-            archive.writestr(name, value)
+            info = zipfile.ZipInfo(name)
+            info.filename = name  # Preserve intentionally malformed ZIP names on Windows.
+            archive.writestr(info, value)
     return buf.getvalue()
 
 

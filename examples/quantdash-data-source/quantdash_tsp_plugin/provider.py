@@ -235,6 +235,34 @@ class QuantDashProvider:
             logger.warning("QuantDash index quotes unavailable: %s", _safe_error(exc))
             return None
 
+    def get_realtime_symbols(self, symbols, *, asset_type="stock"):
+        """Fill v0.3.32 detail demand without delaying the shared snapshot worker."""
+        if asset_type not in ("stock", "etf"):
+            raise ValueError("unsupported on-demand quote asset")
+        if asset_type == "etf" and self._etf_permission_error:
+            return None
+        requested = list(dict.fromkeys(symbol_code(s) for s in symbols))[:BATCH]
+        if not requested:
+            return []
+        try:
+            raw = self._api.call(
+                lambda sdk: sdk.quotes.get(symbols=requested, to_dataframe=True),
+                wait=False,
+            )
+            rows = quote_rows(raw)
+            if any(row["symbol"] not in requested for row in rows):
+                raise ValueError("unrequested on-demand quote symbol")
+            audit_trade_units(rows)
+            logger.info("QuantDash %s on-demand quotes: requested=%d received=%d",
+                        asset_type, len(requested), len(rows))
+            return rows
+        except Exception as exc:  # noqa: BLE001 -- retain the successful universe snapshot
+            error = _safe_error(exc)
+            if asset_type == "etf" and getattr(exc, "status_code", None) in (401, 403):
+                self._etf_permission_error = error
+            logger.warning("QuantDash %s on-demand quotes unavailable: %s", asset_type, error)
+            return None
+
     def get_adj_factors(self, symbols, start_time=None, end_time=None,
                         asset_type="stock", on_chunk_done=None):
         result = self.audit_adj_factors(symbols, start_time, end_time,

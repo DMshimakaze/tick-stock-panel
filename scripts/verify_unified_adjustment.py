@@ -116,6 +116,9 @@ def verify_reference(payload: dict) -> tuple[dict, pl.DataFrame]:
         raw_latest = raw.filter(pl.col("symbol") == symbol).sort("date").tail(1)
         summary[symbol] = {"rows": rows.height, "start": str(rows["date"].min()),
                            "end": str(rows["date"].max()), "events": events.height,
+                           "raw_rows": raw.filter(pl.col("symbol") == symbol).height,
+                           "forward_rows": forward.filter(pl.col("symbol") == symbol).height,
+                           "source_missing_rows": raw.filter(pl.col("symbol") == symbol).height - rows.height,
                            "max_ohlc_abs_error": errors, "boundaries": boundaries,
                            "latest_anchor_error": abs(latest["close"][0] - raw_latest["close"][0])}
         if max(errors.values()) > 1e-7:
@@ -161,8 +164,15 @@ def main():
                 rows = pl.DataFrame([{k: r.get(k) for k in columns} for r in api_rows], infer_schema_length=None).with_columns(pl.col("date").str.to_date())
                 compared = expected.join(rows, on=["symbol", "date"], suffix="_api")
                 summary[symbol]["api_rows_compared"] = compared.height
+                summary[symbol]["api_rows"] = rows.height
+                summary[symbol]["reference_rows_outside_api_history"] = expected.height - compared.height
+                summary[symbol]["api_rows_without_reference"] = rows.height - compared.height
+                summary[symbol]["api_max_ohlc_abs_error"] = {
+                    c: (compared[c] - compared[c + "_api"]).abs().max() if compared.height else None
+                    for c in ("open", "high", "low", "close")
+                }
                 summary[symbol]["api_max_close_error"] = (compared["close"] - compared["close_api"]).abs().max() if compared.height else None
-                if compared.height and summary[symbol]["api_max_close_error"] > 1e-7:
+                if compared.height and max(summary[symbol]["api_max_ohlc_abs_error"].values()) > 1e-7:
                     raise ValueError(f"{symbol} API 前复权价格与源参考不一致")
                 means = {}
                 for period in (5, 10, 20, 60):

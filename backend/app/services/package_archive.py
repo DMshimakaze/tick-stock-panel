@@ -33,7 +33,8 @@ def read_code_archive(data: bytes, *, frontend: bool = False) -> dict[str, bytes
             if len(archive.infolist()) > 1000:
                 raise ValueError("插件包条目超过 1000")
             for info in archive.infolist():
-                name = info.filename
+                # ZipInfo normalizes backslashes on Windows; validate the stored name.
+                name = info.orig_filename
                 parts = PurePosixPath(name).parts
                 if (not parts or name.startswith("/") or "\\" in name or ":" in name
                         or any(p in (".", "..") or p.endswith((".", " ")) or p.split(".")[0].upper() in reserved for p in parts)

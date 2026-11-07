@@ -417,7 +417,12 @@ def test_repair_rejects_linked_history_and_preserves_outside_file(env, table):
     original = path.read_bytes()
     outside.write_bytes(original)
     path.unlink()
-    path.symlink_to(outside)
+    try:
+        path.symlink_to(outside)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows 未授予符号链接权限")
+        raise
     report = integrity_check.run_check(env.root, asset_types=["stock"])
     with pytest.raises(ValueError, match=r"链接|目录以外"):
         integrity_check.run_repair(env.repo, env.caps, report["id"])

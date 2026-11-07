@@ -175,24 +175,25 @@ def _partition_problem(
         if not path.resolve().is_relative_to(root.resolve()):
             return "corrupt", "文件链接指向数据目录以外, 请手动检查目录", (), ()
         try:
-            parquet = pq.ParquetFile(path)
-            rows += parquet.metadata.num_rows
-            if not deep:
-                continue
-            if not set(DAILY_REQUIRED).issubset(parquet.schema.names):
-                bad.append(path.name)
-                reasons.append("日K字段不完整")
-                unknown_symbols = True
-                continue
-            columns = [*DAILY_REQUIRED, *(["amount"] if "amount" in parquet.schema.names else [])]
-            for batch in parquet.iter_batches(batch_size=65536, columns=columns):
-                invalid = invalid_daily_rows(pl.from_arrow(batch), day)
-                if not invalid.is_empty():
+            # A corrupt footer can fail construction; own the stream so Windows releases it too.
+            with path.open("rb") as source, pq.ParquetFile(source) as parquet:
+                rows += parquet.metadata.num_rows
+                if not deep:
+                    continue
+                if not set(DAILY_REQUIRED).issubset(parquet.schema.names):
                     bad.append(path.name)
-                    reasons.append(_invalid_daily_reason(invalid, day))
-                    values = invalid["symbol"].unique().to_list()
-                    unknown_symbols |= any(s is None or not s.strip() for s in values)
-                    symbols.update(s for s in values if s and s.strip())
+                    reasons.append("日K字段不完整")
+                    unknown_symbols = True
+                    continue
+                columns = [*DAILY_REQUIRED, *(["amount"] if "amount" in parquet.schema.names else [])]
+                for batch in parquet.iter_batches(batch_size=65536, columns=columns):
+                    invalid = invalid_daily_rows(pl.from_arrow(batch), day)
+                    if not invalid.is_empty():
+                        bad.append(path.name)
+                        reasons.append(_invalid_daily_reason(invalid, day))
+                        values = invalid["symbol"].unique().to_list()
+                        unknown_symbols |= any(s is None or not s.strip() for s in values)
+                        symbols.update(s for s in values if s and s.strip())
         except Exception as exc:  # noqa: BLE001 — 单文件失败记录为检查问题, 继续检查其他文件
             logger.warning("日K文件检查失败 %s: %s", path, exc)
             bad.append(path.name)

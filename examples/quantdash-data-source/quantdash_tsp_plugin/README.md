@@ -66,7 +66,7 @@ uv pip install --python $py 'quantdash==0.1.0'
 
 ## 安装与启用
 
-1. 启动 TSP。打开 **设置 → 导入与备份 → 安装数据源插件**，选择 `TSP-QuantDash-Plugin-v1.2.5.zip`（ZIP 根目录必须直接是 `plugin.yaml`）。
+1. 启动 TSP。打开 **设置 → 导入与备份 → 安装数据源插件**，选择 `TSP-QuantDash-Plugin-v1.2.6.zip`（ZIP 根目录必须直接是 `plugin.yaml`）。
 2. 在新增 **QuantDash（个人订阅）** 卡片填写 Key。先探后存；不要在 Git 或聊天中提交 Key。
 3. 在数据源详情中分别点击「试拉」：先日 K（`600519.SH`）、分钟 K（`600519.SH`）、实时行情。一个数据集通过再路由一个，不要首次就开启所有能力。
 4. 在 TSP 设置中将 **实时轮询间隔设置为不少于 30 秒**，检查是否有 429、空页、单位告警。默认本插件请求预算 `TSP_QUANTDASH_RPM=12`；仅约束 TSP 进程内部请求，其他进程不共享。
@@ -111,7 +111,11 @@ $py = Join-Path $root 'backend\.venv\Scripts\python.exe'
 
 验收脚本可通过现有 `/api/settings/data-sources/test` 传 `dataset="adjustment_reference"` 和至多两个样本，取得近两年源原始日K、源前复权日K及事件帧，用正式 TSP 投影做逐日数值对照。该诊断复用主服务 provider 的共享预算，只读返回，不写原始行情。
 
-配套宿主改动通过已有 `POST /api/pipeline/adj-factor/run` 审计维表与全部原始日K/分钟K代码的并集，覆盖股票及 ETF，逐批使用运行中 provider 的共享请求预算。首次从各证券的本地最早历史起核实；没有本地历史时核实源可提供的完整事件历史。QuantDash 因子接口不设 count，后续交易日同样取完整小事件链进行差分，兼顾历史更正；当天成功结果直接复用，`?refresh=true` 可重新核实。
+配套宿主改动通过已有 `POST /api/pipeline/adj-factor/run` 审计维表与全部原始日K/分钟K代码的并集，覆盖股票及 ETF，逐批使用运行中 provider 的共享请求预算。首次从各证券的本地最早历史起核实；没有本地历史时核实源可提供的完整事件历史。QuantDash 因子接口不设 count，后续交易日同样取完整小事件链进行差分，兼顾历史更正；当天已确认结果直接复用，未核实或失败的代码可续跑。`?retry_only=true` 只重试未确认集合，不刷新其他证券；`?refresh=true` 重新核实全部范围。源漏掉已保存事件时保留旧事件并报告差异，不能擅自认定撤销。
+
+## v1.2.6 与 TSP v0.3.32
+
+实现宿主可选的 `get_realtime_symbols(symbols, asset_type=...)`。全市场快照缺少详情或自选所需代码时，宿主按股票、ETF 分开补拉；插件去重后最多请求 100 个代码。补拉使用原 SDK 实例及原共享预算，预算不足即返回未完成，不等待或占用实时预留容量；ETF 权限失败保留股票快照，不跨源回退。SDK/Polars 依赖和插件名称不变，旧宿主无需调用该可选方法。
 
 覆盖及待重算清单位于各资产因子目录的 `audit.json`。因子写入前持久化待重算证券，中断或 429 后再次运行只处理未完成部分；因子发生变化时复用正式 `recompute_daily_symbols` 重建该证券全部本地必要日K历史。重复事件不改文件时间，也不重算。分钟读取共用事件链，价格和投影成交额同乘比例以保持 VWAP，原始价格、量、额不改写。指数跳过因子。
 

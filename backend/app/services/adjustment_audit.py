@@ -77,7 +77,8 @@ def collect_universe(data_dir: Path, asset_type: str) -> list[dict]:
 def sync_asset_factors(repo, *, asset_type: str, on_progress=None, refresh=False, retry_only=False) -> dict:
     """Audit all symbols, persist unfinished work, then rebuild changed histories.
 
-    A completed same-day symbol is reused. On subsequent trading days the source
+    A verified same-day symbol is reused; unfinished symbols remain retryable.
+    retry_only excludes verified symbols even on subsequent days. Normally the source
     is queried again; QuantDash supplies the entire event chain at the same HTTP
     cost, so old corrections are included rather than hidden by a recent window.
     """

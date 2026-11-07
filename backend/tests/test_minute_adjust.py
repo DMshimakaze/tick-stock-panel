@@ -99,6 +99,9 @@ def test_apply_adjustment_identity_cases(tmp_path):
     out_no_factors = minute_adjust.apply_minute_adjustment(df, tmp_path, "stock")
     assert out_no_factors.equals(df)
 
+    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
+    assert minute_adjust.apply_minute_adjustment(df, tmp_path, "index").equals(df)
+
     _write_factor_table(tmp_path, [(BB, EX_DATE, EX_FACTOR)])
     out_no_events = minute_adjust.apply_minute_adjustment(df, tmp_path, "stock")
     assert out_no_events.equals(df)

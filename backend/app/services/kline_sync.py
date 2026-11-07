@@ -1725,7 +1725,7 @@ def fetch_adj_factor_single(
         return pl.DataFrame()
     try:
         raw = get_client().klines.ex_factors([symbol], as_dataframe=False, show_progress=False)
-    except Exception as exc:  # noqa: BLE001 -- preserve the native strict/soft boundary
+    except Exception as exc:
         logger.warning("fetch_adj_factor_single(%s) failed: %s", symbol, exc)
         if strict:
             raise ProviderRequestError("复权因子获取失败") from exc
@@ -1741,7 +1741,8 @@ def fetch_daily_for_chart(repo, capset, symbol, asset_type, start_time, end_time
     files = sorted((Path(repo.store.data_dir) / daily_dirname(asset_type)).glob("date=*/*.parquet"))
     if files:
         raw = scan_daily_parquet(files).filter(
-            (pl.col("symbol") == symbol) & (pl.col("date") <= end_time.date())
+            (pl.col("symbol") == symbol)
+            & pl.col("date").is_between(start_time.date(), end_time.date())
         ).collect(engine="streaming")
         if not raw.is_empty():
             return raw
