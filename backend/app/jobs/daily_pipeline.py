@@ -410,7 +410,25 @@ def run_now(
     affected_symbols: list[str] = []
     adj_provider = _prefs.get_adj_factor_provider()
     can_sync_adj = capset.has(Cap.ADJ_FACTOR) or adj_provider != "tickflow"
-    if can_sync_adj:
+    unified_adjustment = None
+    from app.data_providers import custom as custom_sources
+    audited_source = adj_provider != "tickflow" and callable(
+        getattr(custom_sources.get_provider(adj_provider), "audit_adj_factors", None)
+    )
+    if audited_source:
+        from app.services.adjustment_audit import run_unified_sync
+
+        unified_adjustment = run_unified_sync(repo, emit)
+        written_adj = unified_adjustment["adj_written"]
+        # 两种资产均已通过正式 enriched 管道重算, 下方只处理日K新增区间。
+        for asset in unified_adjustment["assets"]:
+            unresolved = sum(asset["counts"].get(s, 0) for s in ("FAILED", "UNVERIFIED"))
+            if unresolved:
+                stage_errors.append(f"{asset['asset_type']} 因子仍有 {unresolved} 只失败或未核实")
+        _refresh_single_view(repo, "adj_factor")
+        _invalidate("adj_factor")
+        _invalidate("enriched")
+    elif can_sync_adj:
         from datetime import datetime, timedelta
         adj_end = datetime.now()
         if daily_range_start is not None:
@@ -604,7 +622,7 @@ def run_now(
                 etf_inst = repo.get_etf_instruments()
                 if not etf_inst.is_empty() and "symbol" in etf_inst.columns:
                     etf_symbols = sorted(set(etf_inst["symbol"].to_list()))
-                if etf_symbols and capset.has(Cap.ADJ_FACTOR):
+                if etf_symbols and can_sync_adj and not audited_source:
                     try:
                         emit("sync_index", 88, "同步 ETF 除权因子…")
                         from datetime import datetime, timedelta
@@ -621,6 +639,15 @@ def run_now(
                             end_time=adj_end,
                         )
                         etf_adj_symbols = len(affected_etfs)
+                        if affected_etfs:
+                            from app.indicators.pipeline import recompute_daily_symbols
+                            from app.services.adjustment_audit import collect_universe
+
+                            starts = [r["daily_start"] for r in collect_universe(repo.store.data_dir, "etf")
+                                      if r["symbol"] in affected_etfs and r.get("daily_start")]
+                            if starts:
+                                recompute_daily_symbols(repo, "etf", start=_date.fromisoformat(min(starts)),
+                                                        symbols=affected_etfs)
                         emit("sync_index", 88, f"ETF 除权因子完成,{etf_adj_symbols} 只")
                     except Exception as e:  # noqa: BLE001
                         logger.warning("ETF adj_factor skipped: %s", e)
@@ -807,7 +834,8 @@ def run_now(
     result = {
         "universe_size": len(universe),
         "daily_days": new_daily_days,
-        "adj_factor_symbols": len(affected_symbols),
+        "adj_factor_symbols": unified_adjustment["adj_factor_symbols"] if unified_adjustment else len(affected_symbols),
+        "unified_adjustment": unified_adjustment,
         "enriched_days": written_enriched,
         "index_count": index_count,
         "index_daily_rows": written_index_daily,
@@ -861,6 +889,7 @@ def run_adj_factor_sync(
     repo: KlineRepository,
     capset: CapabilitySet,
     on_progress: ProgressCb | None = None,
+    *, refresh: bool = False, retry_only: bool = False,
 ) -> dict:
     """独立同步除权因子(数据页单独按钮)。
 
@@ -885,6 +914,25 @@ def run_adj_factor_sync(
             "skipped_stages": ["sync_adj"],
             "reason": "无可用除权因子数据源",
         }
+
+    if adj_provider != "tickflow":
+        from app.data_providers import custom
+
+        if callable(getattr(custom.get_provider(adj_provider), "audit_adj_factors", None)):
+            from app.services.adjustment_audit import run_unified_sync
+
+            result = run_unified_sync(repo, emit, refresh=refresh, retry_only=retry_only)
+            _refresh_single_view(repo, "adj_factor")
+            _invalidate("adj_factor")
+            _invalidate("enriched")
+            unresolved = sum(a["counts"].get(s, 0) for a in result["assets"] for s in ("FAILED", "UNVERIFIED"))
+            if unresolved:
+                raise PipelineStageError([f"全市场因子仍有 {unresolved} 只失败或未核实；覆盖记录已保存，可重试未完成批次"])
+            pending = sum(len(a["pending_recompute"]) for a in result["assets"])
+            if pending:
+                raise PipelineStageError([f"因子历史重算仍有 {pending} 只未完成；待重算记录已保留"])
+            emit("done", 100, "股票及 ETF 因子审计、受影响历史重算完成")
+            return result
 
     emit("resolve_universe", 5, "解析标的池…")
     universe = _resolve_universe(capset, repo)

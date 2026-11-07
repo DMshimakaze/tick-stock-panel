@@ -1,5 +1,5 @@
 """详情缺数补拉必须遵循日K/复权数据源及查询窗口。"""
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -109,3 +109,20 @@ def test_adjustment_failure_cannot_be_published_as_unadjusted_history(monkeypatc
     ))
     with pytest.raises(kline_sync.ProviderRequestError, match="复权因子"):
         kline_sync.fetch_adj_factor_single(ETF, capset=capset, strict=True)
+
+
+def test_chart_raw_cache_outside_window_does_not_hide_selected_source(route):
+    request, calls, tickflow = route
+    repo = request.app.state.repo
+    repo.append_etf_daily(pl.DataFrame({
+        "symbol": [ETF], "date": [date(2025, 1, 2)], "open": [2.0],
+        "high": [2.0], "low": [2.0], "close": [2.0],
+        "volume": [100.0], "amount": [20000.0],
+    }))
+    result = kline_sync.fetch_daily_for_chart(
+        repo, CapabilitySet(), ETF, "etf",
+        datetime(2026, 11, 4), datetime(2026, 11, 4, 23, 59),
+    )
+    assert result["date"].to_list() == [DAY]
+    assert calls[0][0] == [ETF]
+    tickflow.assert_not_called()

@@ -19,6 +19,31 @@ def _service(*, batch: int = 2, rpm: int = 30) -> DepthService:
     return service
 
 
+def test_disabled_depth_monitor_skips_boot_and_scheduled_network_fetch(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(service, "_has_capability", lambda: True)
+    monkeypatch.setattr(service, "_persisted_for_date", lambda day: False)
+    fetch = MagicMock()
+    monkeypatch.setattr(service, "_fetch_and_seal", fetch)
+    monkeypatch.setattr("app.services.preferences.get_limit_ladder_monitor_enabled", lambda: False)
+    service.boot_check()
+    service.finalize()
+    fetch.assert_not_called()
+    # An explicit user request remains supported while automation is disabled.
+    assert service.run_once()["ok"]
+    fetch.assert_called_once_with(persist=True)
+
+
+def test_enabled_depth_monitor_keeps_scheduled_finalize(monkeypatch):
+    service = _service()
+    monkeypatch.setattr(service, "_has_capability", lambda: True)
+    fetch = MagicMock()
+    monkeypatch.setattr(service, "_fetch_and_seal", fetch)
+    monkeypatch.setattr("app.services.preferences.get_limit_ladder_monitor_enabled", lambda: True)
+    service.finalize()
+    fetch.assert_called_once_with(persist=True)
+
+
 def test_custom_depth_uses_shared_batching_and_rate_limit(monkeypatch):
     provider = SimpleNamespace(
         get_depth_batch=MagicMock(

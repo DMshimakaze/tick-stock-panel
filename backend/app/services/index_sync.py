@@ -408,6 +408,32 @@ def sync_etf_adj_factor(
     )
 
 
+def sync_daily_assets(symbols, repo, capset, *, days, zero_row_out=None) -> int:
+    """手动补历史沿维表路由资产, ETF 先同步因子再计算完整本地历史。"""
+    groups: dict[str, list[str]] = {}
+    for symbol in symbols:
+        groups.setdefault(repo.resolve_asset_type(symbol), []).append(symbol)
+    end = datetime.now()
+    start = end - timedelta(days=days)
+    written = 0
+    for asset_type, selected in groups.items():
+        if asset_type == "stock":
+            written += kline_sync.sync_and_persist_daily_batch(
+                selected, repo, capset, count=days, zero_row_out=zero_row_out,
+            )
+            continue
+        if asset_type == "etf":
+            sync_etf_adj_factor(selected, repo, capset, start_time=start, end_time=end)
+            sync = sync_and_persist_etf_daily
+        else:
+            sync = sync_and_persist_index_daily
+        count = sync(repo, capset, start_date=start, end_date=end, symbols_override=selected)
+        written += count
+        if count == 0 and zero_row_out is not None:
+            zero_row_out.extend(selected)
+    return written
+
+
 def sync_and_persist_etf_daily(
     repo: KlineRepository,
     capset: CapabilitySet,

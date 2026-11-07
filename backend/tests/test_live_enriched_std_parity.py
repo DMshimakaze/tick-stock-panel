@@ -13,7 +13,7 @@ from datetime import date, timedelta
 import polars as pl
 import pytest
 
-from app.indicators.pipeline import compute_enriched_today, compute_indicators
+from app.indicators.pipeline import _apply_adj_factor, compute_enriched_today, compute_indicators
 from app.tickflow.repository import DataStore, KlineRepository
 
 TODAY = date(2026, 8, 3)
@@ -67,3 +67,24 @@ def test_intraday_boll_and_annual_vol_use_sample_std_like_full(tmp_path, column)
 
     assert incremental["symbol"].to_list() == full["symbol"].to_list()
     assert incremental[column].to_list() == pytest.approx(full[column].to_list(), rel=1e-9, abs=1e-12)
+
+
+@pytest.mark.parametrize("factor", [2.0, 0.5])
+def test_live_event_day_anchors_today_raw_price_and_matches_full_ma(tmp_path, factor):
+    raw = _bars().with_columns([
+        pl.when(pl.col("date") == TODAY).then(pl.col(c) / factor).otherwise(pl.col(c)).alias(c)
+        for c in ("open", "high", "low", "close", "raw_close", "raw_high", "raw_low")
+    ])
+    factors = pl.DataFrame({"symbol": ["600001.SH", "000002.SZ"],
+                            "trade_date": [TODAY, TODAY], "ex_factor": [factor, factor]})
+    adjusted = _apply_adj_factor(raw, factors)
+    history = compute_indicators(adjusted.filter(pl.col("date") < TODAY))
+    latest = history["date"].max()
+    repo = KlineRepository(DataStore(tmp_path))
+    repo._enriched_history_cache = history
+    repo._build_live_agg(latest)
+    today_raw = raw.filter(pl.col("date") == TODAY).drop("raw_close", "raw_high", "raw_low")
+    incremental = compute_enriched_today(repo.get_live_agg(), history.filter(pl.col("date") == latest), today_raw).sort("symbol")
+    full = compute_indicators(adjusted).filter(pl.col("date") == TODAY).sort("symbol")
+    for column in ("open", "high", "low", "close", "raw_close", "ma5", "ma20", "ma60"):
+        assert incremental[column].to_list() == pytest.approx(full[column].to_list(), abs=1e-10)

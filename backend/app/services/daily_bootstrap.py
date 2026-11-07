@@ -46,14 +46,14 @@ def _ensure_history(repo, capset, symbol: str, asset_type: str, start: date, end
         repo.remember_prepared_daily(asset_type, local)
         return local
 
-    frames = list(kline_sync.iter_daily_frames(
-        [symbol], capset, asset_type=asset_type,
+    raw = kline_sync.fetch_daily_for_chart(
+        repo, capset, symbol, asset_type,
         start_time=datetime.combine(start, time.min, CN_TZ),
         end_time=datetime.combine(end, time.max, CN_TZ),
-    ))
-    if not frames:
-        return pl.DataFrame()
-    raw = kline_sync._normalize_daily(pl.concat(frames, how="diagonal_relaxed"))
+    )
+    if raw.is_empty():
+        return raw
+    raw = kline_sync._normalize_daily(raw)
     if not invalid_daily_rows(raw).is_empty():
         raise ValueError("日K数据校验失败，原数据保持不变")
     raw = raw.filter((pl.col("symbol") == symbol) & pl.col("date").is_between(start, end)).sort("date")
@@ -66,7 +66,11 @@ def _ensure_history(repo, capset, symbol: str, asset_type: str, start: date, end
         return current
     factors = pl.DataFrame()
     if asset_type != "index":
-        factors = kline_sync.fetch_adj_factor_single(symbol, asset_type=asset_type, capset=capset, strict=True)
+        factors = kline_sync.fetch_adj_factor_single(
+            symbol, repo=repo, asset_type=asset_type, capset=capset, strict=True,
+            start_time=datetime.combine(start, time.min, CN_TZ),
+            end_time=datetime.combine(end, time.max, CN_TZ),
+        )
     instruments = repo.get_instruments() if asset_type == "stock" else None
     enriched = compute_enriched(raw, factors=factors, instruments=instruments)
     if enriched.is_empty():

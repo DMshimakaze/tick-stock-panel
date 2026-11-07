@@ -99,6 +99,9 @@ def test_apply_adjustment_identity_cases(tmp_path):
     out_no_factors = minute_adjust.apply_minute_adjustment(df, tmp_path, "stock")
     assert out_no_factors.equals(df)
 
+    _write_factor_table(tmp_path, [(AA, EX_DATE, EX_FACTOR)])
+    assert minute_adjust.apply_minute_adjustment(df, tmp_path, "index").equals(df)
+
     _write_factor_table(tmp_path, [(BB, EX_DATE, EX_FACTOR)])
     out_no_events = minute_adjust.apply_minute_adjustment(df, tmp_path, "stock")
     assert out_no_events.equals(df)
@@ -116,6 +119,46 @@ def test_apply_adjustment_etf_routing(tmp_path):
     df = _minute_frame(etf, date(2026, 6, 30), 10.0)
     out = minute_adjust.apply_minute_adjustment(df, tmp_path, "etf")
     assert abs(out["close"][0] - 10.0 * RATIO_BEFORE) < 1e-9
+
+
+def test_reverse_split_adjusts_prices_and_vwap_without_changing_raw(tmp_path):
+    _write_factor_table(tmp_path, [(AA, EX_DATE, 0.5)])
+    raw = _minute_frame(AA, date(2026, 6, 30), 10.0)
+    out = minute_adjust.apply_minute_adjustment(raw, tmp_path)
+    assert out["close"][0] == 20.0
+    assert out["amount"][0] / (out["volume"][0] * 100) == 20.0
+    assert raw["close"][0] == 10.0
+    assert raw["amount"][0] == 100000.0
+
+
+def test_factor_correction_invalidates_minute_cache(tmp_path):
+    raw = _minute_frame(AA, date(2026, 6, 30), 10.0)
+    _write_factor_table(tmp_path, [(AA, EX_DATE, 1.25)])
+    assert minute_adjust.apply_minute_adjustment(raw, tmp_path)["close"][0] == 8.0
+    _write_factor_table(tmp_path, [(AA, EX_DATE, 0.5)])
+    assert minute_adjust.apply_minute_adjustment(raw, tmp_path)["close"][0] == 20.0
+
+
+def test_legacy_etf_minutes_use_etf_factors_once_and_prefer_dedicated_table(tmp_path):
+    day = date(2026, 6, 30)
+    _write_factor_table(tmp_path, [(AA, EX_DATE, 2.0)])
+    factor_dir = tmp_path / "adj_factor_etf"
+    factor_dir.mkdir()
+    pl.DataFrame({"symbol": [AA], "trade_date": [EX_DATE], "ex_factor": [3.0]}).write_parquet(factor_dir / "all.parquet")
+    original = _minute_frame(AA, day, 60.0)
+    _write_minute_partition(tmp_path, day, original)
+    minute_adjust.mark_minute_basis_raw(tmp_path)
+    repo = KlineRepository(DataStore(tmp_path))
+
+    def reads():
+        return [repo.get_minute(AA, day, "etf"), repo.get_minute_batch([AA], day, "etf"),
+                repo.get_minute_range([AA], day, day, "etf"), repo.get_minute_by_dates([AA], [day], "etf")]
+
+    assert all(frame["close"][0] == 20.0 for frame in reads())
+    stored = pl.read_parquet(tmp_path / "kline_minute" / f"date={day}" / "part.parquet")
+    assert stored.equals(original)
+    _write_minute_partition(tmp_path, day, _minute_frame(AA, day, 90.0), etf=True)
+    assert all(frame["close"][0] == 30.0 for frame in reads())
 
 
 # ================================================================

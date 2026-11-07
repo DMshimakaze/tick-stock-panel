@@ -355,7 +355,12 @@ class DepthService:
         return result
 
     def finalize(self) -> None:
-        """盘后定版: 拉一次 + 落盘。"""
+        """自动盘后定版；监控关闭时不取数，手动查询使用 run_once。"""
+        from app.services import preferences
+
+        if not preferences.get_limit_ladder_monitor_enabled():
+            logger.info("depth sealed: 监控未开启, 跳过自动定版")
+            return
         if not self._has_capability():
             return
         self._fetch_and_seal(persist=True)

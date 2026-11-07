@@ -21,7 +21,9 @@ param(
     [switch]$Force,
     # 不启用 uvicorn --reload。内测/长时间运行时建议开启: 改文件不再触发
     # 进程重启, 也就不会反复做 1GB+ 的 enriched 全量预热。
-    [switch]$NoReload
+    [switch]$NoReload,
+    # 使用已经准备好依赖的现有解释器，不运行 uv sync 或创建环境。
+    [string]$PythonExecutable = ''
 )
 
 $ErrorActionPreference = 'Stop'
@@ -116,7 +118,9 @@ function Require-Cmd($cmd, $hint) {
     }
 }
 
-Require-Cmd 'uv'   'powershell -c "irm https://astral.sh/uv/install.ps1 | iex"   OR   winget install --id=astral-sh.uv'
+if (-not $PythonExecutable) {
+    Require-Cmd 'uv' 'powershell -c "irm https://astral.sh/uv/install.ps1 | iex"   OR   winget install --id=astral-sh.uv'
+}
 Require-Cmd 'pnpm' 'npm i -g pnpm   OR   corepack enable; corepack prepare pnpm@9 --activate'
 
 # ===== 2. Port check - kill anything listening on the target ports =====
@@ -195,7 +199,12 @@ if (-not [string]::IsNullOrWhiteSpace($BackendExtras)) {
     }
 }
 
-if (-not (Test-Path (Join-Path $BackendDir '.venv')) -or $BackendExtraArgs.Count) {
+if ($PythonExecutable) {
+    $BackendPython = (Get-Item -LiteralPath $PythonExecutable).FullName
+} else {
+    $BackendPython = Join-Path $BackendDir '.venv\Scripts\python.exe'
+}
+if (-not $PythonExecutable -and (-not (Test-Path (Join-Path $BackendDir '.venv')) -or $BackendExtraArgs.Count)) {
     if ($BackendExtraArgs.Count) {
         Log-Info "syncing Python deps with extras: $BackendExtras"
     } else {
@@ -360,7 +369,7 @@ function Read-NewLogLines($path, $prefix, $color) {
 $prevCtrlC = [Console]::TreatControlCAsInput
 try {
     $backendProc = Start-Process `
-        -FilePath (Join-Path $BackendDir '.venv\Scripts\python.exe') `
+        -FilePath $BackendPython `
         -ArgumentList $BackendArgs `
         -WorkingDirectory $BackendDir `
         -RedirectStandardOutput $BackendOutLog `

@@ -776,7 +776,7 @@ class KlineRepository:
                 from app.indicators.pipeline import compute_enriched_history_window
                 start_full = latest - timedelta(days=300)
                 read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                         "volume", "amount", "raw_close", "raw_high", "raw_low"]
+                                         "volume", "amount", "quote_ts", "raw_close", "raw_high", "raw_low"]
                              if c in df_latest.columns]
                 lf = (
                     scan_enriched_parquet(self._enriched_glob)
@@ -1036,7 +1036,7 @@ class KlineRepository:
         agg_a = agg_a.join(df_rsi, on="symbol", how="inner")
         logger.info("live agg step done: rsi state (%.2fs)", time.perf_counter() - step)
 
-        # 前复权因子: adj_factor = close(复权) / raw_close(原始)
+        # 上一有效交易日的复权比例, 仅供原始昨收转换, 不用于当日 OHLC。
         if "raw_close" in df_hist.columns:
             step = time.perf_counter()
             logger.info("live agg step start: adj factor state")
@@ -1226,7 +1226,7 @@ class KlineRepository:
             from app.indicators.pipeline import compute_indicators, compute_signals
             start_full = latest - timedelta(days=300)
             read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                     "volume", "amount", "raw_close", "raw_high", "raw_low"]
+                                     "volume", "amount", "quote_ts", "raw_close", "raw_high", "raw_low"]
                          if c in df_latest.columns]
             df_hist = guarded_collect(
                 scan_enriched_parquet(self._etf_enriched_glob,
@@ -1270,7 +1270,7 @@ class KlineRepository:
             from datetime import timedelta
             start_full = latest - timedelta(days=300)
             read_cols = [c for c in ["symbol", "date", "open", "high", "low", "close",
-                                     "volume", "amount"]
+                                     "volume", "amount", "quote_ts"]
                          if c in df_latest.columns]
             df_hist = guarded_collect(
                 scan_enriched_parquet(self._index_enriched_glob,
@@ -1880,9 +1880,25 @@ class KlineRepository:
 
     def _minute_partition_path(self, asset_type: str, trade_date: date) -> str | None:
         """单日分钟K分区文件路径; 不存在 (含存量未迁移的旧 symbol= 分区) 返回 None。"""
-        base = self._minute_glob_for(asset_type).rsplit("/", 2)[0]
-        p = f"{base}/date={trade_date.isoformat()}/part.parquet"
-        return p if Path(p).exists() else None
+        base = Path(self._minute_glob_for(asset_type)).parent.parent
+        p = base / f"date={trade_date.isoformat()}" / "part.parquet"
+        return str(p) if p.exists() else None
+
+    def _scan_minute_asset(self, asset_type: str, dates: list[date] | None = None) -> pl.LazyFrame:
+        """ETF 历史只读兼容旧股票目录, 专用目录中的同时间数据优先。"""
+        assets = ["stock", "etf"] if asset_type == "etf" else [asset_type]
+        scans = []
+        for asset in assets:
+            if dates is None:
+                base = Path(self._minute_glob_for(asset)).parent.parent
+                files = sorted(base.glob("**/*.parquet"))
+            else:
+                files = [p for day in dates if (p := self._minute_partition_path(asset, day)) is not None]
+            if files:
+                scans.append(pl.scan_parquet(files))
+        if not scans:
+            return pl.LazyFrame(schema={"symbol": pl.String, "datetime": pl.Datetime})
+        return pl.concat(scans, how="diagonal_relaxed").unique(subset=["symbol", "datetime"], keep="last")
 
     def get_minute(
         self,
@@ -1898,8 +1914,9 @@ class KlineRepository:
         try:
             part = self._minute_partition_path(asset_type, trade_date)
             source = part if part is not None else self._minute_glob_for(asset_type)
+            scan = self._scan_minute_asset(asset_type, [trade_date]) if asset_type == "etf" else pl.scan_parquet(source)
             df = guarded_collect(
-                pl.scan_parquet(source).filter(
+                scan.filter(
                     (pl.col("symbol") == symbol)
                     & (pl.col("datetime").dt.date() == trade_date)
                 ).sort("datetime")
@@ -1925,8 +1942,9 @@ class KlineRepository:
         try:
             part = self._minute_partition_path(asset_type, trade_date)
             source = part if part is not None else self._minute_glob_for(asset_type)
+            scan = self._scan_minute_asset(asset_type, [trade_date]) if asset_type == "etf" else pl.scan_parquet(source)
             df = guarded_collect(
-                pl.scan_parquet(source).filter(
+                scan.filter(
                     pl.col("symbol").is_in(symbols)
                     & (pl.col("datetime").dt.date() == trade_date)
                 ).sort(["symbol", "datetime"])
@@ -1951,7 +1969,7 @@ class KlineRepository:
         if not symbols:
             return pl.DataFrame()
         try:
-            lf = pl.scan_parquet(self._minute_glob_for(asset_type))
+            lf = self._scan_minute_asset(asset_type) if asset_type == "etf" else pl.scan_parquet(self._minute_glob_for(asset_type))
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
             df = guarded_collect(
@@ -1987,17 +2005,17 @@ class KlineRepository:
         """
         if not symbols or not dates:
             return pl.DataFrame()
-        base = self._etf_minute_glob.rsplit("/", 2)[0] if asset_type == "etf" else self._minute_glob.rsplit("/", 2)[0]
+        base = Path(self._minute_glob_for(asset_type)).parent.parent
         # 收集存在的分区文件路径, 避免对不存在的文件 scan 报错
         parts: list[str] = []
         for d in dates:
             p = f"{base}/date={d.isoformat()}/part.parquet"
             if Path(p).exists():
                 parts.append(p)
-        if not parts:
+        if not parts and asset_type != "etf":
             return pl.DataFrame()
         try:
-            lf = pl.scan_parquet(parts)
+            lf = self._scan_minute_asset(asset_type, dates) if asset_type == "etf" else pl.scan_parquet(parts)
             available = set(lf.collect_schema().names())
             select_cols = [c for c in ["symbol", "datetime", "open", "high", "low", "close", "volume", "amount"] if c in available]
             df = guarded_collect(

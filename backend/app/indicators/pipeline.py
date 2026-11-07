@@ -1529,6 +1529,7 @@ def _compute_storage_batches(
 def recompute_daily_symbols(
     repo, asset_type: str, *, start: date, symbols: list[str] | None,
     on_batch_done: Callable[[int, int], None] | None = None,
+    on_symbols_done: Callable[[list[str]], None] | None = None,
 ) -> int:
     """修补后按股票重算: 输入使用完整本地原始历史, 只发布 start 起的受影响行。
 
@@ -1554,6 +1555,7 @@ def recompute_daily_symbols(
                                      claim_wait_s=_PUBLICATION_CLAIM_WAIT_S, purpose="daily_repair")
     written = 0
     total = (len(selected) + batch_size - 1) // batch_size
+    completed = set()
     try:
         for offset in range(0, len(selected), batch_size):
             batch = selected[offset:offset + batch_size]
@@ -1579,6 +1581,8 @@ def recompute_daily_symbols(
             )
             output = _select_storage_cols(enriched.filter(pl.col("date") >= start))
             written += repo.replace_enriched_rows(asset_type, output, start=start, symbols=batch, publication=publication)
+            if not output.is_empty():
+                completed.update(output["symbol"].unique().to_list())
             publication.heartbeat()
             if on_batch_done:
                 on_batch_done(offset // batch_size + 1, total)
@@ -1589,6 +1593,8 @@ def recompute_daily_symbols(
     table = enriched_dirname(asset_type)
     repo.refresh_view("kline_enriched" if asset_type == "stock" else table, str(root / table / "**/*.parquet"))
     repo.invalidate_enriched_asset(asset_type)
+    if on_symbols_done:
+        on_symbols_done(sorted(completed))
     return written
 
 
@@ -2081,20 +2087,13 @@ def compute_enriched_today(
     df = today_ohlcv.join(live_state, on="symbol", how="left")
     has_history_state = pl.col("_has_history_state").fill_null(False)
 
-    # ---- 前复权: 保存原始价 → 调整 OHLCV ----
+    # 当日是前复权的最新锚点, 原始 OHLC 的 ratio=1。历史状态已经复权;
+    # 不能再把上一有效交易日的比例乘给当日, 否则除权日会被复权两次。
     df = df.with_columns([
         pl.col("close").alias("raw_close"),
         pl.col("high").alias("raw_high"),
         pl.col("low").alias("raw_low"),
     ])
-    if "_adj_factor" in df.columns:
-        af = pl.col("_adj_factor").fill_null(1.0)
-        df = df.with_columns([
-            (pl.col("open") * af).alias("open"),
-            (pl.col("high") * af).alias("high"),
-            (pl.col("low") * af).alias("low"),
-            (pl.col("close") * af).alias("close"),
-        ])
 
     # ---- volume 统一 Float64 ----
     df = df.with_columns(pl.col("volume").cast(pl.Float64))
