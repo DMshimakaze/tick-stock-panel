@@ -1,0 +1,36 @@
+name: quantdash_user
+version: 1.2.6
+plugin_api_version: 1
+display_name: "QuantDash（个人订阅）"
+author: "TSP QuantDash Adapter"
+runtime: python
+entry: provider:QuantDashProvider
+check: provider:availability
+api_key_env: QUANTDASH_TOKEN
+requires_app: '>=0.3.24'
+requires_python: '>=3.11'
+platforms: [any]
+requires:
+  - 'quantdash==0.1.0'
+  - 'polars>=1.44,<1.45'
+datasets: [daily, minute, realtime, adj_factor, depth5, full_minute]
+homepage: 'https://quantdash.net/'
+key_manage_url: 'https://quantdash.net/'
+key_manage_label: 'QuantDash 服务管理'
+description: |
+  使用个人 QuantDash 订阅为 TSP 提供原始日K、1分钟K、全市场实时行情、除权因子与五档盘口。
+  插件独立安装，不修改 TSP 核心或 MA55；只启用已试拉验证的数据能力。
+  全量分钟复用已授权的批量 1m K 线，按当日修复轮落盘；停牌/空数据不伪造。
+install_hint: '请先在 TSP 后端 Python 环境安装 quantdash==0.1.0，再在此填写 QuantDash API Key，或设置 QUANTDASH_TOKEN 环境变量。'
+usage_notes:
+  - '日K/分钟K一律 adjust=none；不在插件重复复权。'
+  - '1m 批量读取，每批最多 100 个代码，按不超过 12 日的时间窗口拉取。'
+  - '所有 HTTP 请求默认共用 12 次/滚动60秒的进程内预算，可通过 TSP_QUANTDASH_RPM 调整（不是跨进程配额）。'
+  - '12 次预算中预留 6 次给每30秒的股票、ETF、指数快照；历史和五档请求不占用预留份额，不提高总 RPM。'
+  - '实时快照是全市场数据源，请把 TSP 轮询间隔设为至少 30 秒再启用。'
+  - '复权因子的事件/累积口径及五档数量单位需完成有 Key 的实测后再启用。'
+  - '全量分钟采用修复轮；盘中并发时效尚未验证，自动轮询暂关闭，保留分钟按需查询及已落盘数据。'
+  - '五档仅小样本点查：每股 1 次请求，额度不足立即返回已成功部分并报告缺失；空盘口/单股失败隔离，429停止本轮后续请求。大池自动监控保持关闭。'
+  - 'ETF 实时通过 CN_ETF 独立获取，与股票合并；ETF失败保留股票，401/403后该实例不再重复请求未授权ETF能力。'
+  - '因子审计使用明确的逐代码响应：成功空列表为无事件，遗漏代码为未核实；全事件链同时校验旧事件更正。'
+  - 'v0.3.32 自选/详情缺报价时按股票、ETF 分别小批补拉；同一共享预算不足即跳过，不等待、不挤占实时预留额度。'
