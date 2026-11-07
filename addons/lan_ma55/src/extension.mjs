@@ -1,7 +1,8 @@
 import { END_MINUTES, beijingNow, endStamp, wallMillis, FINALITY_MS } from './aggregate.mjs';
 import { loadCatalog, loadInstrument, refreshInstruments } from './host_data.mjs';
 import { consumeBars, DerivedCache } from './state.mjs';
-import { createView, chartBars } from './presentation.mjs';
+import { createView, chartBars, PAGE_VERSION } from './presentation.mjs';
+import { loadSupplyStatus } from './supply_status.mjs';
 
 export function completedBoundary(now) {
   const day = now.slice(0, 10);
@@ -9,7 +10,7 @@ export function completedBoundary(now) {
 }
 export function mountObserver(el, ctx) {
   const api = ctx.api, mountedAt = beijingNow();
-  let disposed = false, busy = false, reloadQueued = false, generation = 0, timer;
+  let disposed = false, busy = false, reloadQueued = false, generation = 0, timer, supplyTimer, supplyBusy = false;
   let catalog = { entries: [], groups: [], sessions: [] }, cacheReady = false, lastPoll = '', catalogDay = '';
   let calendarBoundary = '';
   const extras = new Map(), records = new Map();
@@ -17,10 +18,19 @@ export function mountObserver(el, ctx) {
   const model = { now: mountedAt, items: [], groups: [], group: 'all', asset: 'all',
     page: 0, total: 0, tab: 'today', historyDate: '', selectedSymbol: '', selectedEvent: '',
     query: '', results: [], error: '', cacheError: '', loading: false, refreshing: false,
-    uiAvailable: typeof ctx.ui?.openStockPreview === 'function' };
+    supply: {}, supplyLoading: true, uiAvailable: typeof ctx.ui?.openStockPreview === 'function' };
   const render = () => { if (!disposed) { model.now = beijingNow(); view.render(model); } };
   const scope = () => [...extras.values(), ...catalog.entries.filter(r =>
     !extras.has(r.symbol) && (model.group === 'all' || r.group_ids?.includes(model.group)))];
+
+  async function refreshSupply() {
+    if (disposed || supplyBusy) return;
+    supplyBusy = true; model.supplyLoading = true; render();
+    try {
+      const result = await loadSupplyStatus(api, model.supply);
+      if (!disposed) model.supply = result;
+    } finally { supplyBusy = false; model.supplyLoading = false; render(); }
+  }
 
   async function persist(record) {
     records.delete(record.symbol);
@@ -138,6 +148,7 @@ export function mountObserver(el, ctx) {
           navList: model.items.map(i => ({ symbol: i.symbol, name: i.name })) });
         if (!opened) { model.error = '宿主未能打开个股详情，请检查完整代码及宿主能力。'; render(); }
       } else if (action === 'reload') await loadPage(true);
+      else if (action === 'supply-reload') await refreshSupply();
       else if (action === 'previous' || action === 'next') {
         model.page += action === 'next' ? 1 : -1; model.selectedSymbol = ''; model.selectedEvent = '';
         model.items = [];
@@ -162,6 +173,10 @@ export function mountObserver(el, ctx) {
     },
   });
   render();
+  void refreshSupply();
+  supplyTimer = setInterval(() => {
+    if (el.ownerDocument.visibilityState !== 'hidden') void refreshSupply();
+  }, 60_000);
   void (async () => {
     try { await cache.open(); cacheReady = true; }
     catch (error) { model.cacheError = String(error.message || error); }
@@ -171,11 +186,11 @@ export function mountObserver(el, ctx) {
     void poll().catch(error => { if (!disposed) { model.error = String(error.message || error); render(); } });
     timer = setInterval(() => { void poll().catch(error => { if (!disposed) { model.error = String(error.message || error); render(); } }); }, 60_000);
   })();
-  return () => { disposed = true; generation++; clearInterval(timer); cache.close(); view.destroy(); };
+  return () => { disposed = true; generation++; clearInterval(timer); clearInterval(supplyTimer); cache.close(); view.destroy(); };
 }
 
 export default {
-  id: 'lan.ma55', apiVersion: 1,
+  id: 'lan.ma55', apiVersion: 1, version: PAGE_VERSION,
   routes: [{ id: 'observer', path: '/lan-ma55', mount: mountObserver }],
   navigation: [{ id: 'observer', routeId: 'observer', label: 'MA55 结构观察', icon: 'Activity' }],
 };

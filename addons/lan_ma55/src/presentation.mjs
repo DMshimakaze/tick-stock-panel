@@ -1,6 +1,8 @@
 import { minimalFeatures } from './engine.mjs';
 import { isNextEnd } from './aggregate.mjs';
 
+export const PAGE_VERSION = '0.2.2';
+
 export const REASONS = {
   WARMUP: '数据不足，等待56根连续完成K', INSUFFICIENT_WARMUP: '数据不足，等待56根连续完成K',
   MISSING_MINUTE: '缺少真实1分钟K', INVALID_OR_NULL_OPEN: '分钟OHLC缺失或无效',
@@ -20,6 +22,42 @@ const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({
 const number = (v, digits = 3) => Number.isFinite(v) ? v.toFixed(digits) : '—';
 const pattern = value => value === 'SINGLE_BAR' ? '单K收回' : value === 'MULTI_BAR' ? '多K测试' : '—';
 const mode = value => ({ LIVE: '实时确认', DELAYED: '延迟确认', REPLAY: '历史重放' }[value] || '');
+
+function supplyStatus(model) {
+  const supply = model.supply || {}, minute = supply.minute?.data, snapshot = supply.snapshot?.data;
+  const stocks = supply.stocks?.data, backend = supply.backend?.data;
+  const count = value => Number.isFinite(value) ? value.toLocaleString('zh-CN') : '未知';
+  const flag = (value, yes, no) => value === true ? yes : value === false ? no : '未知';
+  const fact = (label, value) => `<div><span>${label}</span><strong>${escape(value)}</strong></div>`;
+  const health = minute?.healthy === false && minute.gate_reason === 'outside_trading_hours'
+    ? '休市门控（healthy=false）；不能据此判断历史覆盖'
+    : flag(minute?.healthy, '持续写入本地分钟', '未持续更新（healthy=false）');
+  const lastRound = minute?.last_round_at ? new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Shanghai', dateStyle: 'short', timeStyle: 'medium', hourCycle: 'h23',
+  }).format(new Date(minute.last_round_at * 1000)) : '本进程暂无成功轮次';
+  const packageText = backend === null ? '未安装（lan.ma55.state）' : backend
+    ? `安装 ${backend.version || '未知'} / 运行 ${backend.runtime_version || '未启动'} · ${backend.status}`
+    : '安装状态尚未读到';
+  const errors = Object.entries(supply).filter(([, entry]) => entry.error).map(([key, entry]) =>
+    `<div class="lm-error" role="alert">${escape({ minute: '同步状态', snapshot: '股票快照', stocks: '维表统计', backend: '包状态' }[key])}读取失败：${escape(entry.error)}${entry.checkedAt ? `；保留 ${escape(entry.checkedAt)} 的结果` : '；当前值未知'}</div>`).join('');
+  return `<section class="lm-supply" aria-label="TSP行情同步进度"><div class="lm-detail-head"><div><h2>TSP行情同步进度</h2><div class="lm-meta">数据供给侧 · 非MA55扫描进度 · 北京时间</div></div><button data-action="supply-reload" ${model.supplyLoading ? 'disabled' : ''}>${model.supplyLoading ? '正在读取供给状态…' : '刷新供给状态'}</button></div>
+    <div class="lm-facts">${[
+      ['同步服务', `${flag(minute?.enabled, '已启用', '未启用')} / ${flag(minute?.running, '进程运行中', '进程未运行')}`],
+      ['供应商 / 节奏', `${minute?.provider_effective || minute?.provider || '未知'} · ${flag(minute?.repair_only, 'repair-only', '支持稳态增量')} · ${count(minute?.interval_seconds)}秒`],
+      ['交易时段 / 健康', `${flag(minute?.in_trading_hours, '交易时段', '当前休市')} · ${health}`],
+      ['本进程成功轮次 / 最近成功时间', `${count(minute?.rounds)} 轮 · ${minute ? lastRound : '尚未读到'}`],
+      ['最近成功轮覆盖', `${count(minute?.last_symbols)} 股 / ${count(minute?.last_rows)} 行 / ${count(minute?.last_requests)} 次源请求（仅该轮）`],
+      ['有效股票快照', `${count(snapshot?.symbols)} 只 · 截至 ${snapshot?.as_of || '未知'}（候选覆盖）`],
+      ['股票维表统计', `${count(stocks?.symbols)} 只 · 截至 ${stocks?.as_of || '未知'}${stocks?.pending ? ' · 统计更新中' : ''}`],
+      ['候选与官方统计', snapshot ? `已发现 ${snapshot.symbols} / 官方统计 ${stocks?.symbols ?? '未知'}；不作为完整股票全集` : '快照未读到，覆盖未知'],
+    ].map(([label, value]) => fact(label, value)).join('')}</div>
+    ${minute?.last_error ? `<div class="lm-error" role="alert">宿主最近错误：${escape(minute.last_error)}</div>` : ''}${errors}
+    <div class="lm-meta">同步状态读取：${escape(supply.minute?.checkedAt || '尚未成功')} · 快照读取：${escape(supply.snapshot?.checkedAt || '尚未成功')} · 维表统计读取：${escape(supply.stocks?.checkedAt || '尚未成功')}。页面可见时每60秒重读状态。</div></section>
+    <section class="lm-notice" role="status"><h2>MA55全市场后台未接通</h2><p>宿主缺少安全的只读批量分钟接口／页面调用桥，正式股票全集也尚不可枚举。</p>
+    <div>后端包：${escape(packageText)} · 真实已处理：${backend === null ? '未执行（后端未安装，无扫描轮次）' : '不可读取（缺少页面调用桥）'}</div>
+    <p class="lm-meta">已有：冻结规则、离线派生状态与只读结果接口。未接通：宿主本地行情输入、全市场扫描任务、页面读取后台结果。当前页每次最多20只的浏览器观察独立运行，不计入全市场进度。</p>
+    <div class="lm-meta">BLOCKED_BY_OFFICIAL_EXTENSION_CONTRACT</div></section>`;
+}
 
 export function chartBars(bars, factors, sessions) {
   let history = [], previous = null, lastFactor = null;
@@ -102,7 +140,9 @@ export function tableRows(model) {
 const CSS = `
 .lm{color:inherit;font:13px/1.5 inherit;max-width:1600px;margin:0 auto;padding:24px;--lm-line:rgba(128,128,148,.22);--lm-soft:rgba(128,128,148,.055)}
 .lm *{box-sizing:border-box}.lm h1{font-size:25px;margin:0;font-weight:650;letter-spacing:.02em}.lm h1 small{font-size:12px;color:#a596fa;margin-left:9px;vertical-align:middle}.lm p{margin:8px 0}.lm-meta{font-size:12px;opacity:.65;font-weight:400;line-height:1.7}.lm-head,.lm-detail-head{display:flex;gap:16px;justify-content:space-between;align-items:center}.lm-badge{background:var(--lm-soft);border:1px solid var(--lm-line);padding:7px 12px;border-radius:20px;white-space:nowrap}.lm-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:22px 0 14px}.lm input,.lm select,.lm button{color:inherit;font:inherit;border:1px solid var(--lm-line);border-radius:7px;padding:7px 10px;background:transparent;min-height:34px}.lm select option{background:var(--bg-base,#20212a);color:var(--foreground,#b9b9c9)}.lm button{cursor:pointer}.lm button:hover{background:var(--lm-soft)}.lm button:disabled{opacity:.4;cursor:default}.lm input{min-width:130px}.lm-search{display:flex;gap:6px;margin-left:auto}.lm-tabs{display:flex;gap:18px;border-bottom:1px solid var(--lm-line);margin-bottom:0;overflow-x:auto}.lm-tabs button{border:0;border-radius:0;padding:10px 2px;white-space:nowrap;opacity:.65}.lm-tabs button.active{color:#a596fa;border-bottom:2px solid #a596fa;opacity:1}.lm-table-wrap{overflow-x:auto;border-bottom:1px solid var(--lm-line)}.lm table{border-collapse:collapse;width:100%;white-space:nowrap;font-variant-numeric:tabular-nums}.lm th{font-size:11px;opacity:.6;font-weight:500;text-align:left;padding:12px 10px;background:var(--lm-soft)}.lm td{padding:13px 10px;border-top:1px solid var(--lm-line)}.lm tr[data-action]{cursor:pointer}.lm tr[data-action]:hover,.lm tr.selected{background:var(--lm-soft)}.lm .lm-code{display:block;font-size:11px;opacity:.55}.lm-buy{color:#ef6469}.lm-warning{color:#d68b30;font-size:12px}.lm-empty{padding:38px 20px;text-align:center;opacity:.65}.lm-status{display:flex;gap:14px;flex-wrap:wrap;margin:12px 0;font-size:12px;opacity:.7}.lm-detail{border:1px solid var(--lm-line);border-radius:10px;margin-top:22px;padding:20px;background:var(--lm-soft)}.lm-detail-head{margin-bottom:18px}.lm-facts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin:18px 0}.lm-facts span{display:block;font-size:11px;opacity:.6}.lm-facts strong{display:block;font-size:12px;font-weight:500;overflow-wrap:anywhere}.lm svg{width:100%;height:auto;max-height:330px;display:block;margin-top:12px}.lm-history{display:flex;gap:12px;align-items:center;margin-top:18px;flex-wrap:wrap}.lm-history select{max-width:100%}.lm-foot{margin-top:18px;opacity:.55;font-size:11px}.lm-results{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}.lm-pager{display:flex;gap:8px;align-items:center;margin-left:auto}.lm-error{color:#ef6469;padding:12px 0}.lm-notice{padding:10px 14px;background:var(--lm-soft);border-radius:8px;margin:14px 0}.lm .live{color:#36ab8e}.lm .historical{opacity:.6}
+.lm h2{font-size:15px;margin:0;font-weight:600}.lm-supply{border:1px solid var(--lm-line);border-radius:10px;margin:16px 0;padding:16px}.lm-supply .lm-detail-head{margin-bottom:12px}.lm-supply .lm-facts{grid-template-columns:repeat(2,minmax(0,1fr));margin:12px 0;gap:12px 22px}.lm-notice{border-left:3px solid #d68b30}.lm-notice .lm-meta{overflow-wrap:anywhere}
 @media(max-width:800px){.lm{padding:14px}.lm-head{align-items:flex-start;flex-direction:column}.lm h1{font-size:21px;padding-left:38px}.lm-facts{grid-template-columns:repeat(2,minmax(0,1fr))}.lm-search{width:100%;margin-left:0}.lm-search input{flex:1;min-width:0}.lm-pager{margin-left:0}.lm-detail{padding:12px}.lm-detail-head{align-items:flex-start;flex-direction:column}}
+@media(max-width:560px){.lm-supply .lm-facts{grid-template-columns:minmax(0,1fr)}}
 `;
 export function createView(el, handlers) {
   const root = el.ownerDocument.createElement('section');
@@ -126,8 +166,8 @@ export function createView(el, handlers) {
       const event = selected?.record?.confirmations.find(e => e.event_id === model.selectedEvent);
       const latest = items.map(i => i.record?.state.data_asof || '').sort().at(-1);
       const ready = items.filter(i => i.record?.state.valid_run >= 56 && !i.error && !i.blocked).length;
-      root.innerHTML = `<style>${CSS}</style><div class="lm-head"><div><h1>MA55 结构观察<small>兰 · V0.2</small></h1><p class="lm-meta">有效推动 → 均线支撑测试 → 第一根转强 · 北京时间 / 完成15m K</p></div><div class="lm-badge">${model.loading ? '正在读取 TSP 本地历史…' : model.refreshing ? '正在更新完成K…' : '页面观察已开启'}</div></div>
-      <div class="lm-notice" role="status"><strong>尚未完成全市场监控</strong><div>当前为自选股浏览器观察版，仅计算当前页。官方扩展尚未公开全市场批量本地分钟读取及页面后端桥，后台全市场扫描未启动。</div><div class="lm-meta">FULL_MARKET_BLOCKED_BY_HOST_CONTRACT</div></div>
+      root.innerHTML = `<style>${CSS}</style><div class="lm-head"><div><h1>MA55 结构观察<small>兰 · V${PAGE_VERSION}</small></h1><p class="lm-meta">有效推动 → 均线支撑测试 → 第一根转强 · 北京时间 / 完成15m K</p></div><div class="lm-badge">${model.loading ? '正在读取 TSP 本地历史…' : model.refreshing ? '正在更新完成K…' : '当前页观察已开启'}</div></div>
+      ${supplyStatus(model)}
       <div class="lm-toolbar"><select aria-label="自选分组" data-control="group"><option value="all">全部自选</option>${model.groups.map(g => `<option value="${escape(g.id)}" ${model.group === g.id ? 'selected' : ''}>${escape(g.name)}</option>`).join('')}</select><select aria-label="资产类型" data-control="asset">${[['all', '股票 / ETF'], ['stock', '股票'], ['etf', 'ETF']].map(([v, label]) => `<option value="${v}" ${model.asset === v ? 'selected' : ''}>${label}</option>`).join('')}</select><div class="lm-pager"><button data-action="previous" ${model.page ? '' : 'disabled'}>上一页</button><span>${model.page + 1} / ${Math.max(1, Math.ceil(model.total / 20))} · 每页20只</span><button data-action="next" ${(model.page + 1) * 20 >= model.total ? 'disabled' : ''}>下一页</button></div><div class="lm-search"><input aria-label="搜索股票或ETF" data-control="query" placeholder="名称或完整代码" value="${escape(model.query)}"><button data-action="search">搜索观察</button><button data-action="reload" ${model.loading || model.refreshing ? 'disabled' : ''}>重读历史</button></div></div>
       ${model.error ? `<div class="lm-error" role="alert">${escape(model.error)}</div>` : ''}${model.cacheError ? `<div class="lm-warning">${escape(model.cacheError)}</div>` : ''}
       ${model.results.length ? `<div class="lm-results">${model.results.map(r => `<button data-action="add" data-symbol="${escape(r.symbol)}">${escape(r.name)} ${escape(r.symbol)} ＋</button>`).join('')}</div>` : ''}

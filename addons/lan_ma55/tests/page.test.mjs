@@ -11,10 +11,12 @@ import { loadInstrument, loadCatalog, refreshInstruments } from '../src/host_dat
 const pause = () => new Promise(resolve => setTimeout(resolve, 20));
 test('Page Pack manifest is self-contained, static and removable', async () => {
   assert.equal(extension.id, 'lan.ma55'); assert.equal(extension.apiVersion, 1);
+  assert.equal(extension.version, '0.2.2');
   assert.equal(extension.routes[0].path, '/lan-ma55');
   assert.equal(extension.navigation[0].label, 'MA55 结构观察');
   const built = await import('../dist/extension.js');
   assert.equal(built.default.id, extension.id);
+  assert.equal(built.default.version, extension.version);
   assert.equal(typeof built.default.routes[0].mount, 'function');
 });
 test('today never relabels old signals; replay remains distinct from live', () => {
@@ -55,8 +57,8 @@ test('mount loading, empty, group switch, public stock preview and disposal', as
     openStockPreview: value => { preview = value; return true; },
   } });
   assert.match(dom.window.document.body.textContent, /MA55 结构观察/);
-  assert.match(dom.window.document.body.textContent, /尚未完成全市场监控/);
-  assert.match(dom.window.document.body.textContent, /FULL_MARKET_BLOCKED_BY_HOST_CONTRACT/);
+  assert.match(dom.window.document.body.textContent, /MA55全市场后台未接通/);
+  assert.match(dom.window.document.body.textContent, /BLOCKED_BY_OFFICIAL_EXTENSION_CONTRACT/);
   const query = dom.window.document.querySelector('[data-control="query"]');
   query.value = '600000'; query.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await pause();

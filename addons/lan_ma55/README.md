@@ -1,8 +1,8 @@
 # MA55 结构观察 · 兰 V0.2
 
-独立 Page Pack，版本 `0.2.1`，面向 TSP 官方 `v0.3.32` / Page Pack SDK v1。运行时只有一个自包含 ES Module；删除页面包即可移除，不需要修改或重建宿主。
+独立 Page Pack，版本 `0.2.2`，面向 TSP 官方 `v0.3.32` / Page Pack SDK v1。运行时只有一个自包含 ES Module；删除页面包即可移除，不需要修改或重建宿主。
 
-**全市场后台状态：`FULL_MARKET_BLOCKED_BY_HOST_CONTRACT`，尚未完成全市场监控。** 页面保留自选浏览器观察能力；新增独立SQLite及离线服务见下文。[本轮真实状态](FULL_MARKET_STATUS_20261107.md) / [所需官方契约](UPSTREAM_CONTRACT_REQUEST.md)。
+**全市场后台状态：`BLOCKED_BY_OFFICIAL_EXTENSION_CONTRACT`，尚未完成全市场监控。** V0.2.2 已通过真实 TSP 官方导入界面安装并刷新，展示行情供给状态、候选覆盖及后端未安装原因；后台仍未接线。[最新现场验收与根因](RUNTIME_ROOT_CAUSE.md) / [上一轮离线状态实现](FULL_MARKET_STATUS_20261107.md) / [所需官方契约](UPSTREAM_CONTRACT_REQUEST.md)。
 
 ## 构建与安装
 
@@ -21,6 +21,7 @@ pnpm build
 
 ## 使用与数据
 
+- “TSP行情同步进度”每60秒通过官方 `minuteRefreshStatus / marketSnapshot / dataStatus / extensionPackages` 读取供给和安装元数据，也可手动刷新。快照数量为候选覆盖，维表数量单独显示，统计待更新和读取错误显式标明；自选或日历读取失败不妨碍该卡展示。这里的轮次与覆盖不是MA55扫描结果。
 - 默认读取自选股，可切换自选分组、股票/ETF。每页最多20只，只有当前页参与更新，历史加载并发最多3只。搜索通过官方 `instrumentSearch` 添加临时观察，不写入宿主自选；临时搜索集合在离开页面后结束。
 - 首次读取官方本地分钟接口最近10个交易日；10日窗口已满但有效历史不足时扩大到20日。至少56根连续有效完成15m K才能确认。原始分钟继续由 TSP 存储、同步和复权。
 - 交易日来自官方上证指数日K日期；每股行情仅经 `ctx.api.klineMinuteRange / klineMinuteBatch / klineDaily` 读取。分钟量单位为宿主的“手”，量比与研究样本的“股”无量纲等价。
@@ -45,6 +46,7 @@ IndexedDB `lan-ma55-v02` 仅保存派生状态：每股单调水位、结构状�
 | --- | --- |
 | `src/extension.mjs` | 清单、页面生命周期、范围和有限并发 |
 | `src/host_data.mjs` | TSP公开数据桥、资产与逐日价格口径 |
+| `src/supply_status.mjs` | 官方供给/安装元数据读取，独立错误和读取时间 |
 | `src/aggregate.mjs` | 北京时间、真实分钟完整性及5m/15m聚合 |
 | `src/engine.mjs` | 冻结特征和逐根V0.2规则 |
 | `src/state.mjs` | 水位、确认、风险和有界派生存储 |
@@ -78,7 +80,7 @@ pnpm test
 & $env:MA55_PYTHON -B -X utf8 build_backend.py
 ```
 
-产物 `dist/lan-ma55-state-0.2.1.zip` 遵循官方 `extension.yaml` v1。包内仅有清单和6个Python模块，不带前端、行情或数据库。隔离临时宿主已验证安装、启动、停用、卸载；本轮保留真实TSP的原有安装版本，没有安装这个后台包或重启宿主。
+产物 `dist/lan-ma55-state-0.2.1.zip` 遵循官方 `extension.yaml` v1。包内仅有清单和6个Python模块，不带前端、行情或数据库。0.2.1轮次的隔离临时宿主已验证安装、启动、停用、卸载；真实宿主没有安装该包。当前缺少行情读取及页面结果桥，单独安装仅创建空库，故V0.2.2仍不安装。
 
 同时构建两种产物时，先运行 `pnpm build`，再运行 `build_backend.py`；Vite构建会清空dist目录。
 
