@@ -55,6 +55,8 @@ test('mount loading, empty, group switch, public stock preview and disposal', as
     openStockPreview: value => { preview = value; return true; },
   } });
   assert.match(dom.window.document.body.textContent, /MA55 结构观察/);
+  assert.match(dom.window.document.body.textContent, /尚未完成全市场监控/);
+  assert.match(dom.window.document.body.textContent, /FULL_MARKET_BLOCKED_BY_HOST_CONTRACT/);
   const query = dom.window.document.querySelector('[data-control="query"]');
   query.value = '600000'; query.dispatchEvent(new dom.window.Event('input', { bubbles: true }));
   await pause();

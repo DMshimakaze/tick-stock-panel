@@ -1,6 +1,8 @@
 # MA55 结构观察 · 兰 V0.2
 
-独立 Page Pack，版本 `0.2.0`，面向 TSP 官方 `v0.3.32` / Page Pack SDK v1。运行时只有一个自包含 ES Module；删除页面包即可移除，不需要修改或重建宿主。
+独立 Page Pack，版本 `0.2.1`，面向 TSP 官方 `v0.3.32` / Page Pack SDK v1。运行时只有一个自包含 ES Module；删除页面包即可移除，不需要修改或重建宿主。
+
+**全市场后台状态：`FULL_MARKET_BLOCKED_BY_HOST_CONTRACT`，尚未完成全市场监控。** 页面保留自选浏览器观察能力；新增独立SQLite及离线服务见下文。[本轮真实状态](FULL_MARKET_STATUS_20261107.md) / [所需官方契约](UPSTREAM_CONTRACT_REQUEST.md)。
 
 ## 构建与安装
 
@@ -67,3 +69,32 @@ pnpm test
 测试专用 `oracle.py` 从固定Git提交导出参考源码到临时目录，实际调用原Python函数；生产包不依赖MA55仓库、Python或CSV。私有行情仅只读进入子进程内存，不进入仓库、构建包或报告。
 
 规则来源、实际验证与现有接口缺口见 [REVIEW_HANDOFF.md](REVIEW_HANDOFF.md)。
+
+## 独立派生状态后端
+
+后端包ID为 `lan.ma55.state`，版本0.2.1，和浏览器页面独立。构建使用已有nga：
+
+```powershell
+& $env:MA55_PYTHON -B -X utf8 build_backend.py
+```
+
+产物 `dist/lan-ma55-state-0.2.1.zip` 遵循官方 `extension.yaml` v1。包内仅有清单和6个Python模块，不带前端、行情或数据库。隔离临时宿主已验证安装、启动、停用、卸载；本轮保留真实TSP的原有安装版本，没有安装这个后台包或重启宿主。
+
+同时构建两种产物时，先运行 `pnpm build`，再运行 `build_backend.py`；Vite构建会清空dist目录。
+
+如单独导入后台包，重启TSP后 `startup(context)` 仅初始化 `context.data_dir/user_data/lan_ma55/state.sqlite3`，**不启动市场扫描**。官方包管理器卸载代码不会删除该数据库。可在同目录 `settings.json` 设置 `{"retention_sessions":60}`，允许20–252；仅在显式离线服务完成计算后按所给交易日日历裁剪旧事件/扫描记录。
+
+- `backend/engine.py`：指定提交的原Python纯规则和特征，无Pandas或外部仓库运行依赖。
+- `backend/pipeline.py`：已完成15m验证、单调水位、55根必要输入、时槽量、确认与后续风险。
+- `backend/store.py`：四张派生表、有界原子事务及只读分页；首次确认 `ON CONFLICT DO NOTHING`。
+- `backend/service.py`：显式离线数据集消费，最多128股一批、一个写线程和有界队列，保存恢复水位及轮次分母。没有宿主数据读取器、行情SDK、HTTP采集器或后台定时器。
+- `backend/extension.py`：仅通过官方setup/startup契约注册自身命名空间只读 `/status /events /symbols /cycles`。状态始终报告当前合同阻碍，分页结果标为OFFLINE；Page Pack尚不能通过公开桥调用这些路由。
+
+离线调用入口是 `OfflineService.scan(universe=..., inputs=..., bar_end=..., sessions=..., source_asof=..., first_seen_at=...)`。`universe` 每项显式给出 `symbol/asset_type='stock'/raw_tick`；`inputs` 按不超过128股的批次提供 `(symbol, bars)`；每根bar包含完成15m OHLCV、北京时间timestamp、`source_count=3` 和已验证的调整比例 `adjust_factor`。其来源必须已完成复权与完整性验证。该入口不会获取数据，离线结果不代表真实市场覆盖，也不接管原浏览器观察版。
+
+从仓库根目录进行后端定向验证：
+
+```powershell
+& $env:MA55_PYTHON -B -X utf8 -m pytest addons/lan_ma55/tests_backend -q -s -p no:cacheprovider
+& $env:MA55_PYTHON -B -X utf8 -m ruff check addons/lan_ma55/backend addons/lan_ma55/tests_backend addons/lan_ma55/build_backend.py
+```
