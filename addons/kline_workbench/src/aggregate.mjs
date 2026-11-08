@@ -55,12 +55,32 @@ export function aggregateMinutes(sessions, period, now = beijing(), calendar = [
   }
   return result(bars, counts);
 }
-export function dailyCandles(rows, now = beijing()) {
+export function aggregateFive(sessions, period, now = beijing(), calendar = []) {
+  const size = Number(period.replace('m',''));
+  if (![5,15,30,60].includes(size)) throw Error('5m原始K不能生成1m');
+  const input = new Map(sessions.flatMap(s=>s.rows.map(r=>[r.datetime,r])));
+  const known = sessions.map(s=>s.date).sort();
+  const days = calendar.filter(d=>d>=known[0] && d<=known.at(-1));
+  const counts = {received:input.size,pending:0,auction:0}, bars=[], cutoff=epoch(now)-60;
+  for (const day of days.length ? days : known) for (const start of [570,780]) for (let end=start+size;end<=start+120;end+=size) {
+    const timestamp=stamp(day,end), time=epoch(timestamp);
+    if (time>cutoff) { counts.pending++; continue; }
+    const rows=Array.from({length:size/5},(_,i)=>input.get(stamp(day,end-size+5+i*5)));
+    const breakBefore=!calendar.length && end===570+size;
+    if (!rows.every(valid)) { bars.push({timestamp,time,complete:false,breakBefore,reason:'缺少真实5m输入'}); continue; }
+    bars.push({timestamp,time,complete:true,breakBefore,open:rows[0].open,high:Math.max(...rows.map(r=>r.high)),low:Math.min(...rows.map(r=>r.low)),
+      close:rows.at(-1).close,volume:rows.reduce((s,r)=>s+r.volume,0),amount:rows.every(r=>Number.isFinite(r.amount))?rows.reduce((s,r)=>s+r.amount,0):null});
+  }
+  return result(bars,counts);
+}
+export function dailyCandles(rows, now = beijing(), calendar = []) {
   const counts = { received: rows.length, pending: 0, auction: 0 }, cutoff = epoch(now) - 60;
-  const bars = [...rows].sort((a, b) => a.date.localeCompare(b.date)).flatMap(row => {
-    const timestamp = row.date + ' 15:00:00', time = epoch(timestamp);
+  const ordered = [...rows].sort((a,b)=>a.date.localeCompare(b.date)), byDay=new Map(rows.map(r=>[r.date,r]));
+  const days = calendar.length ? calendar.filter(d=>d>=ordered[0]?.date && d<=ordered.at(-1)?.date) : ordered.map(r=>r.date);
+  const bars = days.flatMap(date => {
+    const row=byDay.get(date), timestamp = date + ' 15:00:00', time = epoch(timestamp);
     if (time > cutoff) { counts.pending++; return []; }
-    return [{ ...row, time, timestamp, complete: Boolean(valid(row)), reason: '日K字段无效' }];
+    return [{ ...row, time, timestamp, complete: Boolean(valid(row)), reason: '日K缺失或字段无效' }];
   });
   return result(bars, counts);
 }

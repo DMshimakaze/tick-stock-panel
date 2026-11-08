@@ -18,6 +18,8 @@ const reason = value => ({ WARMUP: '不足56根连续完成15m', INSUFFICIENT_WA
 export function workbenchUrl(symbol, event) {
   const params = new URLSearchParams({ symbol, period: '15m' });
   if (event?.confirmed_at) params.set('event', event.confirmed_at.replace(' ', 'T'));
+  if (event?.setup_at) params.set('setup', event.setup_at.replace(' ', 'T'));
+  if (event?.defense > 0) params.set('defense', String(event.defense));
   return '/lan-kline?' + params;
 }
 
@@ -65,7 +67,7 @@ export function mountResults(el, ctx) {
     const dates = [...new Set([s.market_date, ...(s.available_dates || [])].filter(Boolean))].sort().reverse();
     const active = model.selected, selected = active?.row, event = active?.event, d = active?.decision;
     const fact = (label, value) => `<div><span>${label}</span><strong>${esc(value)}</strong></div>`;
-    root.innerHTML = `<style>${CSS}</style><div class="mr-header"><div><h1>MA55 结构观察<small>兰 · V0.2.9</small></h1><div class="mr-meta">QuantDash Pro → 后台5m→15m → 冻结V0.2 → SQLite → 官方扩展数据</div></div><button data-action="refresh" ${busy ? 'disabled' : ''}>${busy ? '正在读取后台…' : '刷新后台结果'}</button></div>
+    root.innerHTML = `<style>${CSS}</style><div class="mr-header"><div><h1>MA55 结构观察<small>兰 · V0.2.10</small></h1><div class="mr-meta">QuantDash Pro → 后台5m→15m → 冻结V0.2 → SQLite → 官方扩展数据</div></div><button data-action="refresh" ${busy ? 'disabled' : ''}>${busy ? '正在读取后台…' : '刷新后台结果'}</button></div>
       <section class="mr-panel" aria-label="MA55扫描状态"><h2>MA55扫描状态 · ${esc(phase(s.phase))}</h2><div class="mr-facts">${[
         ['最新交易日', s.market_date || '等待真实行情'], ['数据截至', s.data_asof || '尚无完成15m'],
         ['本轮处理 / 核实股票分母', `${num(cycle.processed_symbols)} / ${num(cycle.expected_symbols ?? universe.expected)}`],
@@ -75,7 +77,7 @@ export function mountResults(el, ctx) {
         ['本批耗时 / 额度等待', `${num(s.batch_ms, 1)}ms / ${num(s.wait_seconds, 1)}秒`],
         ['最近请求 / 轮次完成', `${s.last_request_at || '尚无'} / ${cycle.completed_at || '进行中'}`],
       ].map(([label, value]) => fact(label, value)).join('')}</div>
-      <div class="mr-meta">后台${s.backend_scanning ? '已启动，关闭网页仍运行' : '状态待核实或已停止'} · 5m预算24次/滚动60秒，每批最多100股 · 股票元信息 ${num(s.metadata_processed)} / ${num(s.metadata_expected)} · SQLite逐股状态 ${num(s.symbol_states)}</div></section>
+      <div class="mr-meta">后台${s.backend_scanning ? '已启动，关闭网页仍运行' : '状态待核实或已停止'} · 5m预算${num(s.minute_request_limit ?? 24)}次/滚动60秒，每批最多100股 · 股票元信息 ${num(s.metadata_processed)} / ${num(s.metadata_expected)} · SQLite逐股状态 ${num(s.symbol_states)}</div></section>
       ${universe.unclassified || universe.listing_status_unconfirmed ? `<div class="mr-panel mr-warning">股票池范围待确认：未分类 ${num(universe.unclassified)}，非快照股票中上市状态未提供 ${num(universe.listing_status_unconfirmed)}。已确认股票类型 ${num(universe.expected)}，其中缺tick ${num(universe.unpriced)} 仍计入分母并暂停BUY；此范围不标为完整上市全集验收。<div class="mr-meta">源股票快照 ${num(universe.quote_pool)}；名称映射候选 ${num(universe.candidates)}；ETF/指数等已排除 ${num(universe.excluded)}。缺K按缺口计，不按停牌或0 BUY计。</div></div>` : ''}
       ${model.error || s.error || s.publisher_error ? `<div class="mr-error" role="alert">${esc([model.error, s.error, s.publisher_error].filter(Boolean).join('；'))}</div>` : ''}
       <div class="mr-tools"><label>结果交易日 <select aria-label="结果交易日" data-control="date">${dates.map(day => `<option ${model.date === day ? 'selected' : ''}>${esc(day)}</option>`).join('') || '<option>等待历史</option>'}</select></label><button data-action="latest">跟随最新交易日</button><input aria-label="全市场股票搜索" data-control="query" value="${esc(model.query)}" placeholder="股票名称或完整代码"><button data-action="search">搜索</button></div>
@@ -134,7 +136,7 @@ export function mountResults(el, ctx) {
   if (typeof ctx.api.extPagesList === 'function') {
     ctx.api.extPagesList().then(pages => {
       if (disposed) return;
-      model.workbench = pages.some(p => p.enabled && !p.error && p.path === '/lan-kline') ? 'enabled' : 'disabled'; render();
+      model.workbench = pages.some(p => p.enabled && !p.error && (p.path === '/lan-kline' || p.managed_by === 'lan.kline')) ? 'enabled' : 'disabled'; render();
     }).catch(() => { if (!disposed) { model.workbench = 'unknown'; render(); } });
   } else model.workbench = 'unknown';
   timer = setInterval(() => { if (el.ownerDocument.visibilityState !== 'hidden') void refresh(); }, 10_000);

@@ -80,7 +80,8 @@ class Worker:
         self.stop = Event()
         self.lock = Lock()
         self.state = dict(phase="STARTING", backend_scanning=True, error=None, started_at=str(now_cn()),
-                          rule_version="MA55_15M_MINIMAL_V5", version="0.2.8")
+                          rule_version="MA55_15M_MINIMAL_V5", version="0.2.10",
+                          minute_request_limit=settings.get('minute_requests_per_minute', 24))
         self.publisher = Publisher(settings["api_base"], settings.get("api_token"))
         self.last_publish = 0
         self.collector = None
@@ -206,7 +207,8 @@ class Worker:
                 key = self.settings.get("quantdash_token") or os.environ.get("QUANTDASH_TOKEN")
                 if not key:
                     raise ValueError("QUANTDASH_TOKEN is required in the backend environment or private MA55 settings")
-                self.collector = Collector(key, self.folder / "sdk_cache", stop=self.stop, report=self.report)
+                self.collector = Collector(key, self.folder / "sdk_cache", stop=self.stop, report=self.report,
+                                           limit=self.settings.get('minute_requests_per_minute', 24))
                 checkpoint = store.meta("source_checkpoint")
                 if checkpoint:
                     self.collector.restore(checkpoint)

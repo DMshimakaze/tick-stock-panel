@@ -5,6 +5,13 @@ import { movingAverages, eventAnchor } from '../src/indicators.mjs';
 import { session } from './fixtures.mjs';
 import { withLineBreaks } from '../src/chart.mjs';
 const now = '2026-11-08 12:00:00', calendar = ['2026-11-06'];
+
+test('daily MA does not bridge an actually missing exchange session',()=>{
+  const row={open:10,high:12,low:9,close:11,volume:3};
+  const result=dailyCandles([{...row,date:'2026-11-04'},{...row,date:'2026-11-06'}],now,['2026-11-04','2026-11-05','2026-11-06']);
+  assert.equal(result.gaps,1);assert.equal(result.continuous,1);
+  assert.equal(movingAverages(result.bars,[2]).get(2).at(-1).value,undefined);
+});
 test('chart suppresses the outgoing line across an unavailable MA run',()=>{
   const points=[{time:1,value:10},{time:2,value:11},{time:3},{time:4},{time:5,value:12},{time:6,value:13}];
   const draw=withLineBreaks(points,'red');

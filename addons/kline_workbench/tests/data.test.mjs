@@ -1,38 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReader, searchInstruments, fullSymbol, liveTailAllowed } from '../src/data.mjs';
-import { A,B,apiFixture,session } from './fixtures.mjs';
-const tick=()=>new Promise(r=>setTimeout(r,0));
-test('official APIs only, bounded session cache, no automatic provider call',async()=>{
-  const {api,calls}=apiFixture(), reader=createReader(api);
-  await reader.read(A); await reader.read(A);
-  assert.deepEqual(calls,[['range',A,20],['daily',A,400]]);
-  reader.dispose();
+import { createReader,decodePayload,DEMAND,VIEW } from '../src/data.mjs';
+export function bridge() {
+  const tables={[DEMAND]:new Map(),[VIEW]:new Map()}, calls=[];
+  const api={
+    async extDataRows(table,options) { calls.push(['read',table,options]);return {rows:[...tables[table].values()].map(r=>({...r}))}; },
+    async extDataIngest(table,{rows}) {calls.push(['write',table]);for(const r of rows) tables[table].set(r.scope,{...r});},
+  };
+  const publish=()=>{for(const d of tables[DEMAND].values()) tables[VIEW].set(d.scope,{...d,revision:'1',status_json:JSON.stringify({phase:'READY'}),payload_json:JSON.stringify({symbol:d.requested_symbol,raw:{},ratios:null,basis:'RAW'})});};
+  return {api,tables,calls,publish};
+}
+test('two simultaneous tabs claim distinct bounded slots through the official API',async()=>{
+  const b=bridge(), a=createReader(b.api,{clientId:'a',clock:()=>100000}), c=createReader(b.api,{clientId:'b',clock:()=>100000});
+  await Promise.all([a.read('600519.SH'),c.read('000001.SZ')]);b.publish();
+  assert.equal((await a.poll()).symbol,'600519.SH');assert.equal((await c.poll()).symbol,'000001.SZ');
+  assert.equal(b.tables[DEMAND].size,2);assert.ok(b.calls.every(r=>[DEMAND,VIEW].includes(r[1])));
+  a.dispose();c.dispose();
 });
-test('one active symbol, skipped queued selections, stale results and disposal',async()=>{
-  const {api,calls}=apiFixture(); let release;
-  const original=api.klineMinuteRange;
-  api.klineMinuteRange=(s,d)=>s===A?new Promise(r=>{release=()=>original(s,d).then(r);}):original(s,d);
-  const reader=createReader(api), first=reader.read(A); await tick();
-  const skipped=reader.read('600001.SH'), latest=reader.read(B);
-  release(); assert.equal(await first,null); assert.equal(await skipped,null); assert.equal((await latest).symbol,B);
-  assert.ok(!calls.some(c=>c[1]==='600001.SH'));
-  const stopped=reader.read(A,{force:true});reader.dispose();assert.equal(await stopped,null);
+test('rapid switch ignores a stale response and reuses its own slot',async()=>{
+  const b=bridge(), r=createReader(b.api,{clientId:'a',clock:()=>100000});
+  await r.read('600519.SH');b.publish();
+  await r.read('000001.SZ');assert.equal((await r.poll()).pending,true);
+  b.publish();assert.equal((await r.poll()).symbol,'000001.SZ');assert.equal(b.tables[DEMAND].size,1);
+  assert.equal(await r.poll(),null);r.dispose();assert.equal(await r.poll(),null);
 });
-test('typed search accepts stock/ETF including BJ, without guessed market or tick',async()=>{
-  const {api}=apiFixture(); assert.equal(fullSymbol('600000'),null); assert.equal(fullSymbol(' 920001.bj '),'920001.BJ');
-  assert.equal((await searchInstruments(api,B))[0].asset_type,'etf');
-  await assert.rejects(()=>searchInstruments(api,''),/请输入/);
+test('lease expiry permits reuse; 16 occupied live slots reports a real capacity limit',async()=>{
+  const b=bridge();for(let i=0;i<16;i++) b.tables[DEMAND].set(String(i),{scope:String(i),client_id:'other'+i,request_ms:100000});
+  const r=createReader(b.api,{clientId:'a',clock:()=>100000});await assert.rejects(()=>r.read('600519.SH'),/16个/);r.dispose();
+  b.tables[DEMAND].get('0').request_ms=0;
+  const s=createReader(b.api,{clientId:'b',clock:()=>100000});await s.read('600519.SH');assert.equal(b.tables[DEMAND].size,16);s.dispose();
 });
-test('explicit live tail only for one confirmed trading symbol, never Sunday or lunch',async()=>{
-  const {api}=apiFixture();let requests=0;
-  api.klineDaily=async symbol=>({symbol,rows:[{date:'2026-11-09'}]});
-  api.klineMinute=async symbol=>{requests++;return {symbol,date:'2026-11-09',source:'live',rows:session('2026-11-09').rows.slice(1,4)};};
-  const reader=createReader(api);
-  await assert.rejects(()=>reader.read(A,{tail:true,now:'2026-11-08 10:00:00'}),/不是已确认/);
-  assert.equal(requests,0);
-  const data=await reader.read(A,{tail:true,now:'2026-11-09 10:00:00'});
-  assert.equal(requests,1); assert.equal(data.sessions.at(-1).date,'2026-11-09');
-  assert.equal(liveTailAllowed(data,'2026-11-09 12:30:00'),false);
-  reader.dispose();
+test('one real factor projection affects only OHLC, missing coverage explicitly stays RAW',()=>{
+  const raw={'5m':[['2026-11-06 09:35:00',10,12,9,11,3,3300]]};
+  const q=decodePayload({symbol:'600519.SH',raw,ratios:{'2026-11-06':.5}},{}).sessions[0].rows[0];
+  assert.equal(q.close,5.5);assert.equal(q.volume,3);assert.equal(q.amount,3300);
+  assert.equal(decodePayload({raw,ratios:null},{}).sessions[0].rows[0].close,11);
+  assert.throws(()=>decodePayload({raw,ratios:{}},{}),/投影缺少/);
 });

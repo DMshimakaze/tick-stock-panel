@@ -2,7 +2,7 @@ format: tick-extension-package
 format_version: 1
 id: lan.ma55
 display_name: 兰 MA55 V0.2
-version: 0.2.9
+version: 0.2.10
 extension_api_version: 1
 author: DMshimakaze
 description: >-
