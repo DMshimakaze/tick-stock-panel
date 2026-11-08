@@ -1,8 +1,10 @@
 # 兰 MA55 V0.2 · QuantDash Pro 后台
 
-`lan.ma55` 0.2.8 是面向官方 TSP v0.3.32 的前后端一体化外置扩展。TSP 后端启动后采集 QuantDash 原始完成5m，聚合15m，执行冻结 `MA55_15M_MINIMAL_V5`，写入自身 SQLite，再经官方扩展数据 API 发布。页面 `/lan-ma55` 只查看结果，关闭网页仍继续计算。
+`lan.ma55` 0.2.9 是面向官方 TSP v0.3.32 的前后端一体化外置扩展。TSP 后端启动后采集 QuantDash 原始完成5m，聚合15m，执行冻结 `MA55_15M_MINIMAL_V5`，写入自身 SQLite，再经官方扩展数据 API 发布。页面 `/lan-ma55` 只查看结果，关闭网页仍继续计算。
 
 周末默认展示后台最近真实交易日，支持此前日期、BUY、观察、数据状态、全市场搜索分页和官方个股详情。实际覆盖与剩余限制见 [本轮验收](QUANTDASH_PRO_ACCEPTANCE_20261108.md)。此前的 `RUNTIME_ROOT_CAUSE.md` 和 `FULL_MARKET_STATUS_20261107.md` 保留为旧版本记录。
+
+0.2.9仅在选中结果区新增独立[分钟K工作台](../kline_workbench/README.md)深链，保留官方详情按钮；工作台启用状态经公开页面清单确认。MA55后端/算法/采集源码保持0.2.8原样。
 
 ## 构建与安装
 
@@ -14,7 +16,7 @@ pnpm --dir addons/lan_ma55 build
 & $ma55Python -B -X utf8 addons/lan_ma55/build_backend.py
 ```
 
-产物 `addons/lan_ma55/dist/lan-ma55-0.2.8.zip` 仅含清单、后端源码和自包含页面。Vite 会清空插件 dist，先构建页面再打 ZIP，产物不提交。
+产物 `addons/lan_ma55/dist/lan-ma55-0.2.9.zip` 仅含清单、后端源码和自包含页面。Vite 会清空插件 dist，先构建页面再打 ZIP，产物不提交。
 
 TSP **设置 → 导入与备份** 安装 ZIP；先停用并备份旧独立 `lan_ma55` Page Pack，避免重复路由。重启 TSP 后端并刷新页面，侧栏进入 **MA55 结构观察**。前后端 ID 均为 `lan.ma55`，统一更新、启停和回退。
 

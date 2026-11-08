@@ -7,7 +7,7 @@ import zipfile
 def build(destination=None):
     root = Path(__file__).resolve().parent
     target = (
-        Path(destination) if destination else root / "dist" / "lan-ma55-0.2.8.zip"
+        Path(destination) if destination else root / "dist" / "lan-ma55-0.2.9.zip"
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     names = ["__init__.py", "engine.py", "pipeline.py", "store.py", "extension.py",

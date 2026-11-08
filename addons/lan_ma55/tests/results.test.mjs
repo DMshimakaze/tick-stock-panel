@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import { mountResults, readDay } from '../src/results.mjs';
+import { mountResults, readDay, workbenchUrl } from '../src/results.mjs';
 
 const pause = () => new Promise(resolve => setTimeout(resolve, 20));
 const summary = { market_date: '2026-11-06', data_asof: '2026-11-06 15:00:00',
@@ -56,4 +56,23 @@ test('historical signals keep original date and REPLAY source; stock preview use
 test('publication pending is distinct from a successfully scanned historical zero', async () => {
   const result = await readDay({ extDataRows: async () => ({ rows: [] }) }, '2026-11-05', summary);
   assert.equal(result.ready, false);
+});
+
+test('workbench link uses public enabled-page list, original symbol/time, and keeps official preview', async () => {
+  const event={confirmed_at:'2026-11-06 13:15:00',mode:'REPLAY'};
+  const url=new URL(workbenchUrl('600000.SH',event),'http://localhost');
+  assert.equal(url.pathname,'/lan-kline');assert.equal(url.searchParams.get('symbol'),'600000.SH');
+  assert.equal(url.searchParams.get('event'),'2026-11-06T13:15:00');
+  for(const enabled of [true,false]){
+    const dom=new JSDOM('<main/>',{url:'http://localhost',pretendToBeVisual:true});
+    const api={extPagesList:async()=>[{id:'lan_kline',enabled,path:'/lan-kline',error:''}],
+      extDataRows:async id=>({rows:id==='lan_ma55_summary'?[{payload_json:JSON.stringify(summary)}]:[{...row,events_json:JSON.stringify([event])}]})};
+    const dispose=mountResults(dom.window.document.querySelector('main'),{api,ui:{openStockPreview:()=>true}});
+    await pause();dom.window.document.querySelector('[data-row]').click();
+    assert.equal(Boolean(dom.window.document.querySelector('a.mr-kline')),enabled);
+    assert.ok(dom.window.document.querySelector('[data-action="preview"]'));
+    if(enabled)assert.equal(new URL(dom.window.document.querySelector('a.mr-kline').href).searchParams.get('event'),'2026-11-06T13:15:00');
+    else assert.match(dom.window.document.body.textContent,/安装并启用独立分钟K工作台/);
+    dispose();dom.window.close();
+  }
 });
