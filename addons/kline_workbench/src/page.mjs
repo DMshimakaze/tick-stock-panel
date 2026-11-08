@@ -33,7 +33,7 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
   const root=createView(el.ownerDocument);el.append(root);
   const $=s=>root.querySelector(s), reader=readerFactory(ctx.api);
   const model={...prefs,period:new URL(win.location.href).searchParams.has('period')?link.period:prefs.period,
-    event:link.event,setup:link.setup,defense:link.defense,factor:link.factor,eventSymbol:link.symbol,selected:null,data:null,matches:[],error:link.errors.join('；'),loading:false,pinned:false};
+    event:link.event,setup:link.setup,defense:link.defense,factor:link.factor,eventSymbol:link.symbol,selected:null,data:null,sourceError:null,displayPeriod:link.period,matches:[],error:link.errors.join('；'),loading:false,pinned:false};
   let disposed=false, revision=0, searchRevision=0, current=null, polling=false, plot, needsReset=true;
   const format=(v,digits=model.data?.asset_type==='etf'?3:2)=>Number.isFinite(v)?v.toLocaleString('zh-CN',{maximumFractionDigits:digits,minimumFractionDigits:digits}):'—';
   function readout(bar) {
@@ -69,37 +69,41 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
     if (disposed) return;
     controls();
     const data=model.data, calendar=data?.calendar||[];
-    current=savedSeries(data,model.period);
-    const enabled=model.mas.filter(m=>m.enabled).map(m=>m.period), averages=savedAverages(current.bars,enabled), anchor=eventAnchor(current.bars,model.event,model.period);
+    const requested=savedSeries(data,model.period);
+    if (requested.validCount) model.displayPeriod=model.period;
+    current=savedSeries(data,model.displayPeriod);
+    const fallback=current.validCount>0 && model.displayPeriod!==model.period;
+    const enabled=model.mas.filter(m=>m.enabled).map(m=>m.period), averages=savedAverages(current.bars,enabled), anchor=eventAnchor(current.bars,model.event,model.displayPeriod);
     const eventBar=current.bars.find(b=>b.timestamp===model.event);
     const matchingBasis=data?.basis==='QFQ' && model.factor>0 && eventBar?.adjust_factor===model.factor;
     plot?.update({bars:current.bars,averages,anchor,asset:data?.asset_type,visible:model.visible,
       maColors:new Map(model.mas.map((m,i)=>[m.period,MA_COLORS[i%MA_COLORS.length]])),
-      defense:model.event && matchingBasis?model.defense:null},reset || (needsReset && current.validCount>0));
-    if (current.validCount) needsReset=false;
-    if (!current.validCount) $('.kw-readout').textContent=model.selected?'等待后台预热真实历史…':'选择标的后加载持久行情';
+      defense:model.event && matchingBasis?model.defense:null},reset || (needsReset && requested.validCount>0));
+    if (requested.validCount) needsReset=false;
+    if (!current.validCount) $('.kw-readout').textContent=model.sourceError?'公共行情服务不可用，请查看服务状态后重试':model.error?'行情读取失败，请重试':model.selected?'等待后台预热真实历史…':'选择标的后加载持久行情';
     $('.kw-name').textContent=data?.name||model.selected?.name||'选择股票 / ETF';
     $('.kw-code').textContent=model.selected?.symbol||'—';
     $('.kw-source').textContent=`lan.marketdata · ${data?.basis==='QFQ'?'前复权':data?'原始价格 · 因子待补':'公共滚动行情'} · ${data?.asset_type==='etf'?'ETF':'股票'}`;
     const latest=current.bars.filter(b=>b.complete).at(-1);
-    $('.kw-price').innerHTML=latest?`<strong>${format(latest.close)}</strong><div class="kw-muted">最新完成 ${model.period} · ${esc(latest.timestamp.slice(5,16))}</div>`:'';
-    $('.kw-coverage').textContent=`${current.validCount}根 ${model.period==='1d'?'日K':model.period} · ${current.dates.length}交易日 · 末段连续${current.continuous}根${current.gaps?' · 缺口'+current.gaps:''}`;
+    $('.kw-price').innerHTML=latest?`<strong>${format(latest.close)}</strong><div class="kw-muted">最新完成 ${model.displayPeriod} · ${esc(latest.timestamp.slice(5,16))}</div>`:'';
+    $('.kw-coverage').textContent=`${current.validCount}根 ${model.displayPeriod} · ${current.dates.length}交易日 · 末段连续${current.continuous}根${current.gaps?' · 缺口'+current.gaps:''}`;
     $('.kw-asof').textContent='截至 '+(current.dataAsOf?.slice(0,16)||'等待真实数据');
     const phase=data?.status?.phase;
-    $('.kw-status').textContent=!model.selected?'选择股票后读取公共库已保存的15/30/60m。':!data?`正在读取 ${model.selected.symbol} 的公共滚动行情…`:
+    $('.kw-status').textContent=model.sourceError?`公共行情服务不可用 · ${model.sourceError.error||'请查看公共行情状态'}${current.validCount?' · 保留上次有效图表':''}`:!model.selected?'选择股票后读取公共库已保存的15/30/60m。':!data?`正在读取 ${model.selected.symbol} 的公共滚动行情…`:
       `${phase==='READY'?'● 已保存':phase==='GAP'?'◐ 公共行情有缺口':phase==='FACTOR_PENDING'?'◌ 因子覆盖待补':phase==='DATA_SOURCE_UNAVAILABLE'?'公共行情服务不可用':'◌ 公共行情预热中'} · 当前周期 ${data.status.row_count||0} / 256根 · 60m预热 ${data.status.warm_count||0} / 256 · ${data.basis_note||''}${data.status.error?' · '+data.status.error:''}${data.status.source_error?' · '+data.status.source_error:''}${['RATE_LIMITED','QUOTA_WAIT','SOURCE_UNAVAILABLE'].includes(data.status.source_phase)?' · 公共源 '+data.status.source_phase+' 等待'+(data.status.wait_seconds||0)+'秒':''}`;
-    $('.kw-availability').textContent=enabled.filter(n=>current.continuous<n).map(n=>`MA${n}需要${n}根，末段有效${current.continuous}根`).join('；');
+    $('.kw-source-status').hidden=!model.sourceError;
+    $('.kw-availability').textContent=[...(fallback?[`${model.period}尚无已完成K，当前保留${model.displayPeriod}图；后台继续预热`]:[]),...enabled.filter(n=>current.continuous<n).map(n=>`MA${n}需要${n}根，末段有效${current.continuous}根`)].join('；');
     $('.kw-anchor').innerHTML=model.event?`<b>MA55 BUY</b> 原始确认 ${esc(model.event)}${model.setup?' · 支撑测试 '+esc(model.setup):''}${model.defense?' · 防守 '+format(model.defense,3)+'（MA55前复权）':''}<br>${esc(anchor.message)}${!matchingBasis?' · 价格基准未证实一致，防守价线未显示':''}<button data-action="focus" ${anchor.index<0?'disabled':''}>定位信号</button>`:'';
   }
   function accept(data) {
     if (!data || data.symbol!==model.selected?.symbol) return;
-    if (data.unavailable) { model.error=data.status.error; if(model.data) model.data={...model.data,status:data.status}; }
-    else if (!data.pending) { model.data=data;model.pinned=Boolean(data.status.pinned); }
+    if (data.unavailable) { model.sourceError=data.status;model.error=data.status.error; }
+    else if (!data.pending) { model.sourceError=null;model.error='';model.data=data;model.pinned=Boolean(data.status.pinned); }
     update();
   }
   async function load(item, {pinChange=null}={}) {
     const id=++revision, same=model.selected?.symbol===item.symbol;
-    if (!same) { model.data=null;model.pinned=false;needsReset=true; }
+    if (!same) { model.data=null;model.sourceError=null;model.displayPeriod=model.period;model.pinned=false;needsReset=true; }
     if (model.event && item.symbol!==model.eventSymbol) { model.event=null;model.setup=null;model.defense=null;model.factor=null; }
     model.selected=item;model.loading=true;model.error='';model.matches=[];$('.kw-results').textContent='';writeUrl();update(!same);
     try { const data=await reader.read(item.symbol,{period:model.period,pinned:pinChange});if (!disposed && id===revision) accept(data); }

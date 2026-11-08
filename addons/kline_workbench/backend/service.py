@@ -18,7 +18,7 @@ class Worker:
         self.settings = settings
         self.stop, self.lock = Event(), Lock()
         self.state = dict(
-            version="2.0.0",
+            version="2.0.1",
             phase="STARTING",
             source="lan.marketdata HTTP v1",
             minute_request_limit=0,
@@ -189,6 +189,8 @@ class Worker:
                         else None
                     )
                     message = f"公共行情不可用 HTTP {status}" if status else str(exc)
+                    if status == 503:
+                        message += " · " + str(exc.response.json()["detail"])
                     self.report(phase="DATA_SOURCE_UNAVAILABLE", error=message)
                     try:
                         self.publish_error(demands, message)

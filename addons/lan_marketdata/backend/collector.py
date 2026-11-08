@@ -240,7 +240,12 @@ class Collector:
         )
         if set(data) - set(symbols):
             raise ValueError("UNREQUESTED_SYMBOL")
-        return {s: normalize_five(rows, start, end) for s, rows in data.items()}
+        result = {}
+        for symbol in list(data):
+            # Do not retain the entire SDK response alongside all normalized
+            # 100 x 3072 bars. The HTTP request is still one 100-symbol batch.
+            result[symbol] = normalize_five(data.pop(symbol), start, end)
+        return result
 
     def close(self):
         self.qd.close()

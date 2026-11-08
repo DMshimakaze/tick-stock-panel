@@ -3,6 +3,7 @@
 from contextlib import contextmanager
 import json
 from pathlib import Path
+import re
 from threading import RLock
 
 import duckdb
@@ -16,13 +17,20 @@ def encoded(value):
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, *, memory_limit="8GB"):
+        if not isinstance(memory_limit, str) or not re.fullmatch(
+            r"(?:[1-9]|[12][0-9]|3[0-2])GB", memory_limit.strip().upper()
+        ):
+            raise ValueError("duckdb_memory_limit must be an integer from 1GB to 32GB")
+        self.memory_limit = memory_limit.strip().upper()
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = RLock()
         self.conn = duckdb.connect(
-            str(path), config={"threads": 2, "memory_limit": "1GB"}
+            str(path), config={"threads": 2, "memory_limit": self.memory_limit}
         )
+        self.connection_settings = {}
+        self.connection_status()
         self.conn.execute(
             "CREATE TABLE IF NOT EXISTS meta(key VARCHAR PRIMARY KEY,payload VARCHAR NOT NULL)"
         )
@@ -31,6 +39,33 @@ class Store:
         )
         self.conn.execute("""CREATE TABLE IF NOT EXISTS bars(symbol VARCHAR,timeframe VARCHAR,stamp VARCHAR,
                              payload VARCHAR NOT NULL,PRIMARY KEY(symbol,timeframe,stamp))""")
+
+    def connection_status(self):
+        with self.lock:
+            if self.conn is not None:
+                limit, threads, buffer_bytes = self.conn.execute(
+                    "SELECT current_setting('memory_limit'), current_setting('threads'), "
+                    "(SELECT coalesce(sum(memory_usage_bytes),0) FROM duckdb_memory())"
+                ).fetchone()
+                self.connection_settings = dict(
+                    duckdb_memory_limit=limit,
+                    duckdb_threads=threads,
+                    duckdb_memory_limit_configured=self.memory_limit,
+                    duckdb_buffer_bytes=buffer_bytes,
+                )
+            return dict(
+                self.connection_settings, database_connected=self.conn is not None
+            )
+
+    def reopen(self):
+        # The failed symbol transaction has rolled back. Keep the process lease;
+        # only this connection and its transient buffers are replaced.
+        with self.lock:
+            self.close(checkpoint=False)
+            self.conn = duckdb.connect(
+                str(self.path), config={"threads": 2, "memory_limit": self.memory_limit}
+            )
+            self.connection_status()
 
     @contextmanager
     def transaction(self):
@@ -135,14 +170,16 @@ class Store:
         return [json.loads(row[0]) for row in reversed(rows)]
 
     def _write(self, symbol, frames):
-        rows = [
-            (symbol, tf, r["timestamp"], encoded(r))
-            for tf, bars in frames.items()
-            for r in bars
-        ]
-        if rows:
+        # Indicators used the complete causal input above. Persist only each
+        # period's surviving tail, instead of inserting 3072 raw rows then
+        # deleting 2928 of them in the same transaction.
+        for tf, bars in frames.items():
+            retained = sorted(bars, key=lambda r: r["timestamp"])[-CAPACITY[tf] :]
+            if not retained:
+                continue
             incoming = pd.DataFrame(
-                rows, columns=["symbol", "timeframe", "stamp", "payload"]
+                [(symbol, tf, r["timestamp"], encoded(r)) for r in retained],
+                columns=["symbol", "timeframe", "stamp", "payload"],
             )
             self.conn.register("incoming", incoming)
             try:
@@ -427,7 +464,12 @@ class Store:
                 for s, tf, n, a, b in rows
             ]
 
-    def close(self):
+    def close(self, *, checkpoint=True):
         with self.lock:
-            self.conn.execute("CHECKPOINT")
-            self.conn.close()
+            if self.conn is not None:
+                try:
+                    if checkpoint:
+                        self.conn.execute("CHECKPOINT")
+                finally:
+                    self.conn.close()
+                    self.conn = None

@@ -2,10 +2,13 @@
 
 import atexit
 from datetime import timedelta
+import logging
 import os
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic
+
+import duckdb
 
 from .collector import Collector, SourceError
 from .grid import now_cn, latest_point, points, wall
@@ -81,6 +84,7 @@ def task(master, sessions, target, now, demanded=(), warm_symbols=None):
                 stage == "WARM"
                 and warm_symbols is not None
                 and symbol not in warm_symbols
+                and symbol not in demanded
             ):
                 continue
             if (
@@ -101,12 +105,17 @@ def task(master, sessions, target, now, demanded=(), warm_symbols=None):
             ]
             start = max(start_day, row.get("listing_date") or start_day) + " 09:35:00"
             groups.setdefault((start, target, stage), []).append(symbol)
-        if groups:
-            key = next(iter(groups))
-            return (
-                *key,
-                sorted(groups[key], key=lambda s: (s not in demanded, s))[:100],
-            )
+    if groups:
+        # Select the viewed stock's history first, then fill the same range with
+        # other eligible stocks so priority does not turn bulk HTTP into singles.
+        key = min(
+            groups,
+            key=lambda key: (
+                not any(s in demanded for s in groups[key]),
+                key[2] != "COLD",
+            ),
+        )
+        return (*key, sorted(groups[key], key=lambda s: (s not in demanded, s))[:100])
     # Retained-window gaps use bounded retries, never an infinite tight loop.
     for symbol, row in active.items():
         if row.get("gaps") and row.get("retry_at", "") <= now:
@@ -132,13 +141,20 @@ class Worker:
             max(1, 30 - host_background),
         )
         self.state = dict(
-            version="1.0.1",
+            version="1.0.2",
             api_version=1,
             phase="STARTING",
             error=None,
             capacities={"5m": 144, "derived": 256},
             source="lan.marketdata",
             writer_alive=False,
+            database_connected=False,
+            db_retry_count=0,
+            db_retry_limit=2,
+            db_retry_attempt=0,
+            next_retry_at=None,
+            last_error=None,
+            error_code=None,
             minute_request_limit=self.minute_limit,
             host_minute_reserve=host_background,
             collection_scope=settings.get("collection_symbols", "FULL_MARKET"),
@@ -171,14 +187,87 @@ class Worker:
                 writer_alive=self.thread.is_alive(),
                 requests=dict(self.collector.metrics) if self.collector else {},
             )
-        if self.store:
-            result.update(
-                last_commit=self.store.meta("last_commit"),
-                universe=self.store.meta("universe", {}),
-                generation=self.store.meta("generation", 0),
-                calendar_last=max(self.store.meta("sessions", []), default=None),
-            )
+        store = self.store
+        if store:
+            with store.lock:
+                result.update(store.connection_status())
+                if store.conn is not None:
+                    result.update(
+                        last_commit=store.meta("last_commit"),
+                        universe=store.meta("universe", {}),
+                        generation=store.meta("generation", 0),
+                        calendar_last=max(store.meta("sessions", []), default=None),
+                    )
         return result
+
+    def commit_batch(
+        self, symbols, data, factors, *, sessions, start, end, now, target, stage
+    ):
+        """One network batch, one symbol transaction at a time; OOM never re-fetches."""
+        checkpoint = self.collector.checkpoint()
+        for symbol in symbols:
+            received = data.pop(symbol, {})
+            previous = self.store.instrument(symbol)
+            attempts = 0 if received else previous.get("attempts", 0) + 1
+            receipt = dict(
+                live_attempt=target,
+                stage=stage,
+                attempts=attempts,
+                retry_at=str(
+                    wall(now) + timedelta(seconds=min(3600, 60 * 2 ** min(attempts, 5)))
+                ),
+            )
+            for retry in range(3):
+                try:
+                    self.store.accept(
+                        symbol,
+                        received,
+                        sessions=sessions,
+                        start=start,
+                        end=end,
+                        now=now,
+                        events=factors.get(symbol),
+                        factor_response=symbol in factors,
+                        checkpoint=checkpoint,
+                        receipt=receipt,
+                    )
+                    self.report(
+                        phase=stage,
+                        error=None,
+                        error_code=None,
+                        next_retry_at=None,
+                        db_retry_attempt=0,
+                        last_commit=now,
+                        batch_committed_symbol=symbol,
+                    )
+                    break
+                except duckdb.OutOfMemoryException:
+                    self.report(
+                        last_error="DUCKDB_OOM: symbol transaction rolled back",
+                        last_error_at=str(now_cn()),
+                        error_code="DUCKDB_OOM",
+                    )
+                    if retry == 2:
+                        raise
+                    logging.getLogger(__name__).warning(
+                        "DuckDB OOM committing %s; reopening (retry %s/2)",
+                        symbol,
+                        retry + 1,
+                        exc_info=True,
+                    )
+                    delay = (5, 15)[retry]
+                    self.report(
+                        phase="RECOVERING_DB",
+                        error="DuckDB memory budget exhausted; retrying the rolled-back symbol",
+                        db_retry_count=self.state["db_retry_count"] + 1,
+                        db_retry_attempt=retry + 1,
+                        next_retry_at=str(now_cn() + timedelta(seconds=delay)),
+                    )
+                    self.store.close(checkpoint=False)
+                    if self.stop.wait(delay):
+                        raise CollectionStopped()
+                    self.store.reopen()
+            del received
 
     def bootstrap(self):
         cache = self.store.meta("metadata_cache", {})
@@ -217,7 +306,17 @@ class Worker:
 
     def run(self):
         try:
-            self.store = Store(self.folder / "rolling.duckdb")
+            self.store = Store(
+                self.folder / "rolling.duckdb",
+                memory_limit=self.settings.get("duckdb_memory_limit", "8GB"),
+            )
+            self.report(
+                **self.store.connection_status(),
+                last_commit=self.store.meta("last_commit"),
+                universe=self.store.meta("universe", {}),
+                generation=self.store.meta("generation", 0),
+                calendar_last=max(self.store.meta("sessions", []), default=None),
+            )
             key = self.settings.get("quantdash_token") or os.environ.get(
                 "QUANTDASH_TOKEN"
             )
@@ -242,7 +341,7 @@ class Worker:
                 work = None
                 try:
                     sessions = self.store.meta("sessions", [])
-                    if not sessions or not self.store.instruments():
+                    if not sessions or self.store.universe_page(0, 1)[0] == 0:
                         self.bootstrap()
                         continue
                     now = str(now_cn())
@@ -306,35 +405,18 @@ class Worker:
                         ]
                         factors = self.collector.factors(needed) if needed else {}
                         data = self.collector.fetch(symbols, start, end)
-                        for symbol in symbols:
-                            attempts = (
-                                0
-                                if data.get(symbol)
-                                else master[symbol].get("attempts", 0) + 1
-                            )
-                            receipt = dict(
-                                live_attempt=target,
-                                stage=stage,
-                                attempts=attempts,
-                                retry_at=str(
-                                    wall(now)
-                                    + timedelta(
-                                        seconds=min(3600, 60 * 2 ** min(attempts, 5))
-                                    )
-                                ),
-                            )
-                            self.store.accept(
-                                symbol,
-                                data.get(symbol, {}),
-                                sessions=sessions,
-                                start=start,
-                                end=end,
-                                now=now,
-                                events=factors.get(symbol),
-                                factor_response=symbol in factors,
-                                checkpoint=self.collector.checkpoint(),
-                                receipt=receipt,
-                            )
+                        self.commit_batch(
+                            symbols,
+                            data,
+                            factors,
+                            sessions=sessions,
+                            start=start,
+                            end=end,
+                            now=now,
+                            target=target,
+                            stage=stage,
+                        )
+                        del data, factors
                         failures = 0
                         continue
                     self.report(phase="WAITING_NEXT_5M", error=None, target_5m=target)
@@ -369,14 +451,42 @@ class Worker:
         except CollectionStopped:
             pass
         except Exception as exc:
-            self.report(phase="ERROR", error=f"{type(exc).__name__}: {exc}")
+            logging.getLogger(__name__).exception("Public market worker stopped")
+            code = (
+                "DUCKDB_OOM"
+                if isinstance(exc, duckdb.OutOfMemoryException)
+                else "DB_OR_INITIALIZATION_ERROR"
+            )
+            message = (
+                (
+                    "DuckDB OOM after two recovery retries; committed data retained"
+                    if self.state["db_retry_attempt"] == 2
+                    else "DuckDB initialization/metadata OOM; worker stopped, committed data retained"
+                )
+                if code == "DUCKDB_OOM"
+                else str(exc)
+                if isinstance(exc, ValueError)
+                and str(exc).startswith("duckdb_memory_limit")
+                else f"Public market worker stopped ({type(exc).__name__}); inspect local backend log"
+            )
+            self.report(
+                phase="ERROR",
+                error=message,
+                error_code=code,
+                last_error=message,
+                last_error_at=str(now_cn()),
+                next_retry_at=None,
+            )
         finally:
-            if self.collector:
-                self.collector.close()
-            if self.store:
-                self.store.close()
+            try:
+                if self.collector:
+                    self.collector.close()
+                if self.store:
+                    self.store.close(checkpoint=self.state["phase"] != "ERROR")
+            finally:
                 self.store = None
-            self.lease.close()
+                self.report(database_connected=False)
+                self.lease.close()
 
     def close(self):
         self.stop.set()

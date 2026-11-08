@@ -16,14 +16,14 @@ function data() {
  return {symbol:'600519.SH',name:'合成测试股',asset_type:'stock',basis:'QFQ',basis_note:'公共测试视图',calendar,series,status:{phase:'READY',row_count:256,warm_count:256}};
 
 }
-function setup(){
- const dom=new JSDOM('<main/>',{url:'http://tsp/lan-kline?symbol=600519.SH&period=15m',pretendToBeVisual:true}), updates=[], requests=[], source=data();
+function setup(source=data()){
+ const dom=new JSDOM('<main/>',{url:'http://tsp/lan-kline?symbol=600519.SH&period=15m',pretendToBeVisual:true}), updates=[], requests=[];
  const chart={update:(m,reset)=>updates.push({m,reset}),range:n=>updates.push({range:n}),dates:(from,to)=>updates.push({from,to}),dispose(){}};
  const reader={async read(s,opts){requests.push(opts);return source;},async poll(){return null;},dispose(){}};
  const dispose=mountWorkbench(dom.window.document.querySelector('main'),{api:{instrumentSearch:async()=>{throw Error('Deep link must never search');}}},
  {chartFactory:()=>chart,readerFactory:()=>reader,now:()=> '2026-12-01 16:00:00'});
  const $=s=>dom.window.document.querySelector(s);
- return {dom,$,updates,requests,close(){dispose();dom.window.close();}};
+ return {dom,$,updates,requests,reader,close(){dispose();dom.window.close();}};
 }
 test('saved periods and MAs are displayed without browser aggregation',()=>{
  const d=data();for(const period of ['15m','30m','60m']) {
@@ -47,8 +47,42 @@ test('native-style compact controls, period persistence, saved MA, date range an
  assert.ok(s.requests.every(r=>r.period));s.close();
 });
 test('strict event timestamp and manifest match unified extension',async()=>{
- assert.equal(extension.version,'2.0.0');assert.equal(extension.routes[0].path,'/lan-kline');
+ assert.equal(extension.version,'2.0.1');assert.equal(extension.routes[0].path,'/lan-kline');
  assert.equal(parseLink('http://tsp/?symbol=000006.SZ&event=2026-11-06T15:00:00&setup=2026-11-06T14:30:00&defense=7.25').defense,7.25);
  assert.equal(parseLink('http://tsp/?event=2026-02-30T15:00:00').event,null);
- const built=await import('../dist/extension.js');assert.equal(built.default.version,'2.0.0');
+ const built=await import('../dist/extension.js');assert.equal(built.default.version,'2.0.1');
+});
+
+test('empty 503 is a service failure with a status link, never ordinary warmup',async(t)=>{
+ const s=setup({symbol:'600519.SH',unavailable:true,status:{phase:'DATA_SOURCE_UNAVAILABLE',error:'公共行情不可用 HTTP 503 · ERROR (DUCKDB_OOM)'}});
+ t.after(()=>s.close());await pause();
+ assert.match(s.$('.kw-readout').textContent,/服务不可用/);
+ assert.doesNotMatch(s.$('.kw-readout').textContent,/预热真实历史/);
+ assert.match(s.$('.kw-status').textContent,/503.*DUCKDB_OOM/);
+ assert.equal(s.$('.kw-source-status').hidden,false);
+ assert.equal(s.$('.kw-source-status').getAttribute('href'),'/api/extensions/lan.marketdata/v1/status');
+});
+
+test('partial saved 15m draws immediately and an empty 60m retains the labeled 15m chart',async(t)=>{
+ const source=data();source.series['15m']=source.series['15m'].slice(-160);source.series['60m']=[];
+ source.status={phase:'WARMING',row_count:160,warm_count:0};
+ const s=setup(source);t.after(()=>s.close());await pause();
+ assert.equal(s.updates.at(-1).m.bars.length,160);
+ assert.match(s.$('.kw-coverage').textContent,/160根 15m/);
+ s.$('[data-period="60m"]').click();await pause();
+ assert.equal(s.updates.at(-1).m.bars.length,160);
+ assert.match(s.$('.kw-coverage').textContent,/160根 15m/);
+ assert.match(s.$('.kw-availability').textContent,/60m尚无已完成K.*保留15m/);
+ assert.equal(s.updates.at(-1).reset,false);
+});
+
+test('a source error preserves valid bars and a successful retry clears the error',async(t)=>{
+ const source=data(),s=setup(source);t.after(()=>s.close());await pause();
+ s.reader.read=async()=>({symbol:source.symbol,unavailable:true,status:{phase:'DATA_SOURCE_UNAVAILABLE',error:'HTTP 503'}});
+ s.$('[data-action="refresh"]').click();await pause();
+ assert.equal(s.updates.at(-1).m.bars.length,256);
+ assert.match(s.$('.kw-status').textContent,/保留上次有效图表/);
+ s.reader.read=async()=>source;s.$('[data-action="refresh"]').click();await pause();
+ assert.equal(s.$('[role="alert"]').textContent,'');
+ assert.equal(s.$('.kw-source-status').hidden,true);
 });
