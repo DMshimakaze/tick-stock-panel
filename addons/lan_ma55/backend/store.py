@@ -6,7 +6,6 @@ from pathlib import Path
 import sqlite3
 from threading import Lock
 
-from .engine import RULE_VERSION
 from .pipeline import SCHEMA_VERSION, serializable
 
 _writers = set()
@@ -63,7 +62,7 @@ def read_page(
     symbol=None,
     day=None,
     phase=None,
-    rule_version=RULE_VERSION,
+    rule_version=None,
 ):
     if (
         kind not in ("events", "symbols", "cycles")
@@ -77,7 +76,7 @@ def read_page(
         "cycles": "scan_cycle",
     }[kind]
     where, values = [], []
-    if kind != "cycles":
+    if kind != "cycles" and rule_version:
         where.append("rule_version=?")
         values.append(rule_version)
     if symbol and kind != "cycles":
@@ -191,8 +190,8 @@ class StateWriter:
             )
             completed.add((row["symbol"], row["last_cycle"]))
         for row in self.conn.execute(
-            f"SELECT e.*,r.payload AS risk FROM signal_event e LEFT JOIN event_risk r USING(event_id) WHERE e.symbol IN ({marks}) AND e.rule_version=? ORDER BY e.confirmed_at,e.event_id",
-            [*symbols, RULE_VERSION],
+            f"SELECT e.*,r.payload AS risk FROM signal_event e LEFT JOIN event_risk r USING(event_id) WHERE e.symbol IN ({marks}) ORDER BY e.confirmed_at,e.event_id",
+            symbols,
         ):
             record = result.get(row["symbol"])
             if record:

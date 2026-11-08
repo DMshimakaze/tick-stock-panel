@@ -29,7 +29,7 @@ console.log(JSON.stringify(Object.fromEntries(Object.entries(SCENARIOS).map(([k,
 def frozen_cases():
     pack = os.environ.get("MA55_FROZEN_PACK")
     if (
-        not os.environ.get("MA55_REFERENCE_REPO")
+        not (os.environ.get("MA55_REFERENCE_REPO") or os.environ.get("MA55_REFERENCE_ARCHIVE"))
         or not pack
         or not (Path(pack) / "manifest.json").is_file()
     ):

@@ -15,9 +15,9 @@ import sys
 import tarfile
 import tempfile
 
-COMMIT = "23477622536d1206b2af3c164b4c905aa2e15e8d"
+COMMIT = "5d1d0f6e8913f528110c93e054429f050b9851f6"
 BLOBS = {
-    "ma55/structure.py": "0e777b61d9c33c9fdae4892508491e24824b0a5e",
+    "ma55/structure.py": "643dee687cb08e0a2cf26832c03d6b7d69a1aa07",
     "ma55/features.py": "e682a304c493b1ff8c78a67980f51096056451ab",
 }
 POSITIVE = {
@@ -50,16 +50,31 @@ def clean(value):
 
 
 def main():
-    repo = os.environ["MA55_REFERENCE_REPO"]
+    repo = os.environ.get("MA55_REFERENCE_REPO")
     payload = json.load(sys.stdin)
     def git(*args):
         return subprocess.check_output(["git", "-C", repo, *args])
-    for path, blob in BLOBS.items():
-        assert git("rev-parse", f"{COMMIT}:{path}").decode().strip() == blob
-    archive = git("archive", COMMIT, "config.py", "ma55")
+    archive_path = os.environ.get("MA55_REFERENCE_ARCHIVE")
+    if not archive_path:
+        for path, blob in BLOBS.items():
+            assert git("rev-parse", f"{COMMIT}:{path}").decode().strip() == blob
+        archive = git("archive", COMMIT, "config.py", "ma55")
+    else:
+        archive = Path(archive_path).read_bytes()
     with tempfile.TemporaryDirectory(prefix="lan-ma55-oracle-") as directory:
         with tarfile.open(fileobj=io.BytesIO(archive)) as source:
-            source.extractall(directory, filter="data")
+            prefix = f"DM-Ma55-Method-{COMMIT}/" if archive_path else ""
+            for member in source.getmembers():
+                name = member.name.removeprefix(prefix)
+                if not member.isfile() or not (name == 'config.py' or name.startswith('ma55/')):
+                    continue
+                target = Path(directory) / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                content = source.extractfile(member).read()
+                if name in BLOBS:
+                    blob = subprocess.check_output(['git', 'hash-object', '--stdin'], input=content).decode().strip()
+                    assert blob == BLOBS[name]
+                target.write_bytes(content)
         sys.path.insert(0, directory)
         import pandas as pd
         from ma55.features import minimal_features

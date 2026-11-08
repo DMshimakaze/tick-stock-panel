@@ -1,16 +1,14 @@
 format: tick-extension-package
 format_version: 1
 id: lan.ma55
-display_name: 兰 MA55 V0.2
-version: 0.2.10
+display_name: 兰 MA55 R1
+version: 0.3.2
 extension_api_version: 1
 author: DMshimakaze
-description: >-
-  QuantDash Pro专用5m批量后台、SQLite恢复水位与冻结V0.2规则。
-  页面仅经官方扩展数据通道展示最新交易日及历史，关闭浏览器不停止后台。
+description: 只读公共已完成15m，运行冻结V5_R1并保留原SQLite确认历史。
 backend: backend.extension
 frontend: frontend/extension.mjs
 requires_app: '>=0.3.32,<0.3.33'
 requires_python: '>=3.11'
 platforms: [any]
-requires: ['quantdash==0.1.0', 'httpx>=0.28,<0.29']
+requires: ['httpx>=0.28,<0.29']

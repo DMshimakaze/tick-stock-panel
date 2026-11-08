@@ -1,4 +1,5 @@
-// All page IO uses the public Page SDK. SQLite remains the backend authority.
+// All page IO uses the public Page SDK; saved bars and MAs come from lan.marketdata.
+import { epoch, stamp } from './aggregate.mjs';
 export const DEMAND = 'lan_kline_demand', VIEW = 'lan_kline_view', SLOTS = 16, LEASE_MS = 90000;
 export const fullSymbol = text => /^\d{6}\.(SH|SZ|BJ)$/.test(text.trim().toUpperCase()) ? text.trim().toUpperCase() : null;
 export async function searchInstruments(api, query) {
@@ -7,17 +8,29 @@ export async function searchInstruments(api, query) {
   return data.results.filter(r => ['stock','etf'].includes(r.asset_type) && fullSymbol(r.symbol));
 }
 export function decodePayload(payload, status) {
-  const ratios = payload.ratios;
-  const decode = (period) => (payload.raw?.[period] || []).map(([datetime,open,high,low,close,volume,amount]) => {
-    const ratio = ratios === null ? 1 : ratios?.[datetime.slice(0,10)];
-    if (!Number.isFinite(ratio) || ratio <= 0) throw Error('前复权投影缺少对应交易日，未显示混合价格');
-    return { datetime, date:datetime.slice(0,10), open:open*ratio, high:high*ratio, low:low*ratio, close:close*ratio, volume, amount };
-  });
-  const group = rows => [...rows.reduce((map,r) => {
-    if (!map.has(r.date)) map.set(r.date,[]);
-    map.get(r.date).push(r); return map;
-  },new Map())].map(([date,rows]) => ({date,rows}));
-  return { ...payload, status, sessions:group(decode('5m')), oneSessions:group(decode('1m')), daily:decode('1d'), readAt:new Date().toISOString() };
+  return { ...payload, status, series:payload.series || {}, readAt:new Date().toISOString() };
+}
+export function savedSeries(data, period) {
+  const rows=data?.series?.[period] || [], lookup=new Map(rows.map(r=>[r.timestamp,r]));
+  const first=rows[0]?.timestamp, last=rows.at(-1)?.timestamp, size=Number(period.slice(0,-1)), bars=[];
+  // Whitespace exposes missing saved buckets; no OHLC or MA is aggregated here.
+  for (const day of data?.calendar || []) if (day>=first?.slice(0,10) && day<=last?.slice(0,10)) {
+    for (const base of [570,780]) for (let end=base+size;end<=base+120;end+=size) {
+      const timestamp=stamp(day,end);
+      if (timestamp<first || timestamp>last) continue;
+      const row=lookup.get(timestamp);
+      bars.push(row?{...row,time:epoch(timestamp),complete:row.complete===true}:
+        {timestamp,time:epoch(timestamp),complete:false,reason:'公共行情缺口'});
+    }
+  }
+  let continuous=0;
+  for (const b of bars) continuous=b.complete?continuous+1:0;
+  return {bars,continuous,validCount:rows.length,gaps:bars.filter(b=>!b.complete).length,
+    dataAsOf:last,dates:[...new Set(rows.map(r=>r.timestamp.slice(0,10)))]};
+}
+export function savedAverages(bars, periods) {
+  return new Map(periods.map(n=>[n,bars.map(b=>Number.isFinite(b['ma'+n]) && b.complete?
+    {time:b.time,value:b['ma'+n]}:{time:b.time})]));
 }
 export function createReader(api, { clientId = globalThis.crypto.randomUUID(), clock = Date.now } = {}) {
   let current = null, scope = null, generation = 0, lastDemand = 0, lastRevision = null, disposed = false;
@@ -52,7 +65,9 @@ export function createReader(api, { clientId = globalThis.crypto.randomUUID(), c
     const payload = JSON.parse(result.payload_json || '{}');
     if (payload.symbol !== selected.symbol) throw Error('发布视图标的不匹配，未渲染旧股票');
     lastRevision=row.revision;
-    return decodePayload(payload, JSON.parse(row.status_json));
+    const status=JSON.parse(row.status_json);
+    if (payload.unavailable) return {symbol:selected.symbol,unavailable:true,status};
+    return decodePayload(payload, status);
   }
   return {
     async read(symbol, {period='15m',pinned=null}={}) {

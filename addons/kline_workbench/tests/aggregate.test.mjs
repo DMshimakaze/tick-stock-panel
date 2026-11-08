@@ -76,6 +76,6 @@ test('daily incomplete bars are omitted; anchor never snaps an absent event to a
   assert.equal(dailyCandles(rows,now).validCount,1);
   const bars=aggregateMinutes([session()],'15m',now,calendar).bars;
   assert.equal(eventAnchor(bars,'2026-11-06T13:15:00','15m').index,8);
-  assert.match(eventAnchor(bars,'2026-10-30T13:15:00','15m').message,/超出当前可得分钟历史/);
+  assert.match(eventAnchor(bars,'2026-10-30T13:15:00','15m').message,/历史确认超出滚动窗口/);
   assert.equal(eventAnchor(bars,'2026-11-06T13:10:00','15m').index,-1);
 });

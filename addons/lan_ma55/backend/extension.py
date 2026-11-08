@@ -1,4 +1,4 @@
-"""Official lan.ma55 package: startup owns the dedicated QuantDash worker."""
+"""Official lan.ma55 package: startup owns the shared-data consumer."""
 
 import json
 import os
@@ -23,9 +23,6 @@ def startup(context):
     retention = config.get('retention_sessions', 60)
     if type(retention) is not int or not 20 <= retention <= 252:
         raise ValueError('retention_sessions must be an integer in 20..252')
-    minute_limit = config.get('minute_requests_per_minute', 24)
-    if type(minute_limit) is not int or not 1 <= minute_limit <= 24:
-        raise ValueError('minute_requests_per_minute must be an integer in 1..24')
     host = os.environ.get('BACKEND_HOST', '127.0.0.1')
     if host == '0.0.0.0':
         host = '127.0.0.1'

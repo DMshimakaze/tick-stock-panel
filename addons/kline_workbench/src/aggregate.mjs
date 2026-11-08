@@ -1,5 +1,5 @@
 // End-stamped Beijing exchange bars. A missing input stays whitespace.
-export const PERIODS = ['1d', '1m', '5m', '15m', '30m', '60m'];
+export const PERIODS = ['15m', '30m', '60m'];
 const fields = ['open', 'high', 'low', 'close', 'volume', 'amount'];
 const cn = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
   hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' });

@@ -15,6 +15,6 @@ export function eventAnchor(bars, event, period) {
   const target = event.replace('T', ' '), index = bars.findIndex(b => b.timestamp === target && b.complete);
   if (index >= 0) return { index, message: `确认时点 ${target} · 标记原始15m信号结束时间` };
   if (!bars.length || target < bars[0].timestamp || target > bars.at(-1).timestamp)
-    return { index: -1, message: '目标时点超出当前可得分钟历史' };
+    return { index: -1, message: '历史确认超出滚动窗口' };
   return { index: -1, message: period === '15m' ? '目标时点缺少完整K，未标记' : '目标时点不对应当前级别完整K，请切换15m定位' };
 }

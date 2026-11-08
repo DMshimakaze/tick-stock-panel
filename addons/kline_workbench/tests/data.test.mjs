@@ -30,10 +30,8 @@ test('lease expiry permits reuse; 16 occupied live slots reports a real capacity
   b.tables[DEMAND].get('0').request_ms=0;
   const s=createReader(b.api,{clientId:'b',clock:()=>100000});await s.read('600519.SH');assert.equal(b.tables[DEMAND].size,16);s.dispose();
 });
-test('one real factor projection affects only OHLC, missing coverage explicitly stays RAW',()=>{
-  const raw={'5m':[['2026-11-06 09:35:00',10,12,9,11,3,3300]]};
-  const q=decodePayload({symbol:'600519.SH',raw,ratios:{'2026-11-06':.5}},{}).sessions[0].rows[0];
-  assert.equal(q.close,5.5);assert.equal(q.volume,3);assert.equal(q.amount,3300);
-  assert.equal(decodePayload({raw,ratios:null},{}).sessions[0].rows[0].close,11);
-  assert.throws(()=>decodePayload({raw,ratios:{}},{}),/投影缺少/);
+test('server bars and MAs arrive unchanged, without a second price projection',()=>{
+  const bar={timestamp:'2026-11-06 09:45:00',open:5,high:6,low:4.5,close:5.5,volume:300,ma55:5.3};
+  const data=decodePayload({symbol:'600519.SH',series:{'15m':[bar]},basis:'QFQ'},{});
+  assert.deepEqual(data.series['15m'][0],bar);assert.equal(data.series['1m'],undefined);
 });

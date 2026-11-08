@@ -3,11 +3,11 @@ const SUMMARY = 'lan_ma55_summary', DAY = 'lan_ma55_day', HISTORY = 'lan_ma55_hi
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const num = (v, digits = 0) => Number.isFinite(v) ? v.toLocaleString('zh-CN', { maximumFractionDigits: digits }) : '未知';
 const mode = value => ({ REPLAY: '历史重放', LIVE: '实时确认', DELAYED: '延迟确认' }[value] || value || '—');
-const phase = value => ({ STARTING: '后台启动中', VERIFYING_UNIVERSE: '核实完整股票候选与元信息',
+const phase = value => ({ WAITING: '等待新的完成15m', DATA_SOURCE_UNAVAILABLE: '公共行情不可用，保留已保存结果', STARTING: '后台启动中', VERIFYING_UNIVERSE: '核实完整股票候选与元信息',
   COLLECTING: '后台采集完成5m', ANALYZING: '后台计算与提交', QUOTA_WAIT: '等待滚动请求额度',
   RATE_LIMITED: '供应商429冷却', NETWORK_WAIT: '网络重试等待', WAITING_NEXT_SESSION: '等待下一交易日，缺口按计划重试',
   WAITING_NEXT_5M: '等待下一个完成5m', ERROR: '后台受阻', CALENDAR_PENDING: '等待真实交易日历' }[value] || value || '尚未收到后台状态');
-const reason = value => ({ WARMUP: '不足56根连续完成15m', INSUFFICIENT_WARMUP: '不足56根连续完成15m',
+const reason = value => ({ VERSION_HISTORY_INSUFFICIENT: '旧确认状态缺少足够真实历史，等待重建', FACTOR_PENDING: '因子覆盖待补', REBUILD_PENDING: '更正数据重建中', METADATA_PENDING: '证券元信息待补', WARMUP: '不足56根连续完成15m', INSUFFICIENT_WARMUP: '不足56根连续完成15m',
   EMPTY_OR_OMITTED_5M: '源未返回有效5m，原因未确认', MISSING_5M: '缺少真实5m', MISSING_COMPLETED_15M: '15m不连续，重新预热',
   HISTORICAL_FACTOR_UNAVAILABLE: '因子覆盖未确认，暂停BUY', PRICE_BASIS_CHANGED: '价格基准变化，重新预热',
   TICK_UNAVAILABLE: '报价tick未确认，暂停BUY',
@@ -19,6 +19,7 @@ export function workbenchUrl(symbol, event) {
   const params = new URLSearchParams({ symbol, period: '15m' });
   if (event?.confirmed_at) params.set('event', event.confirmed_at.replace(' ', 'T'));
   if (event?.setup_at) params.set('setup', event.setup_at.replace(' ', 'T'));
+  if (event?.adjust_factor > 0) params.set('factor', String(event.adjust_factor));
   if (event?.defense > 0) params.set('defense', String(event.defense));
   return '/lan-kline?' + params;
 }
@@ -67,27 +68,27 @@ export function mountResults(el, ctx) {
     const dates = [...new Set([s.market_date, ...(s.available_dates || [])].filter(Boolean))].sort().reverse();
     const active = model.selected, selected = active?.row, event = active?.event, d = active?.decision;
     const fact = (label, value) => `<div><span>${label}</span><strong>${esc(value)}</strong></div>`;
-    root.innerHTML = `<style>${CSS}</style><div class="mr-header"><div><h1>MA55 结构观察<small>兰 · V0.2.10</small></h1><div class="mr-meta">QuantDash Pro → 后台5m→15m → 冻结V0.2 → SQLite → 官方扩展数据</div></div><button data-action="refresh" ${busy ? 'disabled' : ''}>${busy ? '正在读取后台…' : '刷新后台结果'}</button></div>
+    root.innerHTML = `<style>${CSS}</style><div class="mr-header"><div><h1>MA55 结构观察<small>兰 · V5_R1</small></h1><div class="mr-meta">公共滚动行情 → 完成15m → 冻结V5_R1 → 已保存确认</div></div><button data-action="refresh" ${busy ? 'disabled' : ''}>${busy ? '正在读取后台…' : '刷新后台结果'}</button></div>
       <section class="mr-panel" aria-label="MA55扫描状态"><h2>MA55扫描状态 · ${esc(phase(s.phase))}</h2><div class="mr-facts">${[
         ['最新交易日', s.market_date || '等待真实行情'], ['数据截至', s.data_asof || '尚无完成15m'],
         ['本轮处理 / 核实股票分母', `${num(cycle.processed_symbols)} / ${num(cycle.expected_symbols ?? universe.expected)}`],
         ['有效 / 预热不足', `${num(cycle.valid_symbols)} / ${num(cycle.insufficient_symbols)}`],
         ['缺口 / 失败', `${num(cycle.gap_symbols)} / ${num(cycle.failed_symbols)}`],
-        ['真实HTTP / 分钟批量 / 429', `${num(s.requests?.http_requests)} / ${num(s.requests?.minute_requests)} / ${num(s.requests?.http_429_count)}`],
+        ['共享行情来源', s.source || '等待lan.marketdata'],
         ['本批耗时 / 额度等待', `${num(s.batch_ms, 1)}ms / ${num(s.wait_seconds, 1)}秒`],
         ['最近请求 / 轮次完成', `${s.last_request_at || '尚无'} / ${cycle.completed_at || '进行中'}`],
       ].map(([label, value]) => fact(label, value)).join('')}</div>
-      <div class="mr-meta">后台${s.backend_scanning ? '已启动，关闭网页仍运行' : '状态待核实或已停止'} · 5m预算${num(s.minute_request_limit ?? 24)}次/滚动60秒，每批最多100股 · 股票元信息 ${num(s.metadata_processed)} / ${num(s.metadata_expected)} · SQLite逐股状态 ${num(s.symbol_states)}</div></section>
+      <div class="mr-meta">后台${s.backend_scanning ? '已启动，关闭网页仍运行' : '状态待核实或已停止'} · 只读共享15m，自有分钟请求0 · 股票元信息 ${num(s.metadata_processed)} / ${num(s.metadata_expected)} · SQLite逐股状态 ${num(s.symbol_states)}</div></section>
       ${universe.unclassified || universe.listing_status_unconfirmed ? `<div class="mr-panel mr-warning">股票池范围待确认：未分类 ${num(universe.unclassified)}，非快照股票中上市状态未提供 ${num(universe.listing_status_unconfirmed)}。已确认股票类型 ${num(universe.expected)}，其中缺tick ${num(universe.unpriced)} 仍计入分母并暂停BUY；此范围不标为完整上市全集验收。<div class="mr-meta">源股票快照 ${num(universe.quote_pool)}；名称映射候选 ${num(universe.candidates)}；ETF/指数等已排除 ${num(universe.excluded)}。缺K按缺口计，不按停牌或0 BUY计。</div></div>` : ''}
       ${model.error || s.error || s.publisher_error ? `<div class="mr-error" role="alert">${esc([model.error, s.error, s.publisher_error].filter(Boolean).join('；'))}</div>` : ''}
       <div class="mr-tools"><label>结果交易日 <select aria-label="结果交易日" data-control="date">${dates.map(day => `<option ${model.date === day ? 'selected' : ''}>${esc(day)}</option>`).join('') || '<option>等待历史</option>'}</select></label><button data-action="latest">跟随最新交易日</button><input aria-label="全市场股票搜索" data-control="query" value="${esc(model.query)}" placeholder="股票名称或完整代码"><button data-action="search">搜索</button></div>
       <h2>${model.date === s.market_date ? '最新交易日' : '历史交易日'} ${esc(model.date || '待确认')} · ${model.dayInfo?.ready ? `${buyCount} BUY` : '历史结果发布中'}</h2>
       <p class="mr-meta">${model.dayInfo?.historical ? `历史保留BUY、观察与异常行；该日处理 ${num(model.dayInfo.cycle?.processed_symbols)} / ${num(model.dayInfo.cycle?.expected_symbols)}，有效 ${num(model.dayInfo.cycle?.valid_symbols)}，不足 ${num(model.dayInfo.cycle?.insufficient_symbols)}，缺口 ${num(model.dayInfo.cycle?.gap_symbols)}，失败 ${num(model.dayInfo.cycle?.failed_symbols)}。` : '展示当前后台已发布结果；本轮未结束时，BUY数量随真实提交更新。'} 原始确认时间和 REPLAY / DELAYED / LIVE 来源保留。</p>
       <div class="mr-tabs">${[['buy', '最新交易日 BUY'], ['watch', '观察中'], ['history', '历史确认'], ['data', '数据状态']].map(([key, label]) => `<button data-action="tab" data-tab="${key}" class="${model.tab === key ? 'active' : ''}">${label}</button>`).join('')}</div>
-      <div class="mr-table"><table><thead><tr>${['股票', '确认结束 / 来源', '支撑测试 / 形态', '完成15m / MA55', '量比20 / 同槽', '后台状态'].map(t => `<th>${t}</th>`).join('')}</tr></thead><tbody>${shown.map(({ row, event: e, decision: dd }, i) => `<tr data-row="${i}"><td><b>${esc(row.name)}</b><span class="mr-code">${esc(row.symbol)}</span></td><td class="${e ? 'mr-buy' : ''}">${esc(e?.confirmed_at || '—')}<span class="mr-code">${esc(mode(e?.mode))}</span></td><td>${esc(e?.setup_at || dd.support_test_time || '—')}<span class="mr-code">${e?.pattern === 'SINGLE_BAR' ? '单K收回' : e?.pattern === 'MULTI_BAR' ? '多K测试' : '—'}</span></td><td>${esc(row.bar_end || '暂无完成K')}<span class="mr-code">MA55 ${num(dd.ma55, 3)}</span></td><td>${num(dd.volume_ratio20, 2)} / ${num(dd.volume_ratio_same_clock, 2)}</td><td>${esc(reason(row.reason))}<span class="mr-code">${esc(row.processed_at)}</span></td></tr>`).join('')}</tbody></table>${shown.length ? '' : `<div class="mr-empty">${model.loading ? '正在读取后台派生结果。' : !model.dayInfo?.ready ? '后台正在发布所选历史，等待真实结果。' : model.tab === 'buy' || model.tab === 'history' ? `${esc(model.date)} 已发布结果中没有已确认 BUY。可查看数据状态或选择更早交易日。` : model.tab === 'watch' ? '所选交易日暂无观察结构。' : '当前筛选没有记录。'}</div>`}</div>
+      <div class="mr-table"><table><thead><tr>${['股票', '确认结束 / 来源', '支撑测试 / 形态', '完成15m / MA55', '量比20 / 同槽', '后台状态'].map(t => `<th>${t}</th>`).join('')}</tr></thead><tbody>${shown.map(({ row, event: e, decision: dd }, i) => `<tr data-row="${i}"><td><a class="mr-kline" data-stock-link href="${esc(workbenchUrl(row.symbol, e))}">${esc(row.name)}</a><span class="mr-code">${esc(row.symbol)}</span></td><td class="${e ? 'mr-buy' : ''}">${esc(e?.confirmed_at || '—')}<span class="mr-code">${esc(mode(e?.mode))} · ${esc(e?.rule_version || '')}</span></td><td>${esc(e?.setup_at || dd.support_test_time || '—')}<span class="mr-code">${e?.pattern === 'SINGLE_BAR' ? '单K收回' : e?.pattern === 'MULTI_BAR' ? '多K测试' : '—'}</span></td><td>${esc(row.bar_end || '暂无完成K')}<span class="mr-code">MA55 ${num(dd.ma55, 3)}</span></td><td>${num(dd.volume_ratio20, 2)} / ${num(dd.volume_ratio_same_clock, 2)}</td><td>${esc(reason(row.reason))}<span class="mr-code">${esc(row.processed_at)}</span></td></tr>`).join('')}</tbody></table>${shown.length ? '' : `<div class="mr-empty">${model.loading ? '正在读取后台派生结果。' : !model.dayInfo?.ready ? '后台正在发布所选历史，等待真实结果。' : model.tab === 'buy' || model.tab === 'history' ? `${esc(model.date)} 已发布结果中没有已确认 BUY。可查看数据状态或选择更早交易日。` : model.tab === 'watch' ? '所选交易日暂无观察结构。' : '当前筛选没有记录。'}</div>`}</div>
       <div class="mr-pager"><button data-action="previous" ${model.page === 0 ? 'disabled' : ''}>上一页</button><span>${model.page + 1} / ${pages} · ${all.length}条</span><button data-action="next" ${model.page + 1 >= pages ? 'disabled' : ''}>下一页</button></div>
       ${selected ? `<section class="mr-panel mr-selected"><h2>${esc(selected.name)} ${esc(selected.symbol)}</h2><p>${esc(reason(selected.reason))}</p><p>支撑测试 ${esc(event?.setup_at || d?.support_test_time || '—')} · 确认 ${esc(event?.confirmed_at || '尚未确认')} · ${esc(mode(event?.mode))}</p><p>首次看到 ${esc(event?.first_seen_at || '—')} · 行情截至 ${esc(event?.data_asof || selected.bar_end || '未知')}</p><p>防守点 ${num(event?.defense || d?.support_test_low, 3)} · ${esc(event?.risk_text || '')}</p><button data-action="preview" ${ctx.ui?.openStockPreview ? '' : 'disabled'}>官方个股详情 ↗</button> ${model.workbench === "enabled" ? `<a href="${esc(workbenchUrl(selected.symbol, event))}" class="mr-kline">15 分钟 K ↗</a>` : `<span class="mr-meta">${model.workbench === "checking" ? "正在确认分钟K工作台…" : model.workbench === "disabled" ? "安装并启用独立分钟K工作台后，可从此处打开15分钟K。" : "无法读取工作台启用状态，请在设置中确认。"}</span>`}</section>` : ''}
-      <div class="mr-foot">后台SQLite为唯一权威；页面只读取官方扩展数据，不采集行情、不计算BUY、不使用IndexedDB。历史保留60个交易日（后台可配置）；时间为北京时间。</div>`;
+      <div class="mr-foot">SQLite保存信号与状态，行情来自公共滚动库；页面只读取官方扩展数据，不采集行情、不计算BUY、不使用IndexedDB。历史保留60个交易日（后台可配置）；时间为北京时间。</div>`;
   }
   async function refresh(force = false) {
     if (disposed || busy) return;
@@ -110,6 +111,8 @@ export function mountResults(el, ctx) {
     finally { busy = false; model.loading = false; render(); }
   }
   const click = async e => {
+    const stockLink=e.target.closest('[data-stock-link]');
+    if(stockLink) { if(model.workbench!=='enabled') { e.preventDefault(); model.error='分钟K工作台未就绪，请在设置中启用；可使用下方官方个股详情。'; model.selected=shown[Number(stockLink.closest('[data-row]').dataset.row)]; render(); } return; }
     const row = e.target.closest('[data-row]');
     if (row) { model.selected = shown[Number(row.dataset.row)]; render(); return; }
     const button = e.target.closest('[data-action]'); if (!button || button.disabled) return;

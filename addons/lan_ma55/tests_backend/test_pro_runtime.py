@@ -9,7 +9,7 @@ from addons.lan_ma55.backend.market import (
     adjustment, aggregate_five, latest_point, next_missing, stamp,
 )
 from addons.lan_ma55.backend.pipeline import wall
-from addons.lan_ma55.backend.runtime import ProcessLease, classify
+from addons.lan_ma55.backend.runtime import ProcessLease
 
 
 def five_rows(bars):
@@ -57,17 +57,6 @@ def test_factor_missing_is_not_identity_and_ratio_matches_host_contract():
     assert adjustment(events, "2026-11-05") == .5
     assert adjustment(events, "2026-11-06") == 1
 
-
-def test_stock_pool_preserves_nonquoted_members_and_rejects_guessed_ticks():
-    candidates = {s: s for s in ("600000.SH", "600001.SH", "588170.SH", "000001.SH", "920001.BJ")}
-    def meta(symbol, kind="stock", tick=.01):
-        return dict(symbol=symbol, name=symbol, region="CN", exchange=symbol[-2:], type=kind,
-                    ext=dict(tick_size=tick, listing_date="2000-01-01"))
-    rows, totals = classify(candidates, {s: meta(s, "etf" if s == "588170.SH" else "index" if s == "000001.SH" else "stock",
-                                               0 if s == "600001.SH" else .01) for s in candidates}, {"600000.SH"}, "2026-11-08")
-    assert totals["expected"] == 3 and totals["excluded"] == 2 and totals["unclassified"] == 0
-    assert totals["unpriced"] == 1 and totals["non_snapshot_stocks"] == 2
-    assert next(r for r in rows if r["symbol"] == "920001.BJ")["eligible"]
 
 
 def test_real_receipts_state_cycles_history_and_restart_are_atomic(tmp_path, scenarios):

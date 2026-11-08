@@ -2,13 +2,13 @@ format: tick-extension-package
 format_version: 1
 id: lan.kline
 display_name: 兰 K 线工作台
-version: 1.1.2
+version: 2.0.0
 extension_api_version: 1
 author: DMshimakaze
-description: 按需订阅、75交易日原始5m滚动库与独立K线分析工作台。
+description: 只读公共滚动行情的15/30/60m与均线，官方页面数据桥。
 backend: backend.extension
 frontend: frontend/extension.mjs
 requires_app: '>=0.3.32,<0.3.33'
 requires_python: '>=3.11'
 platforms: [any]
-requires: ['quantdash==0.1.0', 'httpx>=0.28,<0.29']
+requires: ['httpx>=0.28,<0.29']

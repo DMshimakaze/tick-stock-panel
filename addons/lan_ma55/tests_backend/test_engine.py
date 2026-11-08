@@ -28,7 +28,7 @@ def assert_same(actual, expected):
 
 
 def test_every_synthetic_step_matches_actual_pinned_python(scenarios):
-    if not os.environ.get("MA55_REFERENCE_REPO"):
+    if not (os.environ.get("MA55_REFERENCE_REPO") or os.environ.get("MA55_REFERENCE_ARCHIVE")):
         pytest.skip("Pinned reference repository not mounted")
     cases = [
         dict(name=name, bars=case["bars"], tick=case["tick"])

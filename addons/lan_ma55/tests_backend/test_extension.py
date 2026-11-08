@@ -59,11 +59,15 @@ def test_official_install_start_disable_uninstall_preserve_derived_data(
     import time
     for _ in range(100):
         status = client.get("/api/extensions/lan.ma55/status").json()
-        if status["phase"] == "ERROR":
+        if status["phase"] == "DATA_SOURCE_UNAVAILABLE":
             break
         time.sleep(.01)
-    assert status["phase"] == "ERROR" and "QUANTDASH_TOKEN" in status["error"]
-    assert not status["backend_scanning"]
+    assert status["phase"] == "DATA_SOURCE_UNAVAILABLE"
+    import importlib
+    for module in list(sys.modules.values()):
+        if getattr(module, "EXTENSION_ID", None)=="lan.ma55" and getattr(module, "worker", None):
+            module.worker.close()
+    assert status["backend_scanning"]
     path = folder / "user_data" / "lan_ma55" / "state.sqlite3"
     case = scenarios["single"]
     stocks = universe(1)

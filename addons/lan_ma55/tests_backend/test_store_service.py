@@ -248,7 +248,8 @@ def test_confirmation_immutable_separate_risk_version_isolation_and_retention(
             previous=saved[record["symbol"]],
         )
         store.save([renewed], {record["symbol"]: "valid"}, cycle)
-        assert read_page(path, "events")["total"] == 1
+        assert read_page(path, "events")["total"] == 2
+        assert read_page(path, "events", rule_version=RULE_VERSION)["total"] == 1
         assert read_page(path, "events", rule_version="MA55_V4")["total"] == 1
         assert read_page(path, "symbols")["rows"][0]["rule_version"] == RULE_VERSION
         store.prune("2026-11-01")

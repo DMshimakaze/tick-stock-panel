@@ -7,7 +7,7 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from math import isfinite
 
-from .engine import RULE_VERSION, advance, minimal_features
+from .engine import RULE_VERSION, STATE_REVISION, advance, minimal_features
 
 SCHEMA_VERSION = 1
 END_MINUTES = (*range(585, 691, 15), *range(795, 901, 15))
@@ -33,6 +33,7 @@ def empty_record(symbol):
         rule_version=RULE_VERSION,
         schema_version=SCHEMA_VERSION,
         state=dict(
+            state_revision=STATE_REVISION,
             processed_at=None,
             data_asof=None,
             structure=None,
@@ -86,6 +87,7 @@ def process_symbol(
         previous
         and previous.get("rule_version") == RULE_VERSION
         and previous.get("schema_version") == SCHEMA_VERSION
+        and previous.get("state", {}).get("state_revision") == STATE_REVISION
     )
     record = deepcopy(previous) if compatible else empty_record(symbol)
     if previous and not compatible:
@@ -197,7 +199,7 @@ def process_symbol(
             )
         if decision["event"]:
             identity = f"{RULE_VERSION}:{symbol}:SUPPORT:{decision['support_test_time'].replace(' ', 'T')}:TURN:{stamp.replace(' ', 'T')}"
-            if not any(e["event_id"] == identity for e in record["confirmations"]):
+            if not any(e["event_id"] == identity or (e["confirmed_at"] == stamp and e["symbol"] == symbol) for e in record["confirmations"]):
                 mode = "REPLAY"
                 if origin != "REPLAY" and at > after and seen.date() == at.date():
                     mode = (
@@ -221,6 +223,8 @@ def process_symbol(
                     confirm_close=bar["close"],
                     defense=decision["support_test_low"],
                     raw_tick=raw_tick,
+                    price_basis="QFQ",
+                    basis_asof=str(source)[:10],
                     adjust_factor=factor,
                     decision=deepcopy(decision),
                     impulse=deepcopy(structure["last_impulse"]),

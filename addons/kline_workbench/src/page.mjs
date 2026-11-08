@@ -1,6 +1,6 @@
-import { aggregateMinutes, aggregateFive, dailyCandles, beijing, epoch, PERIODS } from './aggregate.mjs';
-import { DEFAULT_MAS, movingAverages, eventAnchor } from './indicators.mjs';
-import { createReader, fullSymbol, searchInstruments } from './data.mjs';
+import { beijing, epoch, PERIODS } from './aggregate.mjs';
+import { DEFAULT_MAS, eventAnchor } from './indicators.mjs';
+import { createReader, fullSymbol, searchInstruments, savedSeries, savedAverages } from './data.mjs';
 import { createWorkbenchChart } from './chart.mjs';
 import { createView, esc } from './view.mjs';
 import { MA_COLORS } from './theme.mjs';
@@ -17,7 +17,7 @@ export function parseLink(url) {
   };
   if (event && !timestamp(event)) errors.push('信号时间无效，未添加标记');
   return {symbol:symbol?fullSymbol(symbol):null,event:timestamp(event),setup:timestamp(q.get('setup')),
-    defense:q.has('defense') && Number(q.get('defense'))>0?Number(q.get('defense')):null,period,errors};
+    factor:q.has('factor')?Number(q.get('factor')):null,defense:q.has('defense') && Number(q.get('defense'))>0?Number(q.get('defense')):null,period,errors};
 }
 function preferences(win) {
   try {
@@ -33,7 +33,7 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
   const root=createView(el.ownerDocument);el.append(root);
   const $=s=>root.querySelector(s), reader=readerFactory(ctx.api);
   const model={...prefs,period:new URL(win.location.href).searchParams.has('period')?link.period:prefs.period,
-    event:link.event,setup:link.setup,defense:link.defense,eventSymbol:link.symbol,selected:null,data:null,matches:[],error:link.errors.join('；'),loading:false,pinned:false};
+    event:link.event,setup:link.setup,defense:link.defense,factor:link.factor,eventSymbol:link.symbol,selected:null,data:null,matches:[],error:link.errors.join('；'),loading:false,pinned:false};
   let disposed=false, revision=0, searchRevision=0, current=null, polling=false, plot, needsReset=true;
   const format=(v,digits=model.data?.asset_type==='etf'?3:2)=>Number.isFinite(v)?v.toLocaleString('zh-CN',{maximumFractionDigits:digits,minimumFractionDigits:digits}):'—';
   function readout(bar) {
@@ -41,7 +41,7 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
     if (!bar.complete) { $('.kw-readout').textContent=bar.timestamp+' · 输入缺口';return; }
     const change=(bar.close/bar.open-1)*100;
     $('.kw-readout').innerHTML=[`<b>${esc(bar.timestamp.slice(0,16))}</b>`,...[['开',bar.open],['高',bar.high],['低',bar.low],['收',bar.close]].map(([k,v])=>`<span>${k} <b>${format(v)}</b></span>`),
-      `<span class="${change>=0?'kw-up':'kw-down'}">${change>=0?'+':''}${format(change)}%</span>`,`<span>量 ${format(bar.volume,0)}手</span>`,`<span>额 ${format(Number.isFinite(bar.amount)?bar.amount/1e4:null)}万</span>`,
+      `<span class="${change>=0?'kw-up':'kw-down'}">${change>=0?'+':''}${format(change)}%</span>`,`<span>量 ${format(bar.volume,0)}股</span>`,`<span>额 ${format(Number.isFinite(bar.amount)?bar.amount/1e4:null)}万</span>`,
       ...bar.averages.map(([n,v])=>`<span style="color:${MA_COLORS[model.mas.findIndex(m=>m.period===n)%MA_COLORS.length]}">MA${n} ${format(v,3)}</span>`)].join('');
   }
   try { plot=chartFactory($('.kw-chart'),readout); } catch(e) { model.error='图表初始化失败：'+e.message; }
@@ -51,6 +51,7 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
     if (model.event) q.set('event',model.event.replace(' ','T'));
     if (model.setup) q.set('setup',model.setup.replace(' ','T'));
     if (model.defense) q.set('defense',String(model.defense));
+    if (model.factor) q.set('factor',String(model.factor));
     win.history.replaceState(null,'','/lan-kline?'+q);
   }
   function controls() {
@@ -68,37 +69,38 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
     if (disposed) return;
     controls();
     const data=model.data, calendar=data?.calendar||[];
-    current=data?(model.period==='1d'?dailyCandles(data.daily,now(),calendar):model.period==='1m'?aggregateMinutes(data.oneSessions,'1m',now(),calendar):aggregateFive(data.sessions,model.period,now(),calendar))
-      :{bars:[],validCount:0,continuous:0,gaps:0,pending:0,dates:[]};
-    const enabled=model.mas.filter(m=>m.enabled).map(m=>m.period), averages=movingAverages(current.bars,enabled), anchor=eventAnchor(current.bars,model.event,model.period);
+    current=savedSeries(data,model.period);
+    const enabled=model.mas.filter(m=>m.enabled).map(m=>m.period), averages=savedAverages(current.bars,enabled), anchor=eventAnchor(current.bars,model.event,model.period);
+    const eventBar=current.bars.find(b=>b.timestamp===model.event);
+    const matchingBasis=data?.basis==='QFQ' && model.factor>0 && eventBar?.adjust_factor===model.factor;
     plot?.update({bars:current.bars,averages,anchor,asset:data?.asset_type,visible:model.visible,
       maColors:new Map(model.mas.map((m,i)=>[m.period,MA_COLORS[i%MA_COLORS.length]])),
-      defense:model.event && data?.basis==='QFQ'?model.defense:null},reset || (needsReset && current.validCount>0));
+      defense:model.event && matchingBasis?model.defense:null},reset || (needsReset && current.validCount>0));
     if (current.validCount) needsReset=false;
     if (!current.validCount) $('.kw-readout').textContent=model.selected?'等待后台预热真实历史…':'选择标的后加载持久行情';
     $('.kw-name').textContent=data?.name||model.selected?.name||'选择股票 / ETF';
     $('.kw-code').textContent=model.selected?.symbol||'—';
-    $('.kw-source').textContent=`QuantDash Pro · ${data?.basis==='QFQ'?'前复权':data?'原始价格 · 因子待补':'5m滚动75交易日'} · ${data?.asset_type==='etf'?'ETF':'股票'}`;
-    const latest=data?.sessions.flatMap(s=>s.rows).at(-1), previous=data?.daily.findLast(r=>r.date<(latest?.date||''));
-    const delta=latest && previous?(latest.close/previous.close-1)*100:null;
-    $('.kw-price').innerHTML=latest?`<strong class="${delta>=0?'kw-up':'kw-down'}">${format(latest.close)}</strong><span class="${delta>=0?'kw-up':'kw-down'}">${delta===null?'—':(delta>=0?'+':'')+format(delta)+'%'}</span><div class="kw-muted">最新完成 5m · ${esc(latest.datetime.slice(5,16))}</div>`:'';
+    $('.kw-source').textContent=`lan.marketdata · ${data?.basis==='QFQ'?'前复权':data?'原始价格 · 因子待补':'公共滚动行情'} · ${data?.asset_type==='etf'?'ETF':'股票'}`;
+    const latest=current.bars.filter(b=>b.complete).at(-1);
+    $('.kw-price').innerHTML=latest?`<strong>${format(latest.close)}</strong><div class="kw-muted">最新完成 ${model.period} · ${esc(latest.timestamp.slice(5,16))}</div>`:'';
     $('.kw-coverage').textContent=`${current.validCount}根 ${model.period==='1d'?'日K':model.period} · ${current.dates.length}交易日 · 末段连续${current.continuous}根${current.gaps?' · 缺口'+current.gaps:''}`;
     $('.kw-asof').textContent='截至 '+(current.dataAsOf?.slice(0,16)||'等待真实数据');
     const phase=data?.status?.phase;
-    $('.kw-status').textContent=!model.selected?'按需预热当前标的；普通订阅保留7日，固定关注持续维护。最多50只。':!data?`正在等待 ${model.selected.symbol} 后台预热；分钟额度2次/滚动60秒，首次交接等待不超过60秒。`:
-      `${phase==='READY'?'● 已持久化':phase==='PARTIAL'?'◐ 历史有缺口，后台定向补齐':'◌ 预热 / 等待源响应'} · 原始5m ${data.status.periods?.['5m']?.days||0} / 75交易日，${data.status.periods?.['5m']?.bars||0}根 · 1m ${data.status.periods?.['1m']?.days||0} / 20交易日（按需） · ${data.basis_note}${data.status.error?' · '+data.status.error:''}${['QUOTA_WAIT','RATE_LIMITED','BUDGET_WAIT'].includes(data.status.quota)?' · '+({QUOTA_WAIT:'等待分钟额度',RATE_LIMITED:'供应商429冷却中',BUDGET_WAIT:'等待MA55配额协调'}[data.status.quota]):''}`;
+    $('.kw-status').textContent=!model.selected?'选择股票后读取公共库已保存的15/30/60m。':!data?`正在读取 ${model.selected.symbol} 的公共滚动行情…`:
+      `${phase==='READY'?'● 已保存':phase==='GAP'?'◐ 公共行情有缺口':phase==='FACTOR_PENDING'?'◌ 因子覆盖待补':phase==='DATA_SOURCE_UNAVAILABLE'?'公共行情服务不可用':'◌ 公共行情预热中'} · 当前周期 ${data.status.row_count||0} / 256根 · 60m预热 ${data.status.warm_count||0} / 256 · ${data.basis_note||''}${data.status.error?' · '+data.status.error:''}${data.status.source_error?' · '+data.status.source_error:''}${['RATE_LIMITED','QUOTA_WAIT','SOURCE_UNAVAILABLE'].includes(data.status.source_phase)?' · 公共源 '+data.status.source_phase+' 等待'+(data.status.wait_seconds||0)+'秒':''}`;
     $('.kw-availability').textContent=enabled.filter(n=>current.continuous<n).map(n=>`MA${n}需要${n}根，末段有效${current.continuous}根`).join('；');
-    $('.kw-anchor').innerHTML=model.event?`<b>MA55 BUY</b> 原始确认 ${esc(model.event)}${model.setup?' · 支撑测试 '+esc(model.setup):''}${model.defense?' · 防守 '+format(model.defense,3)+'（MA55前复权）':''}<br>${esc(anchor.message)}${data?.basis==='RAW'?' · 当前为原始价，防守价不叠加到图中':''}<button data-action="focus" ${anchor.index<0?'disabled':''}>定位信号</button>`:'';
+    $('.kw-anchor').innerHTML=model.event?`<b>MA55 BUY</b> 原始确认 ${esc(model.event)}${model.setup?' · 支撑测试 '+esc(model.setup):''}${model.defense?' · 防守 '+format(model.defense,3)+'（MA55前复权）':''}<br>${esc(anchor.message)}${!matchingBasis?' · 价格基准未证实一致，防守价线未显示':''}<button data-action="focus" ${anchor.index<0?'disabled':''}>定位信号</button>`:'';
   }
   function accept(data) {
     if (!data || data.symbol!==model.selected?.symbol) return;
-    if (!data.pending) { model.data=data;model.pinned=Boolean(data.status.pinned); }
+    if (data.unavailable) { model.error=data.status.error; if(model.data) model.data={...model.data,status:data.status}; }
+    else if (!data.pending) { model.data=data;model.pinned=Boolean(data.status.pinned); }
     update();
   }
   async function load(item, {pinChange=null}={}) {
     const id=++revision, same=model.selected?.symbol===item.symbol;
     if (!same) { model.data=null;model.pinned=false;needsReset=true; }
-    if (model.event && item.symbol!==model.eventSymbol) { model.event=null;model.setup=null;model.defense=null; }
+    if (model.event && item.symbol!==model.eventSymbol) { model.event=null;model.setup=null;model.defense=null;model.factor=null; }
     model.selected=item;model.loading=true;model.error='';model.matches=[];$('.kw-results').textContent='';writeUrl();update(!same);
     try { const data=await reader.read(item.symbol,{period:model.period,pinned:pinChange});if (!disposed && id===revision) accept(data); }
     catch(e) { if (id===revision) model.error='数据桥请求失败：'+e.message; }
@@ -142,7 +144,7 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
       model.error='';controls();plot?.dates(bars[0].time,bars.at(-1).time);
     } else if (action==='add-ma') {
       const n=Number($('[aria-label="新增MA周期"]').value);
-      if (!Number.isInteger(n) || n<1 || n>2000 || model.mas.some(m=>m.period===n) || model.mas.length>=12) model.error='周期需为1–2000的不同整数，最多12条MA';
+      if (!Number.isInteger(n) || ![5,10,20,30,55,233].includes(n) || model.mas.some(m=>m.period===n) || model.mas.length>=12) model.error='可选MA周期为5、10、20、30、55、233';
       else { model.mas.push({period:n,enabled:true});model.error='';save(); }update();
     }
   };
@@ -153,7 +155,7 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
     if (t.dataset.maToggle!==undefined) model.mas[Number(t.dataset.maToggle)].enabled=t.checked;
     else if (t.dataset.maPeriod!==undefined) {
       const i=Number(t.dataset.maPeriod),n=Number(t.value);
-      if (!Number.isInteger(n) || n<1 || n>2000 || model.mas.some((m,j)=>j!==i && m.period===n)) { model.error='MA周期需为1–2000的不同整数';controls();return; }
+      if (!Number.isInteger(n) || ![5,10,20,30,55,233].includes(n) || model.mas.some((m,j)=>j!==i && m.period===n)) { model.error='可选MA周期为5、10、20、30、55、233';controls();return; }
       model.mas[i].period=n;
     } else return;
     model.error='';save();update();
@@ -167,6 +169,6 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
   };
   $('.kw-search').addEventListener('submit',submit);root.addEventListener('click',click);root.addEventListener('change',change);
   const timer=win.setInterval(poll,3000);update();
-  if (link.symbol) { $('[aria-label="股票或ETF搜索"]').value=link.symbol;void search(link.symbol,true); }
+  if (link.symbol) { $('[aria-label="股票或ETF搜索"]').value=link.symbol;void load({symbol:link.symbol,name:link.symbol}); }
   return ()=>{disposed=true;revision++;searchRevision++;win.clearInterval(timer);reader.dispose();plot?.dispose();root.remove();};
 }
