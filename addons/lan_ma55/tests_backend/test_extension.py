@@ -1,13 +1,14 @@
 import sys
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from addons.lan_ma55.build_backend import build
-from addons.lan_ma55.backend.service import OfflineService, BLOCKED
+from addons.lan_ma55.backend.service import OfflineService
 from addons.lan_ma55.backend.store import read_page
 from .conftest import ROOT, batches, universe
 
@@ -25,6 +26,10 @@ def boot(folder):
                 "Blocked extension must not infer a market universe from names"
             )
 
+    folder.mkdir(parents=True, exist_ok=True)
+    settings = folder / "user_data" / "lan_ma55" / "settings.json"
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text('{"api_base":"http://127.0.0.1:1"}', encoding="utf-8")
     app = FastAPI()
     registry = BackendExtensionRegistry()
     registry.freeze()
@@ -34,8 +39,12 @@ def boot(folder):
 
 
 def test_official_install_start_disable_uninstall_preserve_derived_data(
-    tmp_path, scenarios
+    tmp_path, scenarios, monkeypatch
 ):
+    monkeypatch.delenv("QUANTDASH_TOKEN", raising=False)
+    def offline_transport(self, request):
+        raise httpx.ConnectError("Isolated protocol host has no HTTP listener", request=request)
+    monkeypatch.setattr(httpx.HTTPTransport, "handle_request", offline_transport)
     sys.path.insert(0, str(ROOT / "backend"))
     from app.extensions.packages import ExtensionPackageStore
 
@@ -43,13 +52,17 @@ def test_official_install_start_disable_uninstall_preserve_derived_data(
     folder = tmp_path / "host data with spaces"
     packages = ExtensionPackageStore(folder)
     preview = packages.inspect(archive.read_bytes())
-    assert not preview["errors"] and preview["manifest"]["id"] == "lan.ma55.state"
-    assert "frontend" not in preview["manifest"]
+    assert not preview["errors"] and preview["manifest"]["id"] == "lan.ma55"
+    assert preview["manifest"]["frontend"] == "frontend/extension.mjs"
     packages.install(archive.read_bytes(), preview["digest"], preview["revision"])
     app, client = boot(folder)
-    status = client.get("/api/extensions/lan.ma55.state/status").json()
-    assert status["status"] == BLOCKED and status["storage_ready"]
-    assert status["expected_symbols"] is None and not status["full_market_complete"]
+    import time
+    for _ in range(100):
+        status = client.get("/api/extensions/lan.ma55/status").json()
+        if status["phase"] == "ERROR":
+            break
+        time.sleep(.01)
+    assert status["phase"] == "ERROR" and "QUANTDASH_TOKEN" in status["error"]
     assert not status["backend_scanning"]
     path = folder / "user_data" / "lan_ma55" / "state.sqlite3"
     case = scenarios["single"]
@@ -65,34 +78,32 @@ def test_official_install_start_disable_uninstall_preserve_derived_data(
             first_seen_at="2026-11-07 20:00:00",
         )
     for _ in range(2):
-        events = client.get("/api/extensions/lan.ma55.state/events?limit=1").json()
-        assert (
-            events["total"] == 1
-            and events["mode"] == "OFFLINE"
-            and not events["full_market_complete"]
-        )
+        events = client.get("/api/extensions/lan.ma55/events?limit=1").json()
+        assert events["total"] == 1
         assert events["rows"][0]["origin"] == "REPLAY"
     assert (
-        client.get("/api/extensions/lan.ma55.state/events?offset=1").json()["rows"]
+        client.get("/api/extensions/lan.ma55/events?offset=1").json()["rows"]
         == []
     )
     assert (
-        client.get("/api/extensions/lan.ma55.state/events?limit=1000").status_code
+        client.get("/api/extensions/lan.ma55/events?limit=1000").status_code
         == 422
     )
     assert (
-        client.post("/api/extensions/lan.ma55.state/events", json={}).status_code == 405
+        client.post("/api/extensions/lan.ma55/events", json={}).status_code == 405
     )
-    packages.manage("lan.ma55.state", "disable")
+    packages.manage("lan.ma55", "disable")
     _, disabled = boot(folder)
-    assert disabled.get("/api/extensions/lan.ma55.state/status").status_code == 404
+    assert disabled.get("/api/extensions/lan.ma55/status").status_code == 404
     assert path.is_file() and read_page(path, "events")["total"] == 1
-    packages.manage("lan.ma55.state", "enable")
+    packages.manage("lan.ma55", "enable")
     _, enabled = boot(folder)
-    assert enabled.get("/api/extensions/lan.ma55.state/events").json()["total"] == 1
-    packages.manage("lan.ma55.state", "remove")
+    enabled_response = enabled.get("/api/extensions/lan.ma55/events")
+    assert enabled_response.status_code == 200, (enabled_response.text, packages.list_installed({}))
+    assert enabled_response.json()["total"] == 1
+    packages.manage("lan.ma55", "remove")
     _, removed = boot(folder)
-    assert removed.get("/api/extensions/lan.ma55.state/status").status_code == 404
+    assert removed.get("/api/extensions/lan.ma55/status").status_code == 404
     assert path.is_file() and read_page(path, "events")["total"] == 1
     assert packages.list_installed({}) == []
 

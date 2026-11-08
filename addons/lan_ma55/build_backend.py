@@ -1,4 +1,4 @@
-"""Build only the verified backend source + official manifest, never databases."""
+"""Build the unified official package; include source and built page only."""
 
 from pathlib import Path
 import zipfile
@@ -7,21 +7,16 @@ import zipfile
 def build(destination=None):
     root = Path(__file__).resolve().parent
     target = (
-        Path(destination) if destination else root / "dist" / "lan-ma55-state-0.2.1.zip"
+        Path(destination) if destination else root / "dist" / "lan-ma55-0.2.8.zip"
     )
     target.parent.mkdir(parents=True, exist_ok=True)
-    names = [
-        "__init__.py",
-        "engine.py",
-        "pipeline.py",
-        "store.py",
-        "service.py",
-        "extension.py",
-    ]
+    names = ["__init__.py", "engine.py", "pipeline.py", "store.py", "extension.py",
+             "market.py", "collector.py", "request_budget.py", "live_store.py", "runtime.py", "result_publisher.py"]
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.write(root / "extension.yaml", "extension.yaml")
         for name in names:
             archive.write(root / "backend" / name, "backend/" + name)
+        archive.write(root / "dist" / "extension.js", "frontend/extension.mjs")
     return target
 
 

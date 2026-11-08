@@ -1,102 +1,72 @@
-# MA55 结构观察 · 兰 V0.2
+# 兰 MA55 V0.2 · QuantDash Pro 后台
 
-独立 Page Pack，版本 `0.2.2`，面向 TSP 官方 `v0.3.32` / Page Pack SDK v1。运行时只有一个自包含 ES Module；删除页面包即可移除，不需要修改或重建宿主。
+`lan.ma55` 0.2.8 是面向官方 TSP v0.3.32 的前后端一体化外置扩展。TSP 后端启动后采集 QuantDash 原始完成5m，聚合15m，执行冻结 `MA55_15M_MINIMAL_V5`，写入自身 SQLite，再经官方扩展数据 API 发布。页面 `/lan-ma55` 只查看结果，关闭网页仍继续计算。
 
-**全市场后台状态：`BLOCKED_BY_OFFICIAL_EXTENSION_CONTRACT`，尚未完成全市场监控。** V0.2.2 已通过真实 TSP 官方导入界面安装并刷新，展示行情供给状态、候选覆盖及后端未安装原因；后台仍未接线。[最新现场验收与根因](RUNTIME_ROOT_CAUSE.md) / [上一轮离线状态实现](FULL_MARKET_STATUS_20261107.md) / [所需官方契约](UPSTREAM_CONTRACT_REQUEST.md)。
+周末默认展示后台最近真实交易日，支持此前日期、BUY、观察、数据状态、全市场搜索分页和官方个股详情。实际覆盖与剩余限制见 [本轮验收](QUANTDASH_PRO_ACCEPTANCE_20261108.md)。此前的 `RUNTIME_ROOT_CAUSE.md` 和 `FULL_MARKET_STATUS_20261107.md` 保留为旧版本记录。
 
 ## 构建与安装
 
-在本目录执行：
+使用已有 nga 解释器和 Node 工具，不升级依赖、不构建宿主。在仓库根目录执行：
 
 ```powershell
-pnpm install --frozen-lockfile --ignore-scripts
-pnpm build
+$ma55Python = 'D:\Python_Envs\envs\nga\python.exe'
+pnpm --dir addons/lan_ma55 build
+& $ma55Python -B -X utf8 addons/lan_ma55/build_backend.py
 ```
 
-产物为 `dist/extension.js`。模板来自官方 `frontend/page-pack-template` 的 ES Module / mount 契约；本插件使用原生 DOM 和简单 SVG，不需要额外 React 或图表运行库。
+产物 `addons/lan_ma55/dist/lan-ma55-0.2.8.zip` 仅含清单、后端源码和自包含页面。Vite 会清空插件 dist，先构建页面再打 ZIP，产物不提交。
 
-在 TSP **设置 → 导入与备份** 上传此文件，页面标识填写 `lan_ma55`，确认自己的代码来源并安装。宿主加载校验通过后刷新浏览器，侧栏出现 **MA55 结构观察**，路由 `/lan-ma55`。包清单的扩展 ID 是 `lan.ma55`，存储用的页面标识是 `lan_ma55`。
+TSP **设置 → 导入与备份** 安装 ZIP；先停用并备份旧独立 `lan_ma55` Page Pack，避免重复路由。重启 TSP 后端并刷新页面，侧栏进入 **MA55 结构观察**。前后端 ID 均为 `lan.ma55`，统一更新、启停和回退。
 
-在 **已安装扩展 → MA55 结构观察** 中启用、停用或卸载；刷新浏览器后生效。页面包安装不需要重启后端。菜单排序和可见性由 TSP 设置管理。
+后端复用已有 `QUANTDASH_TOKEN` 环境变量。启用接口认证时，以私有环境变量 `MA55_TSP_EXT_TOKEN` 提供官方 ingest 所需的 `write:ext` Token；创建展示表另需管理权限。密钥不进入页面或源码。本机未配置接口认证，使用回环地址。
 
-## 使用与数据
+安装时通过官方管理接口显式准备三个插件专属展示配置：
 
-- “TSP行情同步进度”每60秒通过官方 `minuteRefreshStatus / marketSnapshot / dataStatus / extensionPackages` 读取供给和安装元数据，也可手动刷新。快照数量为候选覆盖，维表数量单独显示，统计待更新和读取错误显式标明；自选或日历读取失败不妨碍该卡展示。这里的轮次与覆盖不是MA55扫描结果。
-- 默认读取自选股，可切换自选分组、股票/ETF。每页最多20只，只有当前页参与更新，历史加载并发最多3只。搜索通过官方 `instrumentSearch` 添加临时观察，不写入宿主自选；临时搜索集合在离开页面后结束。
-- 首次读取官方本地分钟接口最近10个交易日；10日窗口已满但有效历史不足时扩大到20日。至少56根连续有效完成15m K才能确认。原始分钟继续由 TSP 存储、同步和复权。
-- 交易日来自官方上证指数日K日期；每股行情仅经 `ctx.api.klineMinuteRange / klineMinuteBatch / klineDaily` 读取。分钟量单位为宿主的“手”，量比与研究样本的“股”无量纲等价。
-- 09:31–09:45 构成首根15m，午后从13:01开始；09:30集合竞价行不计入。15m由3根真实5m构成。缺分钟、空 open、无效OHLCV或无量时停止确认并重新预热。
-- SDK没有分钟定版标志，因此结束后等待60秒再计算，确认时间仍记为该15m的结束时刻。13:33最多使用13:30 K。每分钟检查一次时钟，每个完成15m边界只刷新一次，休市日不批量取分钟。
-- 普通A股标准原始tick为0.01、ETF为0.001，资产类型由TSP确认。历史调整tick逐日使用同一标的、同一资产、同日的公开 `close/raw_close`；历史日还校对15:00分钟与日K收盘。缺少因子证据或价格基准不一致时显示限制，停发正式BUY。宿主尚未公开逐标的历史tick元信息，特殊报价品种不在本版标准A股/ETF范围。
-- 图表只展示插件已读取的完成15m、MA55、推动、支撑脚及选中确认。**官方个股详情**按钮调用 `ctx.ui.openStockPreview`，复用宿主图表和资产路由。
+```powershell
+& $ma55Python -B -X utf8 -c "import os; from addons.lan_ma55.backend.result_publisher import Publisher; p=Publisher('http://127.0.0.1:3018', os.getenv('MA55_TSP_EXT_TOKEN')); p.prepare(); p.close()"
+```
 
-## 冻结规则与状态
+`prepare()` 只创建自己的命名空间，已有不同 schema 会报错。生产 worker 不修改管理配置。本机三表已经创建并验证读回，重启无需重复准备。
 
-唯一BUY链为“有效推动 → MA55附近支撑测试 → 第一根转强”。`engine.mjs` 等价移植指定生产提交的 `Rules / advance / minimal_features`，包括单K收回、多K测试、4根等待窗口、48根推动记忆、跨日清理和同波段锁及三种重新解锁。日K背景、MA233、W和ATR不作为BUY门槛。
+## 数据与运行口径
 
-`BUY_STRUCTURE` 是结构确认。确认收盘距离MA55超过3%时显示“离均线较远，不追价”。确认载荷首次写入后保持不变，后续防守失效、时效和数据待定记录在独立风险对象；价格基准变化后不将旧基准的防守点与新价格比较。
+- 股票候选来自 QuantDash 股票池与公开 `context.repository.get_name_map(None)`。QuantDash 元信息确认 CN / stock / SH、SZ、BJ；源遗漏类型可用官方 instruments search 确认并记录来源。快照与股票分母分开显示。无报价、缺 tick 的股票仍在分母；上市状态证据缺失时明确显示，不猜停牌或退市。
+- 固定 `period='5m', adjust='none'`，每批最多100只、每股最多5000根；冷启动仅预热最近10个真实交易日。采用北京时间、源指数日K日历及60秒完成余量。09:45为首根15m；每三个真实有效5m才形成15m，缺K不合成。
+- 沿用冻结 MA55 的滚动预算和429机制，MA55 分钟24次/滚动60秒。现有 QuantDash v1.2.6 给实时保留6、非实时最多6次，因此合计分钟预算不超过 Pro 30。各能力分别计数，标准 HTTP hooks 包含失败请求；结构化429、网络错误、配额及冷却检查点可恢复。
+- 本机通过官方设置 API 关闭争用分钟额度的全市场1m自动修复；正常快照、日K、按需分钟保留。最新完成5m优先，随后历史补齐，最后渐进修复旧缺口。
+- 外置后端没有正式宿主因子读取契约，按本轮授权采用 QuantDash 真实事件比率：`qfq = raw / product(晚于K线日期的ex_factor)`，tick同口径调整。缺失/无效因子为 DATA_PENDING，不能用1冒充。量保持源单位，量比无量纲。不增加 ETF 因子审计。
+- `context.data_dir/user_data/lan_ma55/state.sqlite3` 是唯一权威库。一个工作线程持有进程租约；同一事务提交必要15m、5m合成尾巴、缺点、重试时间、水位、确认和轮次。已落盘完成K不重复请求，缺股单独修复，未返回不等于停牌或0 BUY。
+- 原始确认 ID/载荷不变，后续风险独立保存。周末为 REPLAY，源迟到为 DELAYED；历史不会改成当前自然日 LIVE。旧浏览器算法/IndexedDB仅保留为回退源码和测试，不进入新生产包。
+- 必要原始15m保留10个交易日；派生历史默认60个交易日，可配置20–252。只裁剪插件派生结果，不改 TSP 行情或用户资料。
 
-IndexedDB `lan-ma55-v02` 仅保存派生状态：每股单调水位、结构状态、最近55根必要15m样本、每个时槽最多5份量、最近120个确认和后续风险，最多80只；不保存1m/5m/日K原始库。缓存不存在或版本不兼容时从TSP历史重放。规则版本为 `MA55_15M_MINIMAL_V5`，缓存schema为1，旧V4状态不会读作本版。
+私有 `user_data/lan_ma55/settings.json` 可设置 `retention_sessions`、`api_base`，以及必要的 `api_token` / `quantdash_token`。启动只读设置，不写回凭据。
 
-确认同时保留 `setup_at / confirmed_at / data_asof / first_seen_at`，来源明确区分历史重放、实时确认和延迟确认。初次打开页面时发现的历史确认不会变成实时消息。**页面关闭后停止观察；没有后台扫描或推送。** SDK请求方法没有AbortSignal参数，卸载时停止计时器和后续请求，已发出的至多3个宿主请求可以完成，其返回结果会被丢弃。
+## 官方展示通道
 
-## 源码与测试
-
-| 文件 | 责任 |
+| 配置 | 内容 |
 | --- | --- |
-| `src/extension.mjs` | 清单、页面生命周期、范围和有限并发 |
-| `src/host_data.mjs` | TSP公开数据桥、资产与逐日价格口径 |
-| `src/supply_status.mjs` | 官方供给/安装元数据读取，独立错误和读取时间 |
-| `src/aggregate.mjs` | 北京时间、真实分钟完整性及5m/15m聚合 |
-| `src/engine.mjs` | 冻结特征和逐根V0.2规则 |
-| `src/state.mjs` | 水位、确认、风险和有界派生存储 |
-| `src/presentation.mjs` | 列表、筛选、详情及简单SVG |
+| `lan_ma55_summary` | 固定 scope snapshot，实际日期、进度、分母、分类、HTTP计数与错误 |
+| `lan_ma55_day` | 每股 snapshot，最新交易日全体股票、原始确认列表、状态与原因 |
+| `lan_ma55_history` | 固定 scope snapshot，保留窗口内各日概况及 BUY / WATCH / 异常行 |
+
+官方 v0.3.32 没有删除单个 timeseries 日期分区的公开 API，因此使用有界 snapshot 投影。历史正常无结构行按需省略，概览保留完整统计。每股展示缓存按日期与股票池 generation 过滤；扩展数据不存原始行情。
+
+后端只用官方 HTTP ingest，前端只用 `ctx.api.extDataRows`。页面不私拼 fetch、不读 SQLite/Parquet、不请求自选或行情、不生成 BUY。自有 `/api/extensions/lan.ma55/{status,events,symbols,cycles}` 只用于运维，页面不依赖它们。
+
+## 实现入口与验证
+
+`backend/extension.py` 注册生命周期；`runtime.py` 调度；`collector.py` / `request_budget.py` 负责 QuantDash 与 HTTP 预算；`market.py` 处理交易时间、聚合与比例；`live_store.py` 负责原子状态；既有 `engine.py` / `pipeline.py` 是唯一生产算法；`result_publisher.py` 发布。`src/results.mjs` 为新只读页面，`src/observer.mjs` 留存旧观察器。
 
 ```powershell
-pnpm build
-pnpm test
+& $ma55Python -B -X utf8 -m pytest addons/lan_ma55/tests_backend/test_engine.py addons/lan_ma55/tests_backend/test_extension.py addons/lan_ma55/tests_backend/test_pro_runtime.py addons/lan_ma55/tests_backend/test_pro_collector.py addons/lan_ma55/tests_backend/test_store_service.py -k 'not 5000' -q -p no:cacheprovider
+& $ma55Python -B -X utf8 -m ruff check addons/lan_ma55/backend addons/lan_ma55/tests_backend addons/lan_ma55/build_backend.py
+node --test addons/lan_ma55/tests/logic.test.mjs addons/lan_ma55/tests/results.test.mjs addons/lan_ma55/tests/page.test.mjs addons/lan_ma55/tests/supply.test.mjs
 ```
 
-无私有参考时，测试会明确跳过两个Python/私有数据对照组；合成与界面测试仍可独立执行。要执行实际Python一致性及冻结数据回放，使用已有 `nga` 解释器设置以下环境变量，再运行 `pnpm test`：
+原 Python 与私有15正/7抑制/2负冻结样例对照需 `MA55_PYTHON`、`MA55_REFERENCE_REPO`、`MA55_FROZEN_PACK`，只读固定生产提交 `23477622536d1206b2af3c164b4c905aa2e15e8d`。私有行情不打包或上传；未挂载时相应对照明确 skip。
 
-```powershell
-# 填写本机已有的只读目录及nga解释器，不创建新环境
-$env:MA55_PYTHON = '<nga解释器>'
-$env:MA55_REFERENCE_REPO = '<DM-Ma55-Method的本地Git目录>'
-$env:MA55_FROZEN_PACK = '<冻结包目录，含manifest.json>'
-pnpm test
-& $env:MA55_PYTHON -B -X utf8 -m ruff check tests/oracle.py
-```
+## 回退
 
-测试专用 `oracle.py` 从固定Git提交导出参考源码到临时目录，实际调用原Python函数；生产包不依赖MA55仓库、Python或CSV。私有行情仅只读进入子进程内存，不进入仓库、构建包或报告。
+**设置 → 导入与备份 → 已安装扩展** 选择 `lan.ma55` 回退并重启；管理器保留旧代码，不删除 SQLite。本轮已真实验证跨版本回退、再升级及事件/水位对账。停用同样需要重启。如回到旧浏览器版，再启用独立 Page Pack 并刷新，保持一个生产者。
 
-规则来源、实际验证与现有接口缺口见 [REVIEW_HANDOFF.md](REVIEW_HANDOFF.md)。
-
-## 独立派生状态后端
-
-后端包ID为 `lan.ma55.state`，版本0.2.1，和浏览器页面独立。构建使用已有nga：
-
-```powershell
-& $env:MA55_PYTHON -B -X utf8 build_backend.py
-```
-
-产物 `dist/lan-ma55-state-0.2.1.zip` 遵循官方 `extension.yaml` v1。包内仅有清单和6个Python模块，不带前端、行情或数据库。0.2.1轮次的隔离临时宿主已验证安装、启动、停用、卸载；真实宿主没有安装该包。当前缺少行情读取及页面结果桥，单独安装仅创建空库，故V0.2.2仍不安装。
-
-同时构建两种产物时，先运行 `pnpm build`，再运行 `build_backend.py`；Vite构建会清空dist目录。
-
-如单独导入后台包，重启TSP后 `startup(context)` 仅初始化 `context.data_dir/user_data/lan_ma55/state.sqlite3`，**不启动市场扫描**。官方包管理器卸载代码不会删除该数据库。可在同目录 `settings.json` 设置 `{"retention_sessions":60}`，允许20–252；仅在显式离线服务完成计算后按所给交易日日历裁剪旧事件/扫描记录。
-
-- `backend/engine.py`：指定提交的原Python纯规则和特征，无Pandas或外部仓库运行依赖。
-- `backend/pipeline.py`：已完成15m验证、单调水位、55根必要输入、时槽量、确认与后续风险。
-- `backend/store.py`：四张派生表、有界原子事务及只读分页；首次确认 `ON CONFLICT DO NOTHING`。
-- `backend/service.py`：显式离线数据集消费，最多128股一批、一个写线程和有界队列，保存恢复水位及轮次分母。没有宿主数据读取器、行情SDK、HTTP采集器或后台定时器。
-- `backend/extension.py`：仅通过官方setup/startup契约注册自身命名空间只读 `/status /events /symbols /cycles`。状态始终报告当前合同阻碍，分页结果标为OFFLINE；Page Pack尚不能通过公开桥调用这些路由。
-
-离线调用入口是 `OfflineService.scan(universe=..., inputs=..., bar_end=..., sessions=..., source_asof=..., first_seen_at=...)`。`universe` 每项显式给出 `symbol/asset_type='stock'/raw_tick`；`inputs` 按不超过128股的批次提供 `(symbol, bars)`；每根bar包含完成15m OHLCV、北京时间timestamp、`source_count=3` 和已验证的调整比例 `adjust_factor`。其来源必须已完成复权与完整性验证。该入口不会获取数据，离线结果不代表真实市场覆盖，也不接管原浏览器观察版。
-
-从仓库根目录进行后端定向验证：
-
-```powershell
-& $env:MA55_PYTHON -B -X utf8 -m pytest addons/lan_ma55/tests_backend -q -s -p no:cacheprovider
-& $env:MA55_PYTHON -B -X utf8 -m ruff check addons/lan_ma55/backend addons/lan_ma55/tests_backend addons/lan_ma55/build_backend.py
-```
+本机原偏好备份在忽略的 `dist/ma55-quantdash-pro-20261108/backup/preferences.json`。停用专用后台后，可经官方 `PUT /api/settings/preferences/realtime-monitor` 恢复 `minute_refresh_enabled=true` 及原120秒间隔。SQLite 备份同处，后端停止时拷贝，保留原库用于恢复。

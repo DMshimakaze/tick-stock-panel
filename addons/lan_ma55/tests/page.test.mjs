@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
-import extension, { mountObserver, completedBoundary } from '../src/extension.mjs';
+import extension from '../src/extension.mjs';
+import { mountObserver, completedBoundary } from '../src/observer.mjs';
 import { createView, tableRows, chartBars } from '../src/presentation.mjs';
 import { consumeBars } from '../src/state.mjs';
 import { scenario, toMinuteSessions } from './cases.mjs';
@@ -11,7 +12,7 @@ import { loadInstrument, loadCatalog, refreshInstruments } from '../src/host_dat
 const pause = () => new Promise(resolve => setTimeout(resolve, 20));
 test('Page Pack manifest is self-contained, static and removable', async () => {
   assert.equal(extension.id, 'lan.ma55'); assert.equal(extension.apiVersion, 1);
-  assert.equal(extension.version, '0.2.2');
+  assert.equal(extension.version, '0.2.8');
   assert.equal(extension.routes[0].path, '/lan-ma55');
   assert.equal(extension.navigation[0].label, 'MA55 结构观察');
   const built = await import('../dist/extension.js');

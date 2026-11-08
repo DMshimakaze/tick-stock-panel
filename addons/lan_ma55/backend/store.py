@@ -1,6 +1,6 @@
 """Plugin-owned SQLite only: one process-local writer, bounded transactions, RO lists."""
 
-from contextlib import closing
+from contextlib import closing, nullcontext
 import json
 from pathlib import Path
 import sqlite3
@@ -202,11 +202,11 @@ class StateWriter:
                 )
         return result, completed
 
-    def save(self, records, categories, cycle):
+    def save(self, records, categories, cycle, *, commit=True):
         if len(records) > 128:
             raise ValueError("A state transaction is limited to 128 symbols")
         inserted = 0
-        with self.conn:
+        with self.conn if commit else nullcontext():
             for record in records:
                 state = record["state"]
                 decision = state.get("decision") or {}

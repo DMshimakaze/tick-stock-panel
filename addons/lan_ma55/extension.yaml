@@ -1,16 +1,16 @@
 format: tick-extension-package
 format_version: 1
-id: lan.ma55.state
-display_name: MA55 派生状态（全市场未接通）
-version: 0.2.1
+id: lan.ma55
+display_name: 兰 MA55 V0.2
+version: 0.2.8
 extension_api_version: 1
 author: DMshimakaze
 description: >-
-  冻结兰V0.2规则、插件专属SQLite和离线单写者服务。
-  FULL_MARKET_BLOCKED_BY_HOST_CONTRACT：当前官方契约未提供全市场批量本地分钟读取，
-  不启动市场扫描。现有浏览器观察页面独立保留。
+  QuantDash Pro专用5m批量后台、SQLite恢复水位与冻结V0.2规则。
+  页面仅经官方扩展数据通道展示最新交易日及历史，关闭浏览器不停止后台。
 backend: backend.extension
+frontend: frontend/extension.mjs
 requires_app: '>=0.3.32,<0.3.33'
 requires_python: '>=3.11'
 platforms: [any]
-requires: []
+requires: ['quantdash==0.1.0', 'httpx>=0.28,<0.29']

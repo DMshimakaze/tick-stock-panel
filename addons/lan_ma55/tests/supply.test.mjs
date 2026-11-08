@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { JSDOM } from 'jsdom';
 import { loadSupplyStatus } from '../src/supply_status.mjs';
-import { mountObserver } from '../src/extension.mjs';
+import { mountObserver } from '../src/observer.mjs';
 
 const supplyApi = () => ({
   minuteRefreshStatus: async () => ({ enabled: true, running: true, healthy: false,
