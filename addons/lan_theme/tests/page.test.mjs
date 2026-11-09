@@ -11,7 +11,7 @@ async function mounted(options) {
 }
 test('three columns retain two-level paths, DEMO and historical classification warning',async()=>{
   const {root,ctx,stop}=await mounted();
-  assert.match(root.textContent,/DEMO · 隔离测试关系/);assert.match(root.textContent,/按当前题材归属回看历史/);
+  assert.match(root.textContent,/DEMO · 隔离测试关系/);assert.match(root.textContent,/按后来的题材归属回看/);
   assert.equal(root.querySelectorAll('.lt-layout>.lt-column').length,3);
   assert.equal(root.querySelectorAll('tbody tr').length,3);
   const count=ctx.calls.length;
@@ -40,4 +40,18 @@ test('failed refresh keeps prior complete rows and displays failure',async()=>{
   ctx.api.extDataRows=async()=>{throw Error('publication unavailable');};root.querySelector('[data-action="refresh"]').click();
   await new Promise(r=>setTimeout(r,10));assert.equal(root.querySelector('tbody').textContent,before);
   assert.match(root.querySelector('[role="alert"]').textContent,/publication unavailable/);stop();
+});
+
+test('overlapping date refreshes only commit the latest response',async()=>{
+  const {root,ctx,dom,stop}=await mounted();
+  const original=ctx.api.extDataRows;let release;
+  ctx.api.extDataRows=async(id,options)=>id==='lan_ma55_history'?new Promise(resolve=>{release=resolve;}):original(id,options);
+  let field=root.querySelector('[data-control="date"]');field.value='2026-11-05';field.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  for(let n=0;n<20&&!release;n++)await new Promise(r=>setTimeout(r,1));
+  field=root.querySelector('[data-control="date"]');field.value='2026-11-06';field.dispatchEvent(new dom.window.Event('change',{bubbles:true}));
+  await new Promise(r=>setTimeout(r,5));
+  release({rows:[{payload_json:JSON.stringify({days:{'2026-11-05':{rows:[],cycle:{}}}})}],total:1});
+  await new Promise(r=>setTimeout(r,5));
+  assert.equal(root.querySelector('[data-control="date"]').value,'2026-11-06');
+  assert.equal(root.querySelectorAll('tbody tr').length,3);stop();
 });

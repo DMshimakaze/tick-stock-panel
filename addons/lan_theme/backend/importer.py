@@ -17,6 +17,8 @@ from .schema import (
     identity,
     now_cn,
     object_value,
+    text,
+    identity_mapping,
     timestamp,
 )
 
@@ -93,7 +95,9 @@ class FileSource:
         return result
 
 
-def decode_document(name, body, *, asof, known_symbols, export_version):
+def decode_document(
+    name, body, *, asof, known_symbols, export_version, identity_map=None
+):
     try:
         value = body.decode("utf-8-sig")
         if name.lower().endswith(".csv"):
@@ -105,7 +109,10 @@ def decode_document(name, body, *, asof, known_symbols, export_version):
             ):
                 raise InvalidSnapshot("CSV_REQUIRED_COLUMNS_MISSING")
             return normalize_export(
-                list(reader), asof=asof, known_symbols=known_symbols
+                list(reader),
+                asof=asof,
+                known_symbols=known_symbols,
+                identity_map=identity_map,
             )
         if name.lower().endswith(".jsonl"):
             lines = [json.loads(line) for line in value.splitlines() if line.strip()]
@@ -116,7 +123,14 @@ def decode_document(name, body, *, asof, known_symbols, export_version):
             if isinstance(header, dict) and header.get("format") == "lan-theme-export":
                 rows = header.get("rows")
             else:
-                return [normalize_info(header, asof=asof, known_symbols=known_symbols)]
+                return [
+                    normalize_info(
+                        header,
+                        asof=asof,
+                        known_symbols=known_symbols,
+                        identity_map=identity_map,
+                    )
+                ]
         header = object_value(header, "export header")
         if header.get("asof_cn") and timestamp(header["asof_cn"]) != asof:
             raise InvalidSnapshot("EXPORT_ASOF_CONFLICT")
@@ -127,7 +141,9 @@ def decode_document(name, body, *, asof, known_symbols, export_version):
             raise InvalidSnapshot("EXPORT_VERSION_UNSUPPORTED")
         if not isinstance(rows, list) or not rows:
             raise InvalidSnapshot("EMPTY_EXPORT")
-        return normalize_export(rows, asof=asof, known_symbols=known_symbols)
+        return normalize_export(
+            rows, asof=asof, known_symbols=known_symbols, identity_map=identity_map
+        )
     except (UnicodeError, json.JSONDecodeError, csv.Error):
         raise InvalidSnapshot("INVALID_JSON_OR_UTF8") from None
 
@@ -139,6 +155,8 @@ def import_source(
     asof,
     source,
     known_symbols=(),
+    identity_map=None,
+    provenance=None,
     export_version=None,
     demo=False,
     demo_allowed=False,
@@ -156,6 +174,9 @@ def import_source(
         asof = timestamp(asof)
         if not isinstance(source, str) or not source.strip():
             raise InvalidSnapshot("SOURCE_PROVENANCE_REQUIRED")
+        provenance = text(provenance, "license/provenance", required=True)
+        if identity_map is not None:
+            identity_mapping(identity_map)
         if demo and not demo_allowed:
             raise InvalidSnapshot("DEMO_NOT_ALLOWED: use an isolated data directory")
         documents = adapter.documents()
@@ -180,6 +201,9 @@ def import_source(
                     demo=demo,
                     export_version=export_version,
                     known_symbols=sorted(set(known_symbols)),
+                    identity_map=identity_map,
+                    provenance=provenance,
+                    normalization_version="1.0.1",
                 )
             ).encode()
         )
@@ -199,6 +223,7 @@ def import_source(
                     asof=asof,
                     known_symbols=known_symbols,
                     export_version=export_version,
+                    identity_map=identity_map,
                 )
                 themes.extend(parsed)
             except InvalidSnapshot as exc:
@@ -241,6 +266,17 @@ def import_source(
             unresolved_memberships=sum(
                 m["symbol"] is None for t in themes for m in t["memberships"]
             ),
+            resolved_symbols=len(
+                {m["symbol"] for t in themes for m in t["memberships"] if m["symbol"]}
+            ),
+            unresolved_stock_identities=len(
+                {
+                    m["stock_identity"]
+                    for t in themes
+                    for m in t["memberships"]
+                    if not m["symbol"]
+                }
+            ),
         )
         snapshot = dict(
             format="lan-theme-snapshot",
@@ -250,6 +286,10 @@ def import_source(
             asof_cn=asof,
             imported_at=now_cn(),
             source=source.strip(),
+            provenance=provenance,
+            identity_provenance=identity_mapping(identity_map)[0]
+            if identity_map is not None
+            else None,
             source_kind=kinds[0] if len(kinds) == 1 else "MIXED_LOCAL_SNAPSHOT",
             scope=manifest.get("scope", "PARTIAL_UNKNOWN"),
             catalog_coverage=coverage,

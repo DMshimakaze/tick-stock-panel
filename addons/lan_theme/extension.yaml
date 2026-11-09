@@ -2,7 +2,7 @@ format: tick-extension-package
 format_version: 1
 id: lan.theme
 display_name: 兰 · 题材与MA55
-version: 1.0.0
+version: 1.0.2
 extension_api_version: 1
 author: DMshimakaze
 description: 导入有来源的KPL分层快照，只读既有MA55结果进行题材归属筛选；在线KPL未接入。

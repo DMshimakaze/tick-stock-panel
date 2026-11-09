@@ -11,6 +11,15 @@ from addons.lan_theme.backend.store import ImportLease, SnapshotStore
 
 ASOF = "2026-11-09 03:00:00"
 KNOWN = ["600519.SH", "300863.SZ", "000001.SZ"]
+MAP = dict(
+    format="lan-theme-identity-map",
+    format_version=1,
+    kind="AUTHORITATIVE_UNIVERSE",
+    complete=True,
+    source="DEMO complete security master",
+    asof_cn=ASOF,
+    symbols=KNOWN,
+)
 
 
 def save_file(tmp_path, raw, name="theme.json"):
@@ -26,6 +35,8 @@ def load(store, path, **kwargs):
         asof=kwargs.pop("asof", ASOF),
         source="Authorized local test fixture",
         known_symbols=KNOWN,
+        identity_map=MAP,
+        provenance="Synthetic schema fixture, not commercial production data",
         **kwargs,
     )
 
@@ -35,7 +46,7 @@ def test_three_layer_structure_direct_stocks_top_level_and_exact_tags(
     raw_theme, class_layer
 ):
     raw_theme["ClassLayer"] = class_layer
-    theme = normalize_info(raw_theme, asof=ASOF, known_symbols=KNOWN)
+    theme = normalize_info(raw_theme, asof=ASOF, identity_map=MAP)
     assert [n["depth"] for n in theme["nodes"]] == [1, 2]
     assert theme["nodes"][1]["path"] == ["供应商", "整机"]
     members = theme["memberships"]
@@ -51,7 +62,9 @@ def test_duplicate_names_ids_branches_and_ambiguous_bare_symbol(raw_theme):
     other["Level1"]["ID"] = "other-parent"
     other["Level2"][0]["ID"] = "other-child"
     raw_theme["Table"].append(other)
-    theme = normalize_info(raw_theme, asof=ASOF, known_symbols=KNOWN + ["000001.SH"])
+    theme = normalize_info(
+        raw_theme, asof=ASOF, identity_map={**MAP, "symbols": KNOWN + ["000001.SH"]}
+    )
     assert len(theme["nodes"]) == 4
     assert len({n["key"] for n in theme["nodes"]}) == 4
     assert sum(m["symbol"] == "300863.SZ" for m in theme["memberships"]) == 2
@@ -127,13 +140,23 @@ def test_manifest_missing_rejected_and_complete_only_for_declared_scope(
     file = save_file(tmp_path, manifest, "manifest.json")
     with pytest.raises(InvalidSnapshot):
         import_source(
-            store, FileSource(path, file), asof=ASOF, source="Authorized catalog"
+            store,
+            FileSource(path, file),
+            asof=ASOF,
+            source="Authorized catalog",
+            provenance="DEMO catalog, not production",
         )
     assert store.read()["last_error"]["missing"] == 1
     assert store.read()["snapshot"]["catalog_coverage"] == "UNKNOWN"
     manifest["expected_theme_ids"] = ["T1"]
     save_file(tmp_path, manifest, "manifest.json")
-    import_source(store, FileSource(path, file), asof=ASOF, source="Authorized catalog")
+    import_source(
+        store,
+        FileSource(path, file),
+        asof=ASOF,
+        source="Authorized catalog",
+        provenance="DEMO catalog, not production",
+    )
     assert store.read()["snapshot"]["catalog_coverage"] == "MANIFEST_COMPLETE"
 
 
@@ -225,6 +248,8 @@ def test_empty_manifest_and_truncated_input_update_rejection(
         ASOF,
         "--source",
         "Authorized test",
+        "--provenance",
+        "DEMO CLI test; no commercial source",
     ]
     assert main(base) == 0
     path.write_text('{"errcode":', encoding="utf-8")

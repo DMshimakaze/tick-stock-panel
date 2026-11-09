@@ -13,7 +13,9 @@ from .schema import (
 )
 
 
-def normalize_info(raw, *, asof, source_kind="KPL_INFOGET", known_symbols=()):
+def normalize_info(
+    raw, *, asof, source_kind="KPL_INFOGET", known_symbols=(), identity_map=None
+):
     raw = object_value(raw, "InfoGet")
     if str(raw.get("errcode")) != "0":
         raise InvalidSnapshot("SOURCE_ERROR: errcode must be explicit zero")
@@ -32,7 +34,7 @@ def normalize_info(raw, *, asof, source_kind="KPL_INFOGET", known_symbols=()):
         else None,
     )
     nodes, members, node_ids = {}, {}, {}
-    symbols = Symbols(known_symbols)
+    symbols = Symbols(known_symbols, identity_map)
 
     def node(value, parent, field):
         value = object_value(value, field)
@@ -76,6 +78,7 @@ def normalize_info(raw, *, asof, source_kind="KPL_INFOGET", known_symbols=()):
             stock_identity=stock_key,
             symbol=symbol,
             symbol_status="RESOLVED" if symbol else "UNRESOLVED_SYMBOL",
+            symbol_resolution=symbols.provenance(value["StockID"], symbol),
             **value,
             source_fields=[source_field],
         )
@@ -129,7 +132,7 @@ def normalize_info(raw, *, asof, source_kind="KPL_INFOGET", known_symbols=()):
     return dict(**theme, nodes=list(nodes.values()), memberships=list(members.values()))
 
 
-def normalize_export(rows, *, asof, known_symbols=()):
+def normalize_export(rows, *, asof, known_symbols=(), identity_map=None):
     """Version-1 export rows carry paths explicitly; they are not InfoGet responses."""
     grouped = {}
     for row in rows:
@@ -193,7 +196,11 @@ def normalize_export(rows, *, asof, known_symbols=()):
         item["Table"].append(table)
     return [
         normalize_info(
-            raw, asof=asof, source_kind="AUTHORIZED_EXPORT", known_symbols=known_symbols
+            raw,
+            asof=asof,
+            source_kind="AUTHORIZED_EXPORT",
+            known_symbols=known_symbols,
+            identity_map=identity_map,
         )
         for raw in grouped.values()
     ]

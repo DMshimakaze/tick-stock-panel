@@ -7,7 +7,7 @@ export const rows=[
   {symbol:'600519.SH',name:'DEMO丙',market_date:date,generation:'g',phase:'WATCHING',events_json:'[]',bar_end:date+' 15:00:00'},
   {symbol:'600000.SH',name:'DEMO无标签',market_date:date,generation:'g',phase:'IDLE',events_json:JSON.stringify([event('d','600000.SH')])},
 ];
-const member=(stock,branch,path)=>({StockID:stock,stock_identity:stock,symbol:null,branch_path_key:branch,branch_path:path});
+const member=(stock,branch,path)=>({StockID:stock,stock_identity:stock,symbol:stock.includes('.')?stock:({'000001':'000001.SZ','300863':'300863.SZ','600519':'600519.SH'}[stock]),symbol_status:'RESOLVED',symbol_resolution:{kind:'ADMIN_EXPLICIT_MAP',source:'DEMO explicit map',asof_cn:'2026-11-06 00:00:00'},branch_path_key:branch,branch_path:path});
 export const themes=[
   {theme_id:'T1',theme_name:'DEMO制造',nodes:[{key:'l1',parent_id:null,name:'供应商',depth:1,path:['供应商']},{key:'l2',parent_id:'l1',name:'整机',depth:2,path:['供应商','整机']}],memberships:[member('000001','l1',['供应商']),member('300863','l2',['供应商','整机']),member('300863','l1',['供应商']),member('600519',null,[])]},
   {theme_id:'T2',theme_name:'DEMO服务',nodes:[],memberships:[member('000001.SZ',null,[])]},

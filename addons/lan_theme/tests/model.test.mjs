@@ -12,7 +12,9 @@ test('20000 public row limit never silently truncates',async()=>{
   await assert.rejects(m.readRows({extDataRows:async()=>({total:20001,rows:[]})},'lan_ma55_day',20000),/上限/);
 });
 test('canonical mapping never guesses ambiguous exchange from a name',()=>{
-  const out=m.resolveThemes(themes,['000001.SZ','000001.SH','300863.SZ']);
+  const saved=structuredClone(themes);
+  saved[0].memberships[0].symbol=null;saved[0].memberships[0].symbol_status='UNRESOLVED_SYMBOL';
+  const out=m.resolveThemes(saved,['000001.SZ','000001.SH','300863.SZ']);
   assert.equal(out[0].memberships[0].symbol,null);
   assert.equal(out[0].memberships[1].symbol,'300863.SZ');
   assert.equal(out[1].memberships[0].symbol,'000001.SZ');

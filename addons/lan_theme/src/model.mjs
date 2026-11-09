@@ -30,19 +30,18 @@ export function assembleThemes(status,rows) {
   }).sort((a,b)=>a.theme_name.localeCompare(b.theme_name,'zh-CN')||a.theme_id.localeCompare(b.theme_id));
 }
 
-export function resolveThemes(themes,knownSymbols) {
-  const byCode=new Map();
-  for(const symbol of knownSymbols) if(canonical(symbol)) {
-    if(!byCode.has(symbol.slice(0,6))) byCode.set(symbol.slice(0,6),new Set());
-    byCode.get(symbol.slice(0,6)).add(symbol);
-  }
+export function resolveThemes(themes) {
+  // Saved unresolved identities stay unresolved on every date. Trust an
+  // explicit source exchange, then an evidenced import-time administrator map
+  // or full security master. A selected-day BUY/WATCH list is never evidence.
   return themes.map(t=>({...t,memberships:t.memberships.map(m=>{
-    let symbol=m.symbol;
-    if(!canonical(symbol||'')) {
-      const raw=m.StockID;
-      if(canonical(raw)) symbol=raw;
-      else if(/^(SH|SZ|BJ)\d{6}$/.test(raw)) symbol=raw.slice(2)+'.'+raw.slice(0,2);
-      else { const found=byCode.get(raw);symbol=found?.size===1?[...found][0]:null; }
+    let symbol=null;
+    if(m.symbol_status!=='UNRESOLVED_SYMBOL') {
+      if(canonical(m.StockID)) symbol=m.StockID;
+      else if(/^(SH|SZ|BJ)\d{6}$/.test(m.StockID)) symbol=m.StockID.slice(2)+'.'+m.StockID.slice(0,2);
+      else if(canonical(m.symbol) && m.symbol.slice(0,6)===m.StockID &&
+        ['AUTHORITATIVE_UNIVERSE','ADMIN_EXPLICIT_MAP'].includes(m.symbol_resolution?.kind) &&
+        m.symbol_resolution.source && m.symbol_resolution.asof_cn) symbol=m.symbol;
     }
     return {...m,symbol:symbol||null,symbol_status:symbol?'RESOLVED':'UNRESOLVED_SYMBOL'};
   })}));
@@ -51,7 +50,7 @@ export function resolveThemes(themes,knownSymbols) {
 export function confirmed(rows,date,{rule=R1,mode='ALL'}={}) {
   const result=new Map();
   for(const row of rows) for(const event of JSON.parse(row.events_json||'[]')) {
-    if(event.confirmed_at?.slice(0,10)!==date || event.rule_version!==rule || (mode!=='ALL' && event.mode!==mode)) continue;
+    if(event.confirmed_at?.slice(0,10)!==date || (rule && event.rule_version!==rule) || (mode!=='ALL' && event.mode!==mode)) continue;
     if(!event.event_id || !canonical(event.symbol||row.symbol)) throw Error('已发布确认缺少事件或股票身份');
     if(!result.has(event.event_id)) result.set(event.event_id,{symbol:event.symbol||row.symbol,name:row.name,event,row});
   }
@@ -129,4 +128,74 @@ export async function readDay(api,date,summary,historyCache) {
   const day=historyCache.value.days[date];
   if(!day) throw Error('所选交易日尚无已发布历史；保留当前结果');
   return day;
+}
+
+/** One immutable tree projection, one selected day, at most eight rule/mode
+ * views. UI filters/pagination never parse events or rebuild relation indexes. */
+export class ProjectionModel {
+  constructor() {
+    this.snapshotKey=undefined;this.dayKey=undefined;this.rows=null;
+    this.tree={themes:[],index:new Map(),byId:new Map(),groups:new Map()};
+    this.day={buys:[],watches:[],summary:{}};this.views=new Map();
+  }
+  update({status,themes,summary,rows,date}) {
+    const snapshotKey=status?.snapshot_id||null;
+    const dayKey=JSON.stringify([date,summary.revision,summary.generation,summary.history_published_at,summary.rule_version]);
+    let tree=this.tree,day=this.day;
+    if(snapshotKey!==this.snapshotKey) {
+      const resolved=resolveThemes(themes),groups=new Map();
+      for(const theme of resolved) {
+        const nodes=new Map(theme.nodes.map(n=>[n.key,n]));
+        const branches=new Map([['',{identities:new Set(),symbols:new Set()}],['@unconfirmed',{identities:new Set(),symbols:new Set()}]]);
+        for(const n of theme.nodes)branches.set(n.key,{identities:new Set(),symbols:new Set()});
+        for(const member of theme.memberships) {
+          const keys=[''];
+          if(member.branch_path_key===null)keys.push('@unconfirmed');
+          else for(let key=member.branch_path_key;key;key=nodes.get(key)?.parent_id)keys.push(key);
+          for(const key of keys) {
+            const group=branches.get(key);
+            group.identities.add(member.symbol||member.stock_identity);
+            if(member.symbol)group.symbols.add(member.symbol);
+          }
+        }
+        groups.set(theme.theme_id,branches);
+      }
+      tree={themes:resolved,index:indexThemes(resolved),byId:new Map(resolved.map(t=>[t.theme_id,t])),groups};
+    }
+    if(dayKey!==this.dayKey||rows!==this.rows) {
+      day={buys:confirmed(rows,date,{rule:null}),watches:watching(rows,date,summary),summary};
+    }
+    // Publish the new model only after both independent projections validate.
+    if(tree!==this.tree||day!==this.day)this.views.clear();
+    Object.assign(this,{tree,day,snapshotKey,dayKey,rows});
+  }
+  view(rule=R1,mode='ALL',tab='BUY') {
+    const key=JSON.stringify([rule,mode,tab]);
+    if(this.views.has(key))return this.views.get(key);
+    const buys=this.day.buys.filter(i=>i.event.rule_version===rule&&(mode==='ALL'||i.event.mode===mode));
+    const watches=this.day.watches,items=tab==='BUY'?buys:watches,counts=new Map();
+    const symbols=new Set(items.map(i=>i.symbol));
+    for(const [id,branches] of this.tree.groups) {
+      const byBranch=new Map();
+      for(const [branch,g] of branches) {
+        let hits=0;for(const symbol of g.symbols)if(symbols.has(symbol))hits++;
+        byBranch.set(branch,{members:g.identities.size,resolved:g.symbols.size,hits});
+      }
+      counts.set(id,byBranch);
+    }
+    const result={themes:this.tree.themes,index:this.tree.index,buys,watches,items,
+      stats:statistics(this.day.summary,buys,watches,this.tree.index),
+      count:(id,branch='')=>counts.get(id)?.get(branch)||{members:0,resolved:0,hits:0}};
+    this.views.set(key,result);return result;
+  }
+  select(items,{themeId='',branch='',scope='matched',query=''}={}) {
+    const wanted=this.tree.groups.get(themeId)?.get(branch)?.symbols;
+    const text=query.toLowerCase();
+    return items.filter(item=>{
+      if(text&&!(item.symbol+' '+item.name).toLowerCase().includes(text))return false;
+      if(scope==='unlabelled')return !this.tree.index.has(item.symbol);
+      if(themeId)return wanted?.has(item.symbol)||false;
+      return scope==='all'||this.tree.index.has(item.symbol);
+    });
+  }
 }

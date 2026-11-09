@@ -106,12 +106,51 @@ def stock(value):
     return result
 
 
+def identity_mapping(value):
+    """Operator-supplied identity evidence; a BUY list is not a security master."""
+    value = object_value(value, "identity map")
+    if (
+        value.get("format") != "lan-theme-identity-map"
+        or value.get("format_version") != 1
+    ):
+        raise InvalidSnapshot("IDENTITY_MAP_VERSION_UNSUPPORTED")
+    kind = value.get("kind")
+    if kind not in ("AUTHORITATIVE_UNIVERSE", "ADMIN_EXPLICIT_MAP"):
+        raise InvalidSnapshot("IDENTITY_MAP_KIND_REQUIRED")
+    source = text(value.get("source"), "identity source", required=True)
+    asof = timestamp(value.get("asof_cn"), "identity asof")
+    if kind == "AUTHORITATIVE_UNIVERSE":
+        if value.get("complete") is not True:
+            raise InvalidSnapshot("COMPLETE_SECURITY_MASTER_REQUIRED")
+        symbols = array(value.get("symbols"), "identity symbols")
+        if not symbols or any(
+            not isinstance(s, str) or not SYMBOL.fullmatch(s) for s in symbols
+        ):
+            raise InvalidSnapshot("CANONICAL_IDENTITY_SYMBOLS_REQUIRED")
+        mapping = {}
+        for symbol in symbols:
+            mapping.setdefault(symbol[:6], set()).add(symbol)
+    else:
+        entries = object_value(value.get("mapping"), "explicit mapping")
+        if not entries or any(
+            not re.fullmatch(r"\d{6}", code)
+            or not isinstance(symbol, str)
+            or not SYMBOL.fullmatch(symbol)
+            or symbol[:6] != code
+            for code, symbol in entries.items()
+        ):
+            raise InvalidSnapshot("INVALID_EXPLICIT_SYMBOL_MAPPING")
+        mapping = {code: {symbol} for code, symbol in entries.items()}
+    return dict(kind=kind, source=source, asof_cn=asof), mapping
+
+
 class Symbols:
-    def __init__(self, known=()):
+    def __init__(self, known=(), evidence=None):
+        # Old symbol arrays remain accepted inputs, but cannot prove uniqueness.
         self.by_code = {}
-        for symbol in known:
-            if SYMBOL.fullmatch(symbol):
-                self.by_code.setdefault(symbol[:6], set()).add(symbol)
+        self.evidence = None
+        if evidence is not None:
+            self.evidence, self.by_code = identity_mapping(evidence)
 
     def resolve(self, code):
         if SYMBOL.fullmatch(code):
@@ -120,3 +159,10 @@ class Symbols:
             return code[2:] + "." + code[:2]
         candidates = self.by_code.get(code, set())
         return next(iter(candidates)) if len(candidates) == 1 else None
+
+    def provenance(self, code, symbol):
+        if not symbol:
+            return dict(kind="UNRESOLVED_SYMBOL")
+        if SYMBOL.fullmatch(code) or re.fullmatch(r"(?:SH|SZ|BJ)\d{6}", code):
+            return dict(kind="SOURCE_EXCHANGE")
+        return dict(self.evidence)

@@ -34,7 +34,7 @@ class Worker:
         )
         self.stop, self.lock = Event(), Lock()
         self.state = dict(
-            version="1.0.0",
+            version="1.0.2",
             api_version=1,
             phase="STARTING",
             error=None,
@@ -43,6 +43,7 @@ class Worker:
             source_requests=0,
             market_requests=0,
             period_1m=0,
+            import_interface="INSTALLED_PACKAGE_CLI",
         )
         self.thread = Thread(
             target=self.run, name="lan-theme-local-publisher", daemon=True
@@ -62,10 +63,20 @@ class Worker:
             if data["last_error"] and snapshot
             else "READY"
             if snapshot
+            else "SOURCE_UNAVAILABLE"
+            if data["last_error"]
             else "AUTHORIZED_SNAPSHOT_REQUIRED",
             snapshot_asof=snapshot["asof_cn"] if snapshot else None,
             source=snapshot["source"] if snapshot else None,
             source_kind=snapshot["source_kind"] if snapshot else None,
+            provenance=snapshot.get("provenance") if snapshot else None,
+            identity_provenance=snapshot.get("identity_provenance")
+            if snapshot
+            else None,
+            business_status="SNAPSHOT_IMPORTED_VALIDATION_REQUIRED"
+            if snapshot and not snapshot["demo"] and snapshot.get("provenance")
+            else "BLOCKED_AUTHORIZED_KPL_DATA",
+            installed_cli="data/extensions/lan.theme/versions/1.0.2: python -m backend.cli --data-dir <TSP_DATA_DIR> import --help",
             catalog_coverage=snapshot["catalog_coverage"] if snapshot else "UNKNOWN",
             coverage_reason=snapshot["coverage_reason"]
             if snapshot
@@ -79,6 +90,8 @@ class Worker:
                 memberships=0,
                 source_stock_identities=0,
                 unresolved_memberships=0,
+                resolved_symbols=0,
+                unresolved_stock_identities=0,
             ),
             demo=snapshot["demo"] if snapshot else False,
         )
@@ -109,9 +122,7 @@ class Worker:
                             self.state.update(phase="PUBLISHING", error=None)
                         state = self.status(data)
                         state.update(
-                            phase="READY"
-                            if snapshot
-                            else "AUTHORIZED_SNAPSHOT_REQUIRED",
+                            phase=state["snapshot_state"],
                             published_at=now_cn(),
                         )
                         published = self.publisher.publish(snapshot, state)
