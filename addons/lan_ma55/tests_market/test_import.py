@@ -1,8 +1,8 @@
 import json
 import duckdb
 from addons.lan_marketdata.import_legacy import migrate
-from addons.lan_marketdata.backend.store import Store
-from addons.lan_marketdata.backend.grid import LEGACY, aggregate
+from addons.lan_ma55.backend.market_store import Store
+from addons.lan_ma55.backend.market_grid import LEGACY, aggregate
 from .test_rolling import sample
 
 

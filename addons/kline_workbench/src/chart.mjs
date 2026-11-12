@@ -1,12 +1,7 @@
-import { createChart, CandlestickSeries, HistogramSeries, LineSeries, createSeriesMarkers, CrosshairMode } from 'lightweight-charts';
+import { createChart, CandlestickSeries, HistogramSeries, createSeriesMarkers, CrosshairMode } from 'lightweight-charts';
 import { beijing } from './aggregate.mjs';
-import { UP, DOWN, MA_COLORS as colors, watchTheme } from './theme.mjs';
-export function withLineBreaks(points, color) {
-  // LWC joins non-whitespace line points. Its public per-point color controls
-  // the outgoing segment: hide only the bridge across a missing MA run.
-  return points.map((p,i) => p.value === undefined ? p : { ...p,
-    color: i + 1 < points.length && points[i + 1].value === undefined ? 'transparent' : color });
-}
+import { UP, DOWN, watchTheme } from './theme.mjs';
+import { BuyColumns } from './buy-columns.mjs';
 export function createWorkbenchChart(el, onReadout) {
   const style = el.ownerDocument.defaultView.getComputedStyle(el);
   const chart = createChart(el, { autoSize: true, layout: { background: { color: 'transparent' }, textColor: style.color, attributionLogo: true, fontFamily:'JetBrains Mono, monospace',fontSize:11 },
@@ -23,11 +18,14 @@ export function createWorkbenchChart(el, onReadout) {
   const candles = chart.addSeries(CandlestickSeries, { upColor: UP, downColor: DOWN, borderVisible: false, wickUpColor: UP, wickDownColor: DOWN });
   const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceLineVisible: false, lastValueVisible: false }, 1);
   chart.panes()[0].setStretchFactor(4); chart.panes()[1].setStretchFactor(1);
-  const markers = createSeriesMarkers(candles, []), lines = new Map();
+  const markers = createSeriesMarkers(candles, []);
+  const priceColumns = new BuyColumns(), volumeColumns = new BuyColumns();
+  candles.attachPrimitive(priceColumns); volume.attachPrimitive(volumeColumns);
+  let buys = [];
   let bars = [], averages = new Map(), currentAnchor = -1, shown = 120, defenseLine;
   const report = time => {
     const index = bars.findIndex(b => b.time === time), bar = index >= 0 ? bars[index] : bars.findLast(b => b.complete);
-    if (bar) onReadout({ ...bar, averages: bar.complete ? [...averages].map(([n, points]) => [n, points.find(p => p.time === bar.time)?.value]) : [] });
+    if (bar) onReadout({ ...bar, events: buys.filter(e=>e.time===bar.time), averages: bar.complete ? [...averages].map(([n, points]) => [n, points.find(p => p.time === bar.time)?.value]) : [] });
   };
   chart.subscribeCrosshairMove(p => report(p.time));
   function range(count, center = null) {
@@ -46,23 +44,19 @@ export function createWorkbenchChart(el, onReadout) {
       if (model.defense) defenseLine=candles.createPriceLine({price:model.defense,color:'#8B5CF6',lineWidth:1,lineStyle:2,axisLabelVisible:true,title:'MA55防守'});
       candles.setData(bars.map(b => b.complete ? { time: b.time, open: b.open, high: b.high, low: b.low, close: b.close } : { time: b.time }));
       volume.setData(bars.map(b => b.complete ? { time: b.time, value: b.volume, color: (b.close >= b.open ? UP : DOWN)+'88' } : { time: b.time }));
-      for (const [n, series] of lines) if (!averages.has(n)) { chart.removeSeries(series); lines.delete(n); }
-      let i = 0;
-      for (const [n, points] of averages) {
-        const color=model.maColors?.get(n)||colors[i % colors.length];
-        if (!lines.has(n)) lines.set(n, chart.addSeries(LineSeries, { title: `MA${n}`, color, lineWidth: 1, priceLineVisible: false, lastValueVisible: false, priceFormat }));
-        lines.get(n).applyOptions({ priceFormat, color });
-        lines.get(n).setData(withLineBreaks(points, color)); i++;
-      }
-      const signalMarkers=currentAnchor < 0 ? [] : [{time:bars[currentAnchor].time,position:'belowBar',color:'#b89af5',shape:'arrowUp',text:'MA55 15m确认'}];
-      const setup=model.setupAnchor?.index??-1;
-      if (setup>=0 && setup!==currentAnchor) signalMarkers.push({time:bars[setup].time,position:'belowBar',color:'#efb96c',shape:'circle',text:'支撑测试'});
+      buys = model.buys || [];
+      priceColumns.setTimes(buys.map(e=>e.time)); volumeColumns.setTimes(buys.map(e=>e.time));
+      const grouped = new Map();
+      for (const event of buys) grouped.set(event.time, (grouped.get(event.time)||0)+1);
+      const signalMarkers = [...grouped].map(([time,count])=>({ time, position:'belowBar', color:'#ff7383', shape:'arrowUp', text: count>1 ? `BUY ×${count}` : 'BUY' }));
+      const setups = new Set(buys.map(e=>e.setup_at));
+      for (const bar of bars) if (bar.complete && setups.has(bar.timestamp)) signalMarkers.push({time:bar.time,position:'belowBar',color:'#efb96c',shape:'circle',text:'支撑测试'});
       markers.setMarkers(signalMarkers.sort((a,b)=>a.time-b.time));
       if (reset) range(model.visible, currentAnchor < 0 ? null : currentAnchor);
       report(bars.findLast(b => b.complete)?.time);
     },
     range, focus() { if (currentAnchor >= 0) range(shown || 80, currentAnchor); },
     dates(from,to) { chart.timeScale().setVisibleRange({from,to}); },
-    dispose() { stopTheme(); markers.detach(); chart.remove(); },
+    dispose() { stopTheme(); candles.detachPrimitive(priceColumns); volume.detachPrimitive(volumeColumns); markers.detach(); chart.remove(); },
   };
 }

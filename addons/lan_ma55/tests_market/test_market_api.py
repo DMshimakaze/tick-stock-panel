@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from addons.lan_marketdata.backend import extension
+from addons.lan_ma55.backend import extension
 from .test_rolling import opened, put, sample
 
 
@@ -12,7 +12,7 @@ def test_v2_is_bounded_and_keeps_saved_history_when_writer_stops(tmp_path, monke
     demands = []
     worker = SimpleNamespace(
         store=store,
-        status=lambda: dict(api_version=2, phase="SOURCE_UNAVAILABLE"),
+        status=lambda: dict(api_version=1, phase="SOURCE_UNAVAILABLE"),
         demand=lambda values: demands.extend(values),
     )
     monkeypatch.setattr(extension, "worker", worker)
@@ -20,12 +20,12 @@ def test_v2_is_bounded_and_keeps_saved_history_when_writer_stops(tmp_path, monke
     extension.setup(SimpleNamespace(include_router=app.include_router))
     with TestClient(app) as c:
         assert (
-            c.get("/api/extensions/lan.marketdata/v2/status").json()["phase"]
+            c.get("/api/extensions/lan.ma55/v1/status").json()["phase"]
             == "SOURCE_UNAVAILABLE"
         )
-        assert c.get("/api/extensions/lan.marketdata/v2/universe").json()["total"] == 1
+        assert c.get("/api/extensions/lan.ma55/v1/universe").json()["total"] == 1
         response = c.get(
-            "/api/extensions/lan.marketdata/v2/bars",
+            "/api/extensions/lan.ma55/v1/bars",
             params={"symbols": "600000.SH", "timeframes": "15m,30m,60m"},
         )
         assert response.status_code == 200
@@ -37,7 +37,7 @@ def test_v2_is_bounded_and_keeps_saved_history_when_writer_stops(tmp_path, monke
         )
         assert (
             c.get(
-                "/api/extensions/lan.marketdata/v2/bars",
+                "/api/extensions/lan.ma55/v1/bars",
                 params={"symbols": "600000.SH", "limit": 251},
             ).status_code
             == 422
@@ -45,7 +45,7 @@ def test_v2_is_bounded_and_keeps_saved_history_when_writer_stops(tmp_path, monke
         store.close()
         assert (
             c.get(
-                "/api/extensions/lan.marketdata/v2/bars",
+                "/api/extensions/lan.ma55/v1/bars",
                 params={"symbols": "600000.SH"},
             ).status_code
             == 200

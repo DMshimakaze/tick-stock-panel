@@ -1,9 +1,9 @@
 import httpx
 import pytest
 from tickflow import TickFlow
-from addons.lan_marketdata.backend.collector import Collector
-from addons.lan_marketdata.backend.request_budget import RequestDeferred
-from addons.lan_marketdata.backend.grid import as_ms
+from addons.lan_ma55.backend.collector import Collector
+from addons.lan_ma55.backend.request_budget import RequestDeferred
+from addons.lan_ma55.backend.market_grid import as_ms
 
 
 def source(tmp_path, reply, **kw):

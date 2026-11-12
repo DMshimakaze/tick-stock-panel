@@ -1,4 +1,6 @@
-import { END_MINUTES, endStamp } from '../src/aggregate.mjs';
+// Synthetic fixtures only; production completed-bar validation is in Python.
+const END_MINUTES=[585,600,615,630,645,660,675,690,795,810,825,840,855,870,885,900];
+const endStamp=(day,minute)=>`${day} ${String(Math.floor(minute/60)).padStart(2,'0')}:${String(minute%60).padStart(2,'0')}:00`;
 
 export function testGrid(count = 400) {
   const days = [], timestamps = [];
@@ -31,17 +33,3 @@ export const SCENARIOS = {
     [100.4, 100.5, 99.6, 100, 90_000], [100, 100.1, 99.7, 99.9, 90_000],
     [99.9, 100.1, 99.8, 100, 90_000], [100, 102, 99.8, 101.5, 600_000]],
 };
-
-export function toMinuteSessions(bars) {
-  const days = new Map();
-  for (const b of bars) {
-    const day = b.timestamp.slice(0, 10), end = Number(b.timestamp.slice(11, 13)) * 60 + Number(b.timestamp.slice(14, 16));
-    const rows = days.get(day) || [];
-    for (let n = 0; n < 15; n++) rows.push({ datetime: endStamp(day, end - 14 + n).replace(' ', 'T'),
-      open: b.open, high: n === 0 ? b.high : Math.max(b.open, n === 14 ? b.close : b.open),
-      low: n === 0 ? b.low : Math.min(b.open, n === 14 ? b.close : b.open),
-      close: n === 14 ? b.close : b.open, volume: b.volume / 15, amount: b.volume / 15 * b.close * 100 });
-    days.set(day, rows);
-  }
-  return [...days].map(([date, rows]) => ({ date, rows }));
-}

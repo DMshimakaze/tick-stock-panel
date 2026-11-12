@@ -17,7 +17,7 @@ from addons.kline_workbench.build_backend import build
 
 def payload(symbol="600519.SH"):
     return dict(
-        api_version=2,
+        api_version=1,
         sessions=["2026-11-06"],
         rows=[
             dict(
@@ -83,6 +83,9 @@ class BridgeTests(unittest.TestCase):
                     calls.append((symbols, kwargs))
                     return payload()
 
+                def events(self, symbol, start, end):
+                    return dict(rows=[],total=0,truncated=False)
+
             worker.source.close()
             worker.source = Source()
             worker.publisher.publish = lambda rows: published.extend(rows)
@@ -110,7 +113,7 @@ class BridgeTests(unittest.TestCase):
                 200,
                 json={"items": []}
                 if request.url.path == "/api/ext-data" and request.method == "GET"
-                else dict(api_version=2, rows=[]),
+                else dict(api_version=1, rows=[]),
             )
 
         publisher = Publisher("http://local", transport=httpx.MockTransport(handle))
@@ -124,7 +127,7 @@ class BridgeTests(unittest.TestCase):
         client.bars(["600519.SH"], timeframes="15m,30m,60m")
         client.close()
         self.assertEqual(
-            requests[-1].url.path, "/api/extensions/lan.marketdata/v2/bars"
+            requests[-1].url.path, "/api/extensions/lan.ma55/v1/bars"
         )
         self.assertIn("tf_session=isolated", requests[-1].headers["cookie"])
 

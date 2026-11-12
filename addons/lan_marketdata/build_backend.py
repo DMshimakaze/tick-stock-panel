@@ -5,11 +5,11 @@ import zipfile
 
 def build():
     root=Path(__file__).resolve().parent
-    target=root/'dist'/'lan-marketdata-2.0.0.zip'
+    target=root/'dist'/'lan-marketdata-2.1.0.zip'
     target.parent.mkdir(parents=True,exist_ok=True)
     with zipfile.ZipFile(target,'w',zipfile.ZIP_DEFLATED) as archive:
         archive.write(root/'extension.yaml','extension.yaml')
-        for path in sorted((root/'backend').glob('*.py')):
+        for path in [root/'backend'/name for name in ('__init__.py','extension.py')]:
             archive.write(path,'backend/'+path.name)
     return target
 

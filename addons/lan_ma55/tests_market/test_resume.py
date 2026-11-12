@@ -2,7 +2,7 @@ from contextlib import closing
 from threading import Thread
 
 import pytest
-from addons.lan_marketdata.backend.store import Store, reader
+from addons.lan_ma55.backend.market_store import Store, reader
 from .test_rolling import sample, opened, put
 
 

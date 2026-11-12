@@ -64,6 +64,8 @@ def read_page(
     day=None,
     phase=None,
     rule_version=None,
+    start=None,
+    end=None,
 ):
     if (
         kind not in ("events", "symbols", "cycles")
@@ -93,6 +95,13 @@ def read_page(
         )
         where.append(f"substr({field},1,10)=?")
         values.append(day)
+    if kind == "events":
+        if start:
+            where.append("confirmed_at>=?")
+            values.append(start)
+        if end:
+            where.append("confirmed_at<=?")
+            values.append(end)
     if phase and kind == "symbols":
         where.append("phase=?")
         values.append(phase)
@@ -258,7 +267,8 @@ class StateWriter:
                     inserted += cursor.rowcount
                     self.conn.execute(
                         """INSERT INTO event_risk VALUES(?,?,?) ON CONFLICT(event_id)
-                        DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at""",
+                        DO UPDATE SET payload=excluded.payload,updated_at=excluded.updated_at
+                        WHERE event_risk.payload<>excluded.payload""",
                         (
                             event["event_id"],
                             encoded(record["risks"].get(event["event_id"], {})),

@@ -18,9 +18,9 @@ class Worker:
         self.settings = settings
         self.stop, self.lock = Event(), Lock()
         self.state = dict(
-            version="3.0.0",
+            version="3.1.0",
             phase="STARTING",
-            source="lan.marketdata HTTP v2",
+            source="lan.ma55 HTTP v1",
             minute_request_limit=0,
             requests={"minute_requests": 0, "period_1m": 0},
             error=None,
@@ -57,7 +57,7 @@ class Worker:
         primary = next(r for r in rows if r["timeframe"] == demand["period"])
         status = dict(
             phase=primary["state"],
-            source="lan.marketdata",
+            source="lan.ma55",
             row_count=primary["row_count"],
             warm_count=primary.get("warm_count", 0),
             warm_target=250,
@@ -87,13 +87,14 @@ class Worker:
             name=primary.get("name", symbol),
             asset_type=primary.get("asset_type"),
             series={r["timeframe"]: r["bars"] for r in rows},
+            events=data.get("events", {}).get(symbol, dict(rows=[],total=0,truncated=False)),
             states={r["timeframe"]: r["state"] for r in rows},
             calendar=data["sessions"],
             basis=primary.get("price_basis", "RAW"),
             basis_id=primary.get("basis_id"),
             asof=primary.get("latest_completed_at"),
             source_asof=primary.get("source_asof"),
-            source="lan.marketdata",
+            source="lan.ma55",
             source_id=primary.get("source_id"),
             transition=primary.get("transition"),
             correction=primary.get("correction", False),
@@ -110,6 +111,7 @@ class Worker:
         revision = json.dumps(
             [
                 demand["period"],
+                payload["events"],
                 [
                     (r["timeframe"], r.get("revision"), r["state"], r.get("basis_id"))
                     for r in rows
@@ -148,6 +150,10 @@ class Worker:
             data = self.source.bars(
                 symbols[offset : offset + 10], timeframes="15m,30m,60m"
             )
+            data["events"] = {}
+            for code in symbols[offset:offset+10]:
+                bars = next(r["bars"] for r in data["rows"] if r["symbol"]==code and r["timeframe"]=="15m")
+                data["events"][code] = self.source.events(code,bars[0]["timestamp"],bars[-1]["timestamp"]) if bars else dict(rows=[],total=0,truncated=False)
             datasets.update({s: data for s in symbols[offset : offset + 10]})
         rows, receipts = [], {}
         for demand in demands:
@@ -180,7 +186,7 @@ class Worker:
                     payload_json=json.dumps(
                         dict(
                             symbol=d["requested_symbol"],
-                            source="lan.marketdata",
+                            source="lan.ma55",
                             unavailable=True,
                         )
                     ),

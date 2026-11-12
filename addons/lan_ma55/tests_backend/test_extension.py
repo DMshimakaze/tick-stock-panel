@@ -42,6 +42,7 @@ def test_official_install_start_disable_uninstall_preserve_derived_data(
     tmp_path, scenarios, monkeypatch
 ):
     monkeypatch.delenv("QUANTDASH_TOKEN", raising=False)
+    monkeypatch.delenv("TICKFLOW_API_KEY", raising=False)
     def offline_transport(self, request):
         raise httpx.ConnectError("Isolated protocol host has no HTTP listener", request=request)
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", offline_transport)
@@ -56,18 +57,15 @@ def test_official_install_start_disable_uninstall_preserve_derived_data(
     assert preview["manifest"]["frontend"] == "frontend/extension.mjs"
     packages.install(archive.read_bytes(), preview["digest"], preview["revision"])
     app, client = boot(folder)
-    import time
-    for _ in range(100):
-        status = client.get("/api/extensions/lan.ma55/status").json()
-        if status["phase"] == "DATA_SOURCE_UNAVAILABLE":
-            break
-        time.sleep(.01)
-    assert status["phase"] == "DATA_SOURCE_UNAVAILABLE"
-    import importlib
+    for module in list(sys.modules.values()):
+        if getattr(module, "EXTENSION_ID", None)=="lan.ma55" and getattr(module, "worker", None):
+            module.worker.thread.join(20)
+    status = client.get("/api/extensions/lan.ma55/status").json()
+    assert status["phase"] == "CREDENTIAL_REQUIRED"
     for module in list(sys.modules.values()):
         if getattr(module, "EXTENSION_ID", None)=="lan.ma55" and getattr(module, "worker", None):
             module.worker.close()
-    assert status["backend_scanning"]
+    assert not client.get("/api/extensions/lan.ma55/status").json()["worker_alive"]
     path = folder / "user_data" / "lan_ma55" / "state.sqlite3"
     case = scenarios["single"]
     stocks = universe(1)

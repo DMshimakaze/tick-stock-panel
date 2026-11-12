@@ -11,8 +11,8 @@ import duckdb
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from addons.lan_marketdata.backend.grid import FIELDS, LEGACY, now_cn, valid_five, wall
-from addons.lan_marketdata.backend.store import Store
+from addons.lan_ma55.backend.market_grid import FIELDS, LEGACY, now_cn, valid_five, wall
+from addons.lan_ma55.backend.market_store import Store
 
 
 def migrate(source, destination):

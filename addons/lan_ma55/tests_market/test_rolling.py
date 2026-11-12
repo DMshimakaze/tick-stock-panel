@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from addons.lan_marketdata.backend.grid import (
+from addons.lan_ma55.backend.market_grid import (
     aggregate,
     as_ms,
     latest_point,
@@ -14,7 +14,7 @@ from addons.lan_marketdata.backend.grid import (
     points,
     wall,
 )
-from addons.lan_marketdata.backend.store import Store
+from addons.lan_ma55.backend.market_store import Store
 
 
 def sample(count=250):

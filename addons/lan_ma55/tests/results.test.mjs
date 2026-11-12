@@ -7,6 +7,7 @@ const pause = () => new Promise(resolve => setTimeout(resolve, 20));
 const summary = { market_date: '2026-11-06', data_asof: '2026-11-06 15:00:00',
   available_dates: ['2026-11-05', '2026-11-06'], generation: 1, revision: 4,
   backend_scanning: true, phase: 'WAITING_NEXT_SESSION', symbol_states: 2,
+  requests: {minute_requests:9,http_requests:15}, pending_symbols:1,
   universe: { expected: 2 }, cycle: { expected_symbols: 2, processed_symbols: 2,
     valid_symbols: 1, insufficient_symbols: 1, gap_symbols: 0, failed_symbols: 0 } };
 const row = { symbol: '600000.SH', name: '合成证券', generation: 1, market_date: '2026-11-06',
@@ -27,6 +28,8 @@ test('Sunday defaults to backend Friday, reports zero BUY and reads no watchlist
   assert.match(text, /2026-11-06 15:00:00/);
   assert.match(text, /等待下一交易日/);
   assert.match(text, /2 \/ 2/);
+  assert.match(text, /本次启动5m请求 9 \/ HTTP 15/);
+  assert.match(text, /待预热 1/);
   assert.deepEqual(calls.map(c => c[0]), ['lan_ma55_summary', 'lan_ma55_day']);
   dom.window.document.querySelector('[data-action="tab"][data-tab="data"]').click();
   assert.match(dom.window.document.body.textContent, /合成证券/);
@@ -77,4 +80,16 @@ test('workbench link uses public enabled-page list, original symbol/time, and ke
     else assert.match(dom.window.document.body.textContent,/安装并启用独立分钟K工作台/);
     dispose();dom.window.close();
   }
+});
+
+
+test('only the published-results page is registered in the installable manifest',async()=>{
+ const extension=(await import('../src/extension.mjs')).default;
+ const built=(await import('../dist/extension.js')).default;
+ assert.equal(extension.version,'0.5.2');assert.equal(extension.id,'lan.ma55');
+ assert.equal(extension.apiVersion,1);assert.equal(extension.routes[0].path,'/lan-ma55');
+ assert.equal(typeof built.routes[0].mount,'function');assert.equal(built.version,extension.version);
+ const url=new URL(workbenchUrl('600000.SH',{event_id:'saved-id',rule_version:'saved-rule',confirmed_at:'2026-11-06 10:00:00'}),'http://local');
+ assert.equal(url.searchParams.get('rule_version'),'saved-rule');
+ assert.equal(url.searchParams.get('period'),'15m');
 });

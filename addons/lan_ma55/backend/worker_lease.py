@@ -22,7 +22,7 @@ class ProcessLease:
                 fcntl.flock(self.file, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
             self.file.close()
-            raise RuntimeError("Another MA55 consumer owns this directory") from None
+            raise RuntimeError("Another MA55 writer owns this directory") from None
 
     def close(self):
         self.file.close()

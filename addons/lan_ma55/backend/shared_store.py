@@ -1,6 +1,7 @@
 """Shared completed 15m -> frozen R1 -> existing immutable SQLite events."""
 
 from copy import deepcopy
+from contextlib import nullcontext
 import json
 
 from .engine import RULE_VERSION, STATE_REVISION, minimal_features
@@ -138,7 +139,7 @@ class SharedStore(StateWriter):
             self.set_meta("universe", overview)
             self.set_meta("generation", generation)
 
-    def consume(self, rows, *, sessions, target, now, live_after):
+    def consume(self, rows, *, sessions, target, now, live_after, commit=True):
         symbols = [r["symbol"] for r in rows]
         previous, _ = self.records(symbols)
         records, kinds, day_rows, members = [], {}, [], []
@@ -189,6 +190,7 @@ class SharedStore(StateWriter):
                 "METADATA_PENDING",
                 "SOURCE_DISCREPANCY",
                 "SOURCE_UNAVAILABLE",
+                "GAP",
             )
             allowed = allowed and source.get("price_basis") == "QFQ"
             restore = bool(
@@ -340,7 +342,7 @@ class SharedStore(StateWriter):
         cycle = self.cycle(self.identity(target)) or self.new_cycle(
             target, expected, now, "LIVE" if target[:10] == now[:10] else "REPLAY"
         )
-        with self.conn:
+        with self.conn if commit else nullcontext():
             self.conn.executemany(
                 "INSERT INTO cycle_member VALUES(?,?,?) ON CONFLICT(cycle_id,symbol) DO UPDATE SET category=excluded.category",
                 members,
@@ -382,7 +384,9 @@ class SharedStore(StateWriter):
             self.set_meta("revision", self.meta("revision", 0) + 1)
             self.set_meta(
                 "pending_publish",
-                dict(day=target[:10], symbols=[r["symbol"] for r in records]),
+                dict(day=target[:10], symbols=sorted(
+                    set((self.meta("pending_publish") or {}).get("symbols", []))
+                    | {r["symbol"] for r in records})),
             )
         return [r["symbol"] for r in records]
 
@@ -406,7 +410,7 @@ class SharedStore(StateWriter):
             available_dates=[
                 r[0]
                 for r in self.conn.execute(
-                    "SELECT DISTINCT trade_date FROM day_state ORDER BY trade_date"
+                    "SELECT trade_date FROM day_state UNION SELECT substr(confirmed_at,1,10) FROM signal_event ORDER BY 1"
                 )
             ],
             universe=self.meta("universe", {}),

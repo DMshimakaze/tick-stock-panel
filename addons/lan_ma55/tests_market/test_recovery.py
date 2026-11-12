@@ -1,4 +1,4 @@
-from addons.lan_marketdata.backend.grid import LEGACY, aggregate
+from addons.lan_ma55.backend.market_grid import LEGACY, aggregate
 from .test_rolling import sample, opened, put
 
 

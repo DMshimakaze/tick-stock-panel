@@ -1,4 +1,3 @@
-export const DEFAULT_MAS = [5, 10, 20, 30, 55, 233].map(period => ({ period, enabled: period === 55 || period === 233 }));
 export function movingAverages(bars, periods) {
   const values = new Map(periods.map(n => [n, []])), queue = [];
   for (const bar of bars) {

@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { aggregateMinutes, dailyCandles, beijing, epoch } from '../src/aggregate.mjs';
 import { movingAverages, eventAnchor } from '../src/indicators.mjs';
 import { session } from './fixtures.mjs';
-import { withLineBreaks } from '../src/chart.mjs';
 const now = '2026-11-08 12:00:00', calendar = ['2026-11-06'];
 
 test('daily MA does not bridge an actually missing exchange session',()=>{
@@ -11,12 +10,6 @@ test('daily MA does not bridge an actually missing exchange session',()=>{
   const result=dailyCandles([{...row,date:'2026-11-04'},{...row,date:'2026-11-06'}],now,['2026-11-04','2026-11-05','2026-11-06']);
   assert.equal(result.gaps,1);assert.equal(result.continuous,1);
   assert.equal(movingAverages(result.bars,[2]).get(2).at(-1).value,undefined);
-});
-test('chart suppresses the outgoing line across an unavailable MA run',()=>{
-  const points=[{time:1,value:10},{time:2,value:11},{time:3},{time:4},{time:5,value:12},{time:6,value:13}];
-  const draw=withLineBreaks(points,'red');
-  assert.equal(draw[0].color,'red');assert.equal(draw[1].color,'transparent');assert.equal(draw[4].color,'red');
-  assert.equal(draw[2].value,undefined);assert.equal(points[1].color,undefined);
 });
 for (const [period, count] of [['1m',240],['5m',48],['15m',16],['30m',8],['60m',4]]) {
   test(`${period}: genuine OHLCV, auction exclusion, separate morning and afternoon`, () => {

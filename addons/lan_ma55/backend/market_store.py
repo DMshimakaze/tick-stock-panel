@@ -1,13 +1,13 @@
 """Single SQLite WAL writer, raw 250 x 15m retention, independent read connections."""
 
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 import json
 from math import isclose
 from pathlib import Path
 import sqlite3
 from time import time
 
-from .grid import (
+from .market_grid import (
     CAPACITY,
     FIELDS,
     LEGACY,
@@ -18,7 +18,7 @@ from .grid import (
     points,
     project,
 )
-from .lease import ProcessLease
+from .worker_lease import ProcessLease
 
 COLUMNS = (
     "symbol",
@@ -116,12 +116,21 @@ def unpack(row):
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, *, connection=None):
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.lease = ProcessLease(self.path.with_suffix(".writer.lock"))
+        self.owns_connection = connection is None
+        self.lease = (
+            ProcessLease(self.path.with_suffix(".writer.lock"))
+            if self.owns_connection
+            else None
+        )
         try:
-            self.conn = sqlite3.connect(self.path, timeout=5)
+            self.conn = (
+                connection
+                if connection is not None
+                else sqlite3.connect(self.path, timeout=5)
+            )
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
@@ -129,12 +138,14 @@ class Store:
             self.conn.executescript(DDL)
             self.conn.commit()
         except Exception:
-            self.lease.close()
+            if self.lease:
+                self.lease.close()
             raise
 
     @contextmanager
     def transaction(self):
-        with self.conn:
+        # Unified owner begins the encompassing market + strategy transaction.
+        with nullcontext() if self.conn.in_transaction else self.conn:
             yield
 
     def meta(self, key, default=None, *, conn=None):
@@ -168,7 +179,7 @@ class Store:
         )
 
     def save_master(self, rows, overview, sessions):
-        with self.conn:
+        with self.transaction():
             old_members = {
                 r[0]
                 for r in self.conn.execute(
@@ -192,7 +203,7 @@ class Store:
 
     def put_metadata(self, rows):
         """Apply an explicit small metadata response without changing full-market membership."""
-        with self.conn:
+        with self.transaction():
             for row in rows:
                 previous = self.instrument(row["symbol"]) or dict(DEFAULTS)
                 self._put(
@@ -414,7 +425,7 @@ class Store:
             or state != info["state"]
             or gaps[-250:] != info["gaps"]
         )
-        with self.conn:
+        with self.transaction():
             if replace:
                 self.conn.execute("DELETE FROM bar15 WHERE symbol=?", (symbol,))
             self._write(symbol, incoming)
@@ -472,14 +483,14 @@ class Store:
             b.update(source=LEGACY, source_id=LEGACY)
         row["latest_completed15"] = bars[-1]["timestamp"] if bars else None
         row["latest_source5"] = None
-        with self.conn:
+        with self.transaction():
             self._put(row)
             self._write(row["symbol"], bars)
             self._factors(row["symbol"], events)
         return True
 
     def failed(self, symbols, end, now, message):
-        with self.conn:
+        with self.transaction():
             for symbol in symbols:
                 info = self.instrument(symbol)
                 if info:
@@ -493,9 +504,14 @@ class Store:
                     self._put(info)
             self.set_meta("data_revision", self.meta("data_revision", 0) + 1)
 
-    def read(self, symbol, tf, asof, limit=250):
-        with closing(reader(self.path)) as conn:
-            conn.execute("BEGIN")
+    def read(self, symbol, tf, asof, limit=250, *, connection=None):
+        with (
+            nullcontext(connection)
+            if connection is not None
+            else closing(reader(self.path)) as conn
+        ):
+            if connection is None:
+                conn.execute("BEGIN")
             info = self.instrument(symbol, conn=conn)
             if info is None:
                 return dict(
@@ -552,7 +568,7 @@ class Store:
                 source_id=info["source_id"],
                 transition=info["transition"],
                 analysis_allowed=info["source_id"] == SOURCE
-                and info["state"] in ("READY", "WARMUP", "GAP"),
+                and info["state"] in ("READY", "WARMUP"),
                 price_basis="QFQ" if info["factor_coverage"] == "EXPLICIT" else "RAW",
                 basis_id=f"{info['source_id']}:{asof[:10]}:{info['basis_revision']}",
                 basis_revision=info["basis_revision"],
@@ -614,5 +630,6 @@ class Store:
             ]
 
     def close(self):
-        self.conn.close()
-        self.lease.close()
+        if self.owns_connection:
+            self.conn.close()
+            self.lease.close()

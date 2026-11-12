@@ -1,8 +1,8 @@
-"""Public lan.marketdata HTTP v2 client, independent of its implementation."""
+"""Public lan.ma55 HTTP v1 client, independent of its implementation."""
 
 import httpx
 
-PREFIX = "/api/extensions/lan.marketdata/v2"
+PREFIX = "/api/extensions/lan.ma55/v1"
 
 
 class Client:
@@ -22,8 +22,8 @@ class Client:
         response = self.http.get(PREFIX + path, params=params)
         response.raise_for_status()
         data = response.json()
-        if data.get("api_version") != 2:
-            raise ValueError("lan.marketdata API version mismatch; v2 required")
+        if data.get("api_version") != 1:
+            raise ValueError("lan.ma55 API version mismatch; v1 required")
         return data
 
     def status(self):
@@ -39,6 +39,19 @@ class Client:
             timeframes=timeframes,
             **({"asof": asof} if asof else {}),
         )
+
+    def events(self, symbol, start, end):
+        rows, total, offset, symbol_total = [], 0, 0, 0
+        # A visible 250-bar window has a bounded paginated event response.
+        for _ in range(16):
+            page = self.get("/events",symbol=symbol,start=start,end=end,offset=offset,limit=200)
+            rows.extend(page["rows"])
+            total = page["total"]
+            symbol_total = page.get("symbol_total", total)
+            offset += len(page["rows"])
+            if offset >= total or not page["rows"]:
+                break
+        return dict(rows=rows,total=total,truncated=offset<total,outside_window=max(0,symbol_total-total))
 
     def close(self):
         self.http.close()

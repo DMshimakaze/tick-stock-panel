@@ -1,7 +1,8 @@
 """One bounded TickFlow SDK owner; actual HTTP hooks account for all SDK calls."""
 
-from collections import Counter
+from collections import Counter, deque
 from datetime import datetime
+import json
 from math import isfinite
 from threading import Event, Lock
 from time import monotonic
@@ -9,7 +10,7 @@ from time import monotonic
 import httpx
 from tickflow import TickFlow, TickFlowError
 
-from .grid import BEIJING, as_ms, normalize_five
+from .market_grid import BEIJING, as_ms, normalize_five
 from .request_budget import (
     CollectionStopped,
     RequestDeferred,
@@ -48,6 +49,7 @@ class Collector:
         )
         self.budgets = {"minute": RollingBudget(limit), "metadata": RollingBudget(30)}
         self.metrics = Counter(http_requests=0, minute_requests=0, http_429_count=0)
+        self.observations = deque(maxlen=2048)
         self.lock = Lock()
         self.responses = 0
         self.observed = None
@@ -72,6 +74,24 @@ class Collector:
             self.stop,
             lambda delay: self.report(phase="QUOTA_WAIT", wait_seconds=round(delay, 2)),
         )
+        try:
+            body = json.loads(request.content) if request.content else {}
+        except ValueError:
+            body = {}
+        symbols = body.get("symbols") or [
+            s for s in request.url.params.get("symbols", "").split(",") if s
+        ]
+        request.extensions["lan_measure"] = dict(
+            started=monotonic(),
+            endpoint=request.url.path,
+            capability="kline.minute.batch"
+            if minute
+            else "adj_factor"
+            if "ex-factors" in request.url.path
+            else "metadata",
+            symbol_count=len(symbols),
+            at=str(datetime.now(BEIJING).replace(tzinfo=None, microsecond=0)),
+        )
         with self.lock:
             self.metrics["http_requests"] += 1
             self.metrics["minute_requests"] += int(minute)
@@ -86,6 +106,22 @@ class Collector:
         )
 
     def observe(self, response):
+        measurement = response.request.extensions.get("lan_measure")
+        if measurement:
+            self.observations.append(
+                dict(
+                    **{k: v for k, v in measurement.items() if k != "started"},
+                    latency_ms=(monotonic() - measurement["started"]) * 1000,
+                    status=response.status_code,
+                    retries=0,
+                    quota_headers={
+                        k: v
+                        for k, v in response.headers.items()
+                        if k.lower().startswith(("x-ratelimit-", "ratelimit-"))
+                        or k.lower() == "retry-after"
+                    },
+                )
+            )
         self.responses += 1
         if response.status_code >= 400:
             self.observed = response.status_code
