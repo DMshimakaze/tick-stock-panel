@@ -26,18 +26,19 @@ export function mountTheme(el,ctx) {
     const reverseLinks=d.index.get(model.reverse)||[];
     const historical=s?.snapshot_asof && model.date && s.snapshot_asof.slice(0,10)!==model.date;
     root.innerHTML=`<style>${CSS}</style>
-      <header class="lt-top"><div><h1>题材与 MA55</h1><small>兰 · 1.0.4 · 已发布信号的题材归属筛选</small></div><button data-action="refresh" ${model.loading?'disabled':''}>${model.loading?'正在读取…':'刷新已发布数据'}</button></header>
+      <header class="lt-top"><div><h1>题材与 MA55</h1></div><button data-action="refresh" ${model.loading?'disabled':''}>${model.loading?'正在读取…':'刷新已发布数据'}</button></header>
       <div class="lt-error" role="alert">${esc(model.error)}</div>
-      <section class="lt-card lt-source" aria-label="题材来源状态">${s?.demo?'<b class="lt-demo">DEMO · 隔离测试关系</b>':''}
+      ${!s?.snapshot_id||s.demo?'<p class="lt-warning">AUTHORIZED_SNAPSHOT_REQUIRED · 需导入授权题材快照</p>':s.snapshot_state==='STALE'?'<p class="lt-warning">最近导入未通过，沿用已保存快照</p>':''}
+      <details class="lt-source" aria-label="题材来源状态"><summary>数据来源 / 诊断</summary>${s?.demo?'<b class="lt-demo">DEMO · 隔离测试关系</b>':''}
         <strong>${!s?'等待本地题材状态':!s.snapshot_id?'等待合法真实题材数据':s.snapshot_state==='STALE'?'快照已保留 · 最近导入未通过':'已导入题材快照'}</strong>
         <p>${s?.snapshot_id?`${esc(s.source)} · ${esc(s.source_kind)} · 快照 ${esc(s.snapshot_asof)}`:'请用本插件导入工具导入合法获取的 InfoGet JSON 或标准化导出文件。'}</p>
         <small>${s?.snapshot_id?`题材 ${s.counts.themes} · 节点 ${s.counts.nodes} · 股票关系 ${s.counts.memberships} · 目录覆盖 ${s.catalog_coverage==='MANIFEST_COMPLETE'?'声明目录已齐（非KPL全量证明）':'部分 / 未知'}`:'AUTHORIZED_SNAPSHOT_REQUIRED'} · 在线KPL未接入 / 未验证</small>
         <p><small>授权来源说明：${esc(s?.provenance||'未提供可核实授权来源')} · ${!s?.snapshot_id||s.demo?'BLOCKED_AUTHORIZED_KPL_DATA':'按快照授权范围使用'}</small></p>
-        <details class="lt-import"><summary>导入合法文件 · 安装包自带工具</summary><p>在 TSP 数据目录的 extensions/lan.theme/versions/1.0.4 中打开终端，使用现有 Python 环境执行：</p><code>python -m backend.cli --data-dir "完整TSP数据目录" import --input "授权文件或目录" --asof "YYYY-MM-DD HH:MM:SS" --source "实际来源" --provenance "导出许可及本地使用权说明"</code><p>支持 InfoGet JSON、JSONL/CSV v1；查看 import --help。裸代码须带 --identity-map 的可追溯管理员映射或完整证券主数据，否则保持未解析。无需开发仓库；本版不通过扩展数据表转存原始商业文件。</p></details>
+        <details class="lt-import"><summary>导入合法文件 · 安装包自带工具</summary><p>在 TSP 数据目录的 extensions/lan.theme/versions/1.0.7 中打开终端，使用现有 Python 环境执行：</p><code>python -m backend.cli --data-dir "完整TSP数据目录" import --input "授权文件或目录" --asof "YYYY-MM-DD HH:MM:SS" --source "实际来源" --provenance "导出许可及本地使用权说明"</code><p>支持 InfoGet JSON、JSONL/CSV v1；查看 import --help。裸代码须带 --identity-map 的可追溯管理员映射或完整证券主数据，否则保持未解析。无需开发仓库；本版不通过扩展数据表转存原始商业文件。</p></details>
         ${s?.last_import_error?`<p class="lt-warning">导入拒绝：${esc(s.last_import_error.error||'明细不完整')}。继续使用上一个合法快照。</p>`:''}
-      </section>
-      ${historical?`<p class="lt-warning">${s.snapshot_asof.slice(0,10)>model.date?'按后来的题材归属回看，不代表当时标签':'题材快照早于所选信号日，归属有待更新'}。当前使用 ${esc(s.snapshot_asof)} 快照。</p>`:''}
       <div class="lt-metrics" aria-label="MA55统计">${[['已保存事件总数',stats.savedEvents],['所选日 '+(model.rule===R1?'R1':'旧V5')+' BUY事件',stats.dayEvents],['BUY去重股票',stats.uniqueStocks],['历史重放 / 实时 / 延迟',`${stats.replayEvents} / ${stats.liveEvents} / ${stats.delayedEvents}`],['WATCH股票',stats.watchStocks],['BUY题材覆盖',s?.snapshot_id?`${stats.labelledStocks} / ${stats.uniqueStocks}`:'待导入']].map(([k,v])=>`<div class="lt-metric"><span>${esc(k)}</span><strong>${esc(v)}</strong></div>`).join('')}</div>
+      </details>
+      ${historical?`<p class="lt-warning">${s.snapshot_asof.slice(0,10)>model.date?'按后来的题材归属回看，不代表当时标签':'题材快照早于所选信号日，归属有待更新'}。当前使用 ${esc(s.snapshot_asof)} 快照。</p>`:''}
       <div class="lt-tools"><label>交易日 <select aria-label="结果交易日" data-control="date">${dates.map(date=>`<option ${model.date===date?'selected':''}>${esc(date)}</option>`).join('')}</select></label>
         <label>规则 <select aria-label="信号规则" data-control="rule"><option value="${R1}" ${model.rule===R1?'selected':''}>V5_R1</option><option value="${V5}" ${model.rule===V5?'selected':''}>旧V5（单独查看）</option></select></label>
         <label>来源 <select aria-label="信号来源" data-control="mode">${[['ALL','全部来源'],['LIVE','实时'],['DELAYED','延迟'],['REPLAY','历史重放']].map(([v,t])=>`<option value="${v}" ${model.mode===v?'selected':''}>${t}</option>`).join('')}</select></label>

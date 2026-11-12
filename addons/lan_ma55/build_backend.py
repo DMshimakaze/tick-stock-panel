@@ -7,12 +7,12 @@ import zipfile
 def build(destination=None):
     root = Path(__file__).resolve().parent
     target = (
-        Path(destination) if destination else root / "dist" / "lan-ma55-0.5.2.zip"
+        Path(destination) if destination else root / "dist" / "lan-ma55-0.6.3.zip"
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     names = ['__init__.py','engine.py','pipeline.py','store.py','extension.py',
              'runtime.py','result_publisher.py','shared_store.py','worker_lease.py',
-             'unified_store.py','market_store.py','market_grid.py','collector.py','request_budget.py']
+             'unified_store.py','market_store.py','market_grid.py','collector.py','request_budget.py','history.py']
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.write(root / "extension.yaml", "extension.yaml")
         for name in names:

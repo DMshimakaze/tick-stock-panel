@@ -130,7 +130,12 @@ class SharedStore(StateWriter):
         return rows if symbols is None else [r for r in rows if r["symbol"] in symbols]
 
     def source_master(self, rows, overview, generation):
-        with self.conn:
+        with nullcontext() if self.conn.in_transaction else self.conn:
+            current = {r["symbol"] for r in rows}
+            for symbol, prior in self.master().items():
+                if symbol not in current and prior.get("eligible"):
+                    prior["eligible"] = False
+                    self.conn.execute("UPDATE security_master SET payload=? WHERE symbol=?", (encoded(prior), symbol))
             for row in rows:
                 self.conn.execute(
                     "INSERT INTO security_master VALUES(?,?) ON CONFLICT(symbol) DO UPDATE SET payload=excluded.payload",
@@ -302,6 +307,8 @@ class SharedStore(StateWriter):
                         if e["event_id"] in old_ids or e["confirmed_at"] >= reset_at
                     ]
                 record["state"].pop("migration_lock_at", None)
+            if restore and prior:
+                record["risks"].update(deepcopy(prior["risks"]))
             old_ids = {e["event_id"] for e in (prior or {}).get("confirmations", [])}
             for event in record["confirmations"]:
                 if event["event_id"] not in old_ids:

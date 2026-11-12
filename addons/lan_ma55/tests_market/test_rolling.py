@@ -72,7 +72,7 @@ def put(store, rows, sessions, **kw):
 
 
 @pytest.mark.parametrize(
-    "count,values", [(232, 0), (233, 1), (250, 18), (251, 18), (1000, 18)]
+    "count,values", [(232, 0), (233, 1), (250, 18), (251, 19), (1000, 250)]
 )
 def test_retention_and_real_ma233(tmp_path, count, values):
     sessions, rows = sample(count)
@@ -91,11 +91,11 @@ def test_retention_and_real_ma233(tmp_path, count, values):
             for r in store.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
-        ) == {"meta", "instrument_state", "bar15", "tail5", "factor_event"}
+        ) == {"meta", "instrument_state", "bar15", "tail5", "factor_event", "ma_history_progress"}
         for tf, maximum in (("30m", 125), ("60m", 62)):
             bars = store.read("600000.SH", tf, max(rows))["bars"]
             assert len(bars) <= maximum
-            assert all(b["ma233"] is None for b in bars)
+            assert sum(b["ma233"] is not None for b in bars) == min(maximum, max(0, count // (int(tf[:-1]) // 15) - 232))
             assert all(b["source_count"] == int(tf[:-1]) // 5 for b in bars)
     finally:
         store.close()

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createReader,decodePayload,DEMAND,VIEW } from '../src/data.mjs';
+import { createReader,decodePayload,DEMAND,VIEW,savedSeries,savedAverages } from '../src/data.mjs';
 export function bridge() {
   const tables={[DEMAND]:new Map(),[VIEW]:new Map()}, calls=[];
   const api={
@@ -34,4 +34,16 @@ test('server bars and MAs arrive unchanged, without a second price projection',(
   const bar={timestamp:'2026-11-06 09:45:00',open:5,high:6,low:4.5,close:5.5,volume:300,ma55:5.3};
   const data=decodePayload({symbol:'600519.SH',series:{'15m':[bar]},basis:'QFQ'},{});
   assert.deepEqual(data.series['15m'][0],bar);assert.equal(data.series['1m'],undefined);
+});
+
+test('exchange neighbours cross lunch, overnight and holiday; real missing slots break the line',()=>{
+  const calendar=['2026-09-30','2026-10-09'];
+  const timestamps=['2026-09-30 11:30:00','2026-09-30 13:15:00','2026-09-30 15:00:00','2026-10-09 09:45:00'];
+  const data={calendar,series:{'15m':timestamps.map((timestamp,i)=>({timestamp,complete:true,ma233:10+i}))}};
+  const bars=savedSeries(data,'15m').bars;
+  const ma=savedAverages(bars,[233]).get(233);
+  assert.equal(ma[0].color,undefined); // lunch
+  assert.equal(ma.find(p=>p.value===12).color,undefined); // closed days
+  assert.equal(ma.find(p=>p.value===11).color,'transparent'); // actual missing 13:30
+  assert.equal(ma.filter(p=>p.value!==undefined).length,4);
 });

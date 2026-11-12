@@ -18,7 +18,7 @@ class Worker:
         self.settings = settings
         self.stop, self.lock = Event(), Lock()
         self.state = dict(
-            version="3.1.1",
+            version="3.2.1",
             phase="STARTING",
             source="lan.ma55 HTTP v1",
             minute_request_limit=0,
@@ -64,6 +64,7 @@ class Worker:
             capacity=primary.get("capacity", 250),
             source_id=primary.get("source_id"),
             transition=primary.get("transition"),
+            ma_history=primary.get("ma_history", {}),
             valid_ma_lengths={
                 r["timeframe"]: {
                     str(n): sum(b.get(f"ma{n}") is not None for b in r["bars"])
@@ -86,6 +87,8 @@ class Worker:
             symbol=symbol,
             name=primary.get("name", symbol),
             asset_type=primary.get("asset_type"),
+            raw_tick=primary.get("raw_tick"),
+            ma_history={r["timeframe"]:r.get("ma_history", {}) for r in rows},
             series={r["timeframe"]: r["bars"] for r in rows},
             events=data.get("events", {}).get(symbol, dict(rows=[],total=0,truncated=False)),
             states={r["timeframe"]: r["state"] for r in rows},

@@ -97,3 +97,17 @@ def test_public_host_job_owns_priority(tmp_path):
         assert c.metrics["http_requests"] == 0
     finally:
         c.close()
+
+
+def test_master_calls_real_sdk_stock_and_etf_exchange_filters(tmp_path):
+    calls=[]
+    def reply(request):
+        calls.append((request.url.path,request.url.params.get("type")))
+        return httpx.Response(200,json={"data":[]})
+    c=source(tmp_path,reply)
+    try:
+        assert c.master()==[]
+        assert [t for _,t in calls]==["stock","stock","stock","etf","etf"]
+        assert all(path.endswith('/instruments') for path,_ in calls)
+    finally:
+        c.close()

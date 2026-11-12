@@ -171,6 +171,8 @@ class Collector:
                     )
                 )
             )
+        for exchange in ("SH", "SZ"):
+            rows.extend(self.request(lambda ex=exchange: self.tf.exchanges.get_instruments(ex, instrument_type="etf")))
         return rows
 
     def calendar(self):

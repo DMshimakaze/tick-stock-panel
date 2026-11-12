@@ -53,10 +53,10 @@ test('native-style compact controls, period persistence, saved MA, date range an
  assert.ok(s.requests.every(r=>r.period));s.close();
 });
 test('strict event timestamp and manifest match unified extension',async()=>{
- assert.equal(extension.version,'3.1.1');assert.equal(extension.routes[0].path,'/lan-kline');
+ assert.equal(extension.version,'3.2.1');assert.equal(extension.routes[0].path,'/lan-kline');
  assert.equal(parseLink('http://tsp/?symbol=000006.SZ&event=2026-11-06T15:00:00&setup=2026-11-06T14:30:00&defense=7.25').defense,7.25);
  assert.equal(parseLink('http://tsp/?event=2026-02-30T15:00:00').event,null);
- const built=await import('../dist/extension.js');assert.equal(built.default.version,'3.1.1');
+ const built=await import('../dist/extension.js');assert.equal(built.default.version,'3.2.1');
 });
 
 test('empty 503 is a service failure with a status link, never ordinary warmup',async(t)=>{
@@ -196,4 +196,12 @@ test('window-external events remain facts and only a compact time hint appears o
  assert.equal(s.$('[data-action="focus"]').disabled,true);assert.match(s.$('.kw-buy-count').textContent,/7条窗口外/);
  assert.doesNotMatch(s.dom.window.document.body.textContent,/private-json|event_id|防守/);
  assert.deepEqual(s.updates.at(-1).m.buys,[]);
+});
+
+test('a 15m BUY between higher-period closes is a location hint, not an unverified-factor warning',async(t)=>{
+ const source=data(),at=source.series['15m'].at(-4).timestamp;
+ const s=setup(source,'http://tsp/lan-kline?symbol=600519.SH&period=60m&event='+encodeURIComponent(at)+'&factor=1');
+ t.after(()=>s.close());await pause();s.$('[data-period="60m"]').click();await pause();
+ assert.match(s.$('.kw-anchor').textContent,/目标时点不对应/);
+ assert.doesNotMatch(s.$('[role="alert"]').textContent,/选中BUY复权基准未核实/);
 });

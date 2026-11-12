@@ -34,7 +34,7 @@ class Worker:
         )
         self.stop, self.lock = Event(), Lock()
         self.state = dict(
-            version="1.0.4",
+            version="1.0.7",
             api_version=1,
             phase="STARTING",
             error=None,
@@ -76,7 +76,7 @@ class Worker:
             business_status="SNAPSHOT_IMPORTED_VALIDATION_REQUIRED"
             if snapshot and not snapshot["demo"] and snapshot.get("provenance")
             else "BLOCKED_AUTHORIZED_KPL_DATA",
-            installed_cli="data/extensions/lan.theme/versions/1.0.4: python -m backend.cli --data-dir <TSP_DATA_DIR> import --help",
+            installed_cli="data/extensions/lan.theme/versions/1.0.7: python -m backend.cli --data-dir <TSP_DATA_DIR> import --help",
             catalog_coverage=snapshot["catalog_coverage"] if snapshot else "UNKNOWN",
             coverage_reason=snapshot["coverage_reason"]
             if snapshot

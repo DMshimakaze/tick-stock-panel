@@ -26,19 +26,25 @@ from .unified_store import UnifiedStore
 from .result_publisher import Publisher
 from .worker_lease import ProcessLease
 from .engine import RULE_VERSION
+from .history import history_task, history_outcome
 
 
 def classify(items, day):
     rows = []
     for item in items:
         ext = item.get("ext") or {}
-        stock = item.get("type") == "stock" and item.get("region") == "CN"
+        asset = item.get("type")
+        exchange = item.get("exchange") or item["symbol"].rsplit(".", 1)[-1]
+        admitted = item.get("region") == "CN" and (
+            asset == "stock" and exchange in ("SH", "SZ", "BJ")
+            or asset == "etf" and exchange in ("SH", "SZ")
+        )
         listing = ext.get("listing_date")
         rows.append(
             dict(
                 symbol=item["symbol"],
                 name=item.get("name") or item["symbol"],
-                eligible=stock and (not listing or listing <= day),
+                eligible=admitted and (not listing or listing <= day),
                 source_type=item.get("type"),
                 raw_tick=ext.get("tick_size"),
                 listing_date=listing,
@@ -51,6 +57,8 @@ def classify(items, day):
     return rows, dict(
         candidates=len(rows),
         expected=sum(r["eligible"] for r in rows),
+        stock=sum(r["eligible"] and r["source_type"] == "stock" for r in rows),
+        etf=sum(r["eligible"] and r["source_type"] == "etf" for r in rows),
         unpriced=sum(r["eligible"] and not r["raw_tick"] for r in rows),
         excluded=sum(not r["eligible"] for r in rows),
         unclassified=0,
@@ -122,7 +130,7 @@ class Worker:
             int(settings.get("cold_requests_per_minute", 2))
         )
         self.state = dict(
-            version="0.5.2",
+            version="0.6.3",
             api_version=1,
             phase="STARTING",
             backend_scanning=True,
@@ -223,6 +231,8 @@ class Worker:
                 self.last_history = now
                 self.owner.checkpoint()
             self.report(**self.owner.summary(target), publisher_error=None)
+            if target:
+                self.publisher.prices(target[:10], self.store.prices(target[:10]))
             self.publisher.summary(self.status())
             self.last_publication = now
         except (httpx.HTTPError, ValueError):
@@ -319,6 +329,12 @@ class Worker:
                             if s in scope or s in demanded
                         }
                     work = task(master, sessions, target, now, demanded)
+                    # Live completed buckets always win. An already warm chart's
+                    # requested lookback precedes the general cold backlog.
+                    if not work or work[2] == "COLD":
+                        history = history_task(self.store, master, sessions, target, demanded)
+                        if history and (not work or history[3][0] in demanded):
+                            work = history
                     self.report(
                         queue_size=sum(
                             r["eligible"]
@@ -337,7 +353,7 @@ class Worker:
                         self.stop.wait(5)
                         continue
                     start, end, stage, symbols = work
-                    cold = stage in ("COLD", "REBUILD")
+                    cold = stage in ("COLD", "REBUILD", "HISTORY")
                     if cold and self.cold_budget.delay() > 0:
                         self.publish(target)
                         self.stop.wait(min(5, self.cold_budget.delay()))
@@ -354,8 +370,9 @@ class Worker:
                     needed = [
                         s
                         for s in symbols
-                        if master[s]["factors_day"] != now[:10]
+                        if stage != "HISTORY" and (master[s]["factors_day"] != now[:10]
                         or master[s]["source_id"] != SOURCE
+                        )
                     ]
                     factors = self.collector.factors(needed)
                     received, errors = self.collector.fetch(
@@ -375,6 +392,18 @@ class Worker:
                             )
                             else None
                         )
+                        if stage == "HISTORY":
+                            if code:
+                                with self.store.transaction():
+                                    self.store.conn.execute(
+                                        "UPDATE ma_history_progress SET stop_reason=?,next_retry=? WHERE symbol=?",
+                                        (code, time() + 300, symbol),
+                                    )
+                            else:
+                                self.store.backfill(symbol, received.get(symbol, {}), sessions=sessions,
+                                    start=start, end=end, now=now,
+                                    stop_reason=history_outcome(master[symbol], received.get(symbol), start))
+                            continue
                         self.owner.accept_market(
                             symbol,
                             received.get(symbol, {}),
@@ -394,7 +423,7 @@ class Worker:
                     self.publish(target)
                 except RequestDeferred as exc:
                     self.flush_requests("DEFERRED")
-                    if exc.status_code == 429 and work:
+                    if exc.status_code == 429 and work and work[2] != "HISTORY":
                         for symbol in work[3]:
                             self.owner.accept_market(
                                 symbol,
@@ -414,7 +443,7 @@ class Worker:
                 except (SourceError, ValueError) as exc:
                     self.flush_requests("FAILED")
                     self.report(phase="SOURCE_UNAVAILABLE", error=str(exc))
-                    if work:
+                    if work and work[2] != "HISTORY":
                         for symbol in work[3]:
                             self.owner.accept_market(
                                 symbol,

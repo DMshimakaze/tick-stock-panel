@@ -6,6 +6,17 @@ from math import fsum, isfinite, prod
 BEIJING = timezone(timedelta(hours=8))
 CAPACITY = {"15m": 250, "30m": 125, "60m": 62}
 MAS = (5, 10, 20, 30, 55, 233)
+STRATEGY_CAPACITY = 250
+
+
+def required_history(timeframe, visible_count=None):
+    """Same-period completed bars, including the first visible SMA window."""
+    return (CAPACITY[timeframe] if visible_count is None else visible_count) + max(MAS) - 1
+
+
+def history_capacity():
+    # Up to three leading 15m slots can be lost to 60m bucket alignment.
+    return max(1280, *(required_history(tf) * (int(tf[:-1]) // 15) + int(tf[:-1]) // 15 - 1 for tf in CAPACITY))
 FIVE_MINUTES = (*range(575, 691, 5), *range(785, 901, 5))
 SOURCE = "TICKFLOW_RAW_5M"
 LEGACY = "QUANTDASH_LEGACY"

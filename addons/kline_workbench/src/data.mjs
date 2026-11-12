@@ -29,14 +29,14 @@ export function savedSeries(data, period) {
     dataAsOf:last,dates:[...new Set(rows.map(r=>r.timestamp.slice(0,10)))]};
 }
 export function savedAverages(bars, periods, timeframe='15m') {
-  const step=Number(timeframe.slice(0,-1))*60;
   return new Map(periods.map(n=>{
     const points=bars.map(b=>Number.isFinite(b['ma'+n]) && b.complete?
       {time:b.time,value:b['ma'+n]}:{time:b.time});
     // LWC skips whitespace when joining line points. Color the outgoing segment
-    // transparent across missing values and session breaks, keeping real times.
+    // transparent only at missing/invalid trading slots from savedSeries().
+    // Adjacent exchange slots remain adjacent through lunch and closed days.
     for(let i=0;i<points.length-1;i++) if(points[i].value!==undefined &&
-      (points[i+1].value===undefined || points[i+1].time-points[i].time>step)) points[i].color='transparent';
+      points[i+1].value===undefined) points[i].color='transparent';
     return [n,points];
   }));
 }

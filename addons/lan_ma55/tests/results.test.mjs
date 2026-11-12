@@ -8,29 +8,33 @@ const summary = { market_date: '2026-11-06', data_asof: '2026-11-06 15:00:00',
   available_dates: ['2026-11-05', '2026-11-06'], generation: 1, revision: 4,
   backend_scanning: true, phase: 'WAITING_NEXT_SESSION', symbol_states: 2,
   requests: {minute_requests:9,http_requests:15}, pending_symbols:1,
-  universe: { expected: 2 }, cycle: { expected_symbols: 2, processed_symbols: 2,
+  refresh:{latest_completed15:'2026-11-06 15:00:00',refreshed:1,expected:2,generation:1,updating:true}, universe: { expected: 2 }, cycle: { expected_symbols: 2, processed_symbols: 2,
     valid_symbols: 1, insufficient_symbols: 1, gap_symbols: 0, failed_symbols: 0 } };
 const row = { symbol: '600000.SH', name: '合成证券', generation: 1, market_date: '2026-11-06',
   phase: 'NO_SETUP', reason: 'AWAIT_SUPPORT_TEST', category: 'valid', bar_end: '2026-11-06 15:00:00',
   processed_at: '2026-11-08 12:00:00', events_json: '[]', decision_json: '{}' };
-test('Sunday defaults to backend Friday, reports zero BUY and reads no watchlist, Kline or IndexedDB', async () => {
+test('Sunday defaults to backend Friday, reports zero BUY and reads no watchlist, Kline or IndexedDB', async (t) => {
   const dom = new JSDOM('<main/>', { url: 'http://localhost', pretendToBeVisual: true });
   const calls = [], api = { extDataRows: async (id, options) => {
     calls.push([id, options]);
     if (id === 'lan_ma55_summary') return { rows: [{ payload_json: JSON.stringify(summary) }] };
     if (id === 'lan_ma55_day') return { rows: [row] };
+    if (id === 'lan_ma55_prices_v1') return {rows:[]};
     throw Error('Unexpected API');
   } };
   const dispose = mountResults(dom.window.document.querySelector('main'), { api });
+  t.after(()=>{dispose();dom.window.close();});
   await pause();
   const text = dom.window.document.querySelector('.mr').textContent;
   assert.match(text, /最新交易日 2026-11-06 · 0 BUY/);
-  assert.match(text, /2026-11-06 15:00:00/);
+  assert.match(text, /2026-11-06 15:00/);
   assert.match(text, /等待下一交易日/);
-  assert.match(text, /2 \/ 2/);
-  assert.match(text, /本次启动5m请求 9 \/ HTTP 15/);
+  assert.match(text, /1 \/ 2/);
+  assert.equal(dom.window.document.querySelectorAll('.mr-facts strong').length,2);
+  assert.deepEqual([...dom.window.document.querySelectorAll('thead th')].map(e=>e.textContent),['名称','价格','确认时间']);
+  assert.match(text, /5m请求 9 \/ HTTP 15/);
   assert.match(text, /待预热 1/);
-  assert.deepEqual(calls.map(c => c[0]), ['lan_ma55_summary', 'lan_ma55_day']);
+  assert.deepEqual(calls.map(c => c[0]), ['lan_ma55_summary','lan_ma55_prices_v1', 'lan_ma55_day']);
   dom.window.document.querySelector('[data-action="tab"][data-tab="data"]').click();
   assert.match(dom.window.document.body.textContent, /合成证券/);
   dispose(); assert.equal(dom.window.document.querySelector('.mr'), null); dom.window.close();
@@ -50,7 +54,7 @@ test('historical signals keep original date and REPLAY source; stock preview use
   date.dispatchEvent(new dom.window.Event('change', { bubbles: true })); await pause();
   assert.match(dom.window.document.body.textContent, /历史交易日 2026-11-05 · 1 BUY/);
   assert.match(dom.window.document.body.textContent, /历史重放/);
-  dom.window.document.querySelector('[data-row]').click();
+  dom.window.document.querySelector('[data-detail]').click();
   dom.window.document.querySelector('[data-action="preview"]').click();
   assert.equal(preview.symbol, '600000.SH');
   assert.match(dom.window.document.body.textContent, /2026-11-05 10:15:00/);
@@ -59,6 +63,13 @@ test('historical signals keep original date and REPLAY source; stock preview use
 test('publication pending is distinct from a successfully scanned historical zero', async () => {
   const result = await readDay({ extDataRows: async () => ({ rows: [] }) }, '2026-11-05', summary);
   assert.equal(result.ready, false);
+});
+
+test('universe expansion retains same-day persisted BUY from the preceding generation',async()=>{
+  const saved={...row,generation:1,events_json:JSON.stringify([{event_id:'immutable',confirmed_at:'2026-11-06 10:15:00'}])};
+  const result=await readDay({extDataRows:async()=>({rows:[saved,{...saved,market_date:'2026-11-05'}]})},'2026-11-06',{...summary,generation:2});
+  assert.equal(result.rows.length,1);
+  assert.equal(JSON.parse(result.rows[0].events_json)[0].event_id,'immutable');
 });
 
 test('workbench link uses public enabled-page list, original symbol/time, and keeps official preview', async (t) => {
@@ -72,7 +83,7 @@ test('workbench link uses public enabled-page list, original symbol/time, and ke
       extDataRows:async id=>({rows:id==='lan_ma55_summary'?[{payload_json:JSON.stringify(summary)}]:[{...row,events_json:JSON.stringify([event])}]})};
     const dispose=mountResults(dom.window.document.querySelector('main'),{api,ui:{openStockPreview:()=>true}});
     t.after(()=>{dispose();dom.window.close();});
-    await pause();dom.window.document.querySelector('[data-row]').click();
+    await pause();dom.window.document.querySelector('[data-detail]').click();
     assert.ok(dom.window.document.querySelector('a[data-stock-link]'));
     assert.equal(Boolean(dom.window.document.querySelector('.mr-selected a.mr-kline')),enabled);
     assert.ok(dom.window.document.querySelector('[data-action="preview"]'));
@@ -86,7 +97,7 @@ test('workbench link uses public enabled-page list, original symbol/time, and ke
 test('only the published-results page is registered in the installable manifest',async()=>{
  const extension=(await import('../src/extension.mjs')).default;
  const built=(await import('../dist/extension.js')).default;
- assert.equal(extension.version,'0.5.2');assert.equal(extension.id,'lan.ma55');
+ assert.equal(extension.version,'0.6.3');assert.equal(extension.id,'lan.ma55');
  assert.equal(extension.apiVersion,1);assert.equal(extension.routes[0].path,'/lan-ma55');
  assert.equal(typeof built.routes[0].mount,'function');assert.equal(built.version,extension.version);
  const url=new URL(workbenchUrl('600000.SH',{event_id:'saved-id',rule_version:'saved-rule',confirmed_at:'2026-11-06 10:00:00'}),'http://local');

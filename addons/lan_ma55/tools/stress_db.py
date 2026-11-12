@@ -47,11 +47,11 @@ def quantiles(values):
 def fixture():
     sessions = []
     day = date(2026, 1, 5)
-    while len(sessions) < 18:
+    while len(sessions) < 82:
         if day.weekday() < 5:
             sessions.append(str(day))
         day += timedelta(days=1)
-    stamps = points(sessions, sessions[0], sessions[-1] + " 15:00:00")[:759]
+    stamps = points(sessions, sessions[0], sessions[-1] + " 15:00:00")[:3849]
     five = {
         t: dict(
             open=100.0, high=100.1, low=99.9, close=100.0, volume=10000.0, amount=1e6
@@ -63,7 +63,7 @@ def fixture():
 
 def seed(owner, count):
     sessions, five, bars = fixture()
-    base = bars[:250]
+    base = bars[:1280]
     end = base[-1]["timestamp"]
     symbols = [f"{i:06d}.SZ" for i in range(count)]
     rows = [
@@ -71,15 +71,15 @@ def seed(owner, count):
             symbol=s,
             name="SYNTHETIC",
             eligible=True,
-            source_type="stock",
-            raw_tick=0.01,
+            source_type="etf" if i < 560 else "stock",
+            raw_tick=0.001 if i < 560 else 0.01,
         )
-        for s in symbols
+        for i, s in enumerate(symbols)
     ]
-    owner.refresh_master(rows, {"expected": count}, sessions)
+    owner.refresh_master(rows, {"expected": count,"stock":count-560,"etf":560}, sessions)
     template, _ = process_symbol(
         symbols[0],
-        [dict(b, adjust_factor=1) for b in base],
+        [dict(b, adjust_factor=1) for b in base[-250:]],
         sessions=sessions,
         raw_tick=0.01,
         source_asof=end,
@@ -114,7 +114,8 @@ def seed(owner, count):
                     symbol=symbol,
                     name="SYNTHETIC",
                     eligible=True,
-                    raw_tick=0.01,
+                    raw_tick=0.001 if symbol in symbols[:560] else 0.01,
+                    source_type="etf" if symbol in symbols[:560] else "stock",
                     state="READY",
                     factor_coverage="EXPLICIT",
                     source_id=SOURCE,
@@ -301,6 +302,7 @@ def reader_phase(base, symbols, clients, started, stop):
                     response.raise_for_status()
                     data = response.json()
                     assert len(data["rows"][0]["bars"]) == 250
+                    assert all(b[f"ma{n}"] is not None for frame in data["rows"] for b in frame["bars"] for n in (5,10,20,30,55,233))
                     events = http.get(
                         "/api/extensions/lan.ma55/v1/events",
                         params={"symbol": symbol, "limit": 200},
@@ -458,11 +460,11 @@ def run(folder, count=5600):
                             number = second // 900
                             active = dict(
                                 number=number,
-                                target=bars[250 + number]["timestamp"],
+                                target=bars[1280 + number]["timestamp"],
                                 first=min(
                                     t
                                     for t in five
-                                    if as_ms(t) > as_ms(bars[249 + number]["timestamp"])
+                                    if as_ms(t) > as_ms(bars[1279 + number]["timestamp"])
                                 ),
                                 warm=symbols[:-16] if number == 0 else symbols,
                                 cold=symbols[-16:] if number == 0 else [],
@@ -485,7 +487,7 @@ def run(folder, count=5600):
                             batch = job["cold"][
                                 job["cold_position"] : job["cold_position"] + 8
                             ]
-                            start = min(five)
+                            start = sessions[-18] + " 09:35:00"
                             factors = collector.factors(batch)
                         else:
                             batch = job["warm"][job["position"] : job["position"] + 100]
@@ -585,7 +587,7 @@ def run(folder, count=5600):
             collector.close()
         report["rounds"] = rounds
         # Reachable source failures are tested without affecting the other securities.
-        target = bars[251]["timestamp"]
+        target = bars[1281]["timestamp"]
         original = owner.conn.execute("SELECT count(*) FROM signal_event").fetchone()[0]
         for symbol, reason in zip(
             symbols[:4],
@@ -635,7 +637,7 @@ def run(folder, count=5600):
             events=[dict(day=target[:10], ex_factor=1.1)],
             factor_response=True,
         )
-        next_end = bars[252]["timestamp"]
+        next_end = bars[1282]["timestamp"]
         partial = {t: r for t, r in five.items() if target < t < next_end}
         owner.accept_market(
             symbols[6],

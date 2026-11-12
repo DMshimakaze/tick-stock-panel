@@ -32,9 +32,10 @@ class UnifiedStore(SharedStore):
             self.set_meta("data_mode", "UNIFIED_SQLITE_V1")
 
     def refresh_master(self, rows, overview, sessions):
-        self.market.save_master(rows, overview, sessions)
-        self.source_master(rows, overview, self.market.meta("generation", 1))
         with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            self.market.save_master(rows, overview, sessions)
+            self.source_master(rows, overview, self.market.meta("generation", 1))
             self.set_meta("sessions", self.market.meta("sessions", []))
 
     def accept_market(
@@ -82,7 +83,7 @@ class UnifiedStore(SharedStore):
     def analyze(self, symbols, sessions, target, now, live_after):
         """May run inside accept_market, or in bounded restart catch-up batches."""
         sources = [
-            self.market.read(s, "15m", target, connection=self.conn) for s in symbols
+            self.market.read(s, "15m", target, connection=self.conn, strategy=True) for s in symbols
         ]
         changed = self.consume(
             sources,

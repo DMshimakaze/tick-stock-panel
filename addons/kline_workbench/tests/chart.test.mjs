@@ -71,13 +71,13 @@ test('legend readout follows actual completed candle, gaps and pointer leave',t=
   assert.ok(s.series.filter(x=>x.definition!==HistogramSeries).every(x=>x.options.priceFormat.precision===3));
 });
 
-test('authoritative MA points cut missing and lunch/session connections without fabricated timestamps',()=>{
+test('authoritative MA points cross lunch and cut real missing values without fabricated timestamps',()=>{
   const bars=['11:00','11:15','11:30','13:15','13:30','13:45','14:00'].map((at,i)=>({
     timestamp:`2026-11-12 ${at}:00`,time:epoch(`2026-11-12 ${at}:00`),complete:i!==4,ma5:i===4?null:20+i,ma233:null,
   }));
   const averages=savedAverages(bars,[5,233],'15m'),points=averages.get(5);
   assert.deepEqual(points.map(p=>p.time),bars.map(b=>b.time));
-  assert.equal(points[2].color,'transparent');assert.equal(points[3].color,'transparent');
+  assert.equal(points[2].color,undefined);assert.equal(points[3].color,'transparent');
   assert.equal(points[4].value,undefined);assert.equal(points[5].value,25);
   assert.ok(averages.get(233).every(p=>p.value===undefined));
   assert.equal(points[0].color,undefined);

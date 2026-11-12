@@ -171,10 +171,7 @@ def setup(registrar):
                 [
                     r["symbol"]
                     for r in rows
-                    if r["timeframe"] == "15m"
-                    and (
-                        r["row_count"] < 250 or r.get("source_id") != "TICKFLOW_RAW_5M"
-                    )
+                    if r.get("ma_history", {}).get("state") != "READY"
                 ]
             )
             return dict(

@@ -93,7 +93,7 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
     const sameRevision=model.eventBasisRevision===null || model.eventBasisRevision===undefined || Number(model.eventBasisRevision)===data?.basis_revision;
     const matchingBasis=data?.basis==='QFQ' && model.factor>0 && eventBar?.adjust_factor===model.factor && sameSource && sameRevision && !data?.correction;
     plot?.update({bars:current.bars,averages,maVisible:model.maVisible,anchor,asset:data?.asset_type,visible:model.visible,
-      buys,period:model.displayPeriod},reset || (needsReset && requested.validCount>0));
+      buys,period:model.displayPeriod,rawTick:data?.raw_tick},reset || (needsReset && requested.validCount>0));
     if (requested.validCount) needsReset=false;
     if (!current.validCount) $('.kw-readout').textContent=model.sourceError?'公共行情服务不可用，请查看服务状态后重试':model.error?'行情读取失败，请重试':model.selected?'等待后台预热真实历史…':'选择标的后加载持久行情';
     $('.kw-name').textContent=data?.name||model.selected?.name||'选择股票 / ETF';
@@ -111,10 +111,13 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
       if(data.status.source_error) notices.push(data.status.source_error);
       if(['RATE_LIMITED','QUOTA_WAIT','SOURCE_UNAVAILABLE'].includes(data.status.source_phase)) notices.push('行情源等待中');
       if(current.gaps) notices.push(`缺口 ${current.gaps} 根`);
+      const history=data.ma_history?.[model.displayPeriod];
+      if(history && history.state!=='READY') notices.push(({PENDING:'均线历史回补中',INSUFFICIENT:'上市历史不足',GAP:'计算历史有真实缺口',FACTOR_PENDING:'前复权未确认',CALENDAR_LIMIT:'历史超出已核实日历',SOURCE_HISTORY_LIMIT:'供应商历史不足'})[history.state] || '均线历史尚未完整');
+      $('.kw-diagnostics pre').textContent=JSON.stringify({history,status:data.status,basis_id:data.basis_id},null,2);
       if(data.basis!=='QFQ' && phase!=='FACTOR_PENDING' && current.validCount) notices.push('复权基准未核实');
     }
     if(fallback) notices.push(`${model.period}尚无已完成K，当前保留${model.displayPeriod}图`);
-    if(model.event && current.validCount && !matchingBasis) notices.push('选中BUY复权基准未核实');
+    if(model.displayPeriod==='15m' && model.event && current.validCount && !matchingBasis) notices.push('选中BUY复权基准未核实');
     if(data?.events?.truncated) notices.push('历史事件分页达到上限');
     $('.kw-source-status').hidden=!model.sourceError;
     $('.kw-buy-count').textContent=model.displayPeriod==='15m'?`历史BUY ${buys.length}${data?.events?.outside_window?' · '+data.events.outside_window+'条窗口外':''}`:'';

@@ -7,6 +7,7 @@ import httpx
 SUMMARY_ID = "lan_ma55_summary"
 DAY_ID = "lan_ma55_day"
 HISTORY_ID = "lan_ma55_history"
+PRICES_ID = "lan_ma55_prices_v1"
 DAY_FIELDS = [
     ("symbol", "string"),
     ("name", "string"),
@@ -24,6 +25,9 @@ DAY_FIELDS = [
 
 def view_configs():
     return [
+        dict(id=PRICES_ID, label="MA55 完成15m价格", mode="snapshot", market_level=True,
+             description="单库已保存原价收盘，按交易日读取；不代表实时快照。",
+             fields=[dict(name=n, dtype="string", label=n) for n in ("scope", "payload_json")]),
         dict(
             id=SUMMARY_ID,
             label="MA55 后台扫描概览",
@@ -113,6 +117,10 @@ class Publisher:
                 )
             ],
         )
+
+    def prices(self, day, rows):
+        return self.ingest(PRICES_ID, [dict(scope="lan.ma55", payload_json=json.dumps(
+            dict(day=day, rows=rows), ensure_ascii=False, allow_nan=False))])
 
     def ingest(self, table, rows, day=None):
         response = self.http.post(

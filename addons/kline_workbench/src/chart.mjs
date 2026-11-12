@@ -52,7 +52,8 @@ export function createWorkbenchChart(el, onReadout, {makeChart=createChart}={}) 
   return {
     update(model,reset=false) {
       bars=model.bars;averages=model.averages;currentAnchor=model.anchor.index;
-      const priceFormat={type:'price',precision:model.asset==='etf'?3:2,minMove:model.asset==='etf' ? .001 : .01};
+      const tick=model.rawTick>0?model.rawTick:model.asset==='etf'?.001:.01;
+      const priceFormat={type:'price',precision:Math.max(0,Math.ceil(-Math.log10(tick))),minMove:tick};
       candles.applyOptions({priceFormat});
       candles.setData(bars.map(b=>b.complete?{time:b.time,open:b.open,high:b.high,low:b.low,close:b.close}:{time:b.time}));
       volume.setData(bars.map(b=>b.complete?{time:b.time,value:b.volume,color:(b.close>=b.open?UP:DOWN)+'88'}:{time:b.time}));

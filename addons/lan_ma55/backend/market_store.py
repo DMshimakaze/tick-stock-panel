@@ -1,4 +1,4 @@
-"""Single SQLite WAL writer, raw 250 x 15m retention, independent read connections."""
+"""Single raw-history writer; chart lookback and frozen strategy windows differ."""
 
 from contextlib import closing, contextmanager, nullcontext
 import json
@@ -17,6 +17,12 @@ from .market_grid import (
     derived,
     points,
     project,
+    history_capacity,
+    required_history,
+    MAS,
+    STRATEGY_CAPACITY,
+    latest_point,
+    now_cn,
 )
 from .worker_lease import ProcessLease
 
@@ -88,6 +94,9 @@ CREATE TABLE IF NOT EXISTS tail5(
  PRIMARY KEY(symbol,bar_end));
 CREATE TABLE IF NOT EXISTS factor_event(
  symbol TEXT,ordinal INTEGER,day TEXT,ex_factor REAL CHECK(ex_factor>0),PRIMARY KEY(symbol,ordinal));
+CREATE TABLE IF NOT EXISTS ma_history_progress(
+ symbol TEXT PRIMARY KEY,scanned_before TEXT,stop_reason TEXT,next_retry REAL NOT NULL DEFAULT 0,
+ raw_count INTEGER NOT NULL DEFAULT 0,earliest TEXT);
 """
 
 
@@ -265,12 +274,12 @@ class Store:
                 [(symbol, i, e["day"], e["ex_factor"]) for i, e in enumerate(events)],
             )
 
-    def raw_rows(self, symbol, asof="9999", *, conn=None):
+    def raw_rows(self, symbol, asof="9999", *, limit=STRATEGY_CAPACITY, conn=None):
         rows = (
             (conn or self.conn)
             .execute(
-                "SELECT * FROM bar15 WHERE symbol=? AND bar_end<=? ORDER BY bar_end DESC LIMIT 250",
-                (symbol, asof),
+                "SELECT * FROM bar15 WHERE symbol=? AND bar_end<=? ORDER BY bar_end DESC LIMIT ?",
+                (symbol, asof, limit),
             )
             .fetchall()
         )
@@ -299,12 +308,18 @@ class Store:
                     b["source_id"],
                     b["source_count"],
                 )
-                for b in bars[-250:]
+                for b in bars[-history_capacity():]
             ],
         )
         self.conn.execute(
             "DELETE FROM bar15 WHERE symbol=? AND bar_end < "
-            "(SELECT bar_end FROM bar15 WHERE symbol=? ORDER BY bar_end DESC LIMIT 1 OFFSET 249)",
+            "(SELECT bar_end FROM bar15 WHERE symbol=? ORDER BY bar_end DESC LIMIT 1 OFFSET ?)",
+            (symbol, symbol, history_capacity() - 1),
+        )
+        self.conn.execute(
+            "INSERT INTO ma_history_progress(symbol,raw_count,earliest) "
+            "SELECT ?,count(*),min(bar_end) FROM bar15 WHERE symbol=? "
+            "ON CONFLICT(symbol) DO UPDATE SET raw_count=excluded.raw_count,earliest=excluded.earliest",
             (symbol, symbol),
         )
 
@@ -324,9 +339,11 @@ class Store:
         info = self.instrument(symbol)
         if info is None:
             raise ValueError("Metadata must precede bars")
-        old = self.raw_rows(symbol)
+        old = self.raw_rows(symbol, limit=history_capacity())
         switching = info["source_id"] != SOURCE
-        replace = switching or (rebuild and end >= (info["latest_completed15"] or ""))
+        # Same-source repairs merge into history. Only an actual source switch
+        # replaces incompatible raw input; historical backfill has its own path.
+        replace = switching
         five = (
             {}
             if replace
@@ -385,7 +402,7 @@ class Store:
             info["factor_revision"] += 1
         retained = {b["timestamp"]: b for b in ([] if replace else old)}
         retained.update({b["timestamp"]: b for b in incoming})
-        raw = [retained[t] for t in sorted(retained)][-250:]
+        raw = [retained[t] for t in sorted(retained)][-history_capacity():]
         expected = points(
             sessions,
             max(start[:10], info["listing_date"] or start[:10]) + " 09:35:00",
@@ -394,7 +411,7 @@ class Store:
         missing5 = [t for t in expected if t >= start and t not in five]
         wanted = points(
             sessions,
-            raw[0]["timestamp"] if raw else start,
+            raw[-STRATEGY_CAPACITY]["timestamp"] if len(raw) >= STRATEGY_CAPACITY else raw[0]["timestamp"] if raw else start,
             max(end, raw[-1]["timestamp"] if raw else end),
             step=15,
         )
@@ -467,6 +484,56 @@ class Store:
             )
         return info
 
+    def history_progress(self, symbol, *, conn=None):
+        row = (conn or self.conn).execute(
+            "SELECT * FROM ma_history_progress WHERE symbol=?", (symbol,)
+        ).fetchone()
+        return dict(row) if row else dict(scanned_before=None, stop_reason=None, next_retry=0)
+
+    def backfill(self, symbol, received, *, sessions, start, end, now, stop_reason=None):
+        """Older raw UPSERT only: no tail replacement, strategy replay or BUY write."""
+        info = self.instrument(symbol)
+        if not info or info["source_id"] != SOURCE:
+            raise ValueError("Historical backfill requires the established TickFlow source")
+        incoming = aggregate(received, sessions, end)["15m"]
+        if any(t > (info["latest_completed15"] or "") for t in received):
+            raise ValueError("History job cannot advance the live watermark")
+        with self.transaction():
+            self._write(symbol, incoming)
+            raw = self.raw_rows(symbol, limit=history_capacity())
+            # A missing bucket inside known history is a bounded repair, not a
+            # new older-history page. Empty/partial replies must cool down.
+            failed_gap = bool(raw and start >= raw[0]["timestamp"] and not incoming)
+            if failed_gap:
+                stop_reason = "GAP"
+            expected = points(sessions, raw[-STRATEGY_CAPACITY]["timestamp"] if len(raw) >= STRATEGY_CAPACITY else raw[0]["timestamp"],
+                              info["latest_completed15"], step=15) if raw else []
+            actual = {b["timestamp"] for b in raw}
+            gaps = [t for t in expected if t not in actual]
+            info.update(revision=info["revision"] + 1, updated_at=now, gaps=gaps,
+                        rebuild_from=gaps[0] if gaps else None)
+            if info["factor_coverage"] == "EXPLICIT" and info["state"] in ("READY", "WARMUP", "GAP"):
+                info["state"] = "GAP" if gaps else "READY" if len(raw) >= 56 else "WARMUP"
+            self._put(info)
+            self.conn.execute(
+                "INSERT INTO ma_history_progress(symbol,scanned_before,stop_reason,next_retry) VALUES(?,?,?,?) ON CONFLICT(symbol) DO UPDATE SET "
+                "scanned_before=excluded.scanned_before,stop_reason=excluded.stop_reason,next_retry=excluded.next_retry",
+                (symbol, start, stop_reason, time() + (300 if stop_reason == "GAP" else 86400) if stop_reason else 0),
+            )
+            self.set_meta("data_revision", self.meta("data_revision", 0) + 1)
+            self.set_meta("last_commit", now)
+        return info
+
+    def history_candidates(self, target):
+        return [dict(r) for r in self.conn.execute(
+            "SELECT i.symbol,p.scanned_before,p.stop_reason,coalesce(p.next_retry,0) next_retry,"
+            "coalesce(p.raw_count,0) raw_count,p.earliest FROM instrument_state i "
+            "LEFT JOIN ma_history_progress p USING(symbol) "
+            "WHERE i.eligible=1 AND i.source_id=? AND i.latest_completed15>=? "
+            "AND (coalesce(p.raw_count,0)<? OR p.stop_reason='GAP') ORDER BY i.symbol",
+            (SOURCE, target, history_capacity()),
+        )]
+
     def import_legacy(self, info, bars, events, now):
         if self.instrument(info["symbol"]) is not None:
             return False
@@ -504,7 +571,7 @@ class Store:
                     self._put(info)
             self.set_meta("data_revision", self.meta("data_revision", 0) + 1)
 
-    def read(self, symbol, tf, asof, limit=250, *, connection=None):
+    def read(self, symbol, tf, asof, limit=250, *, connection=None, strategy=False):
         with (
             nullcontext(connection)
             if connection is not None
@@ -524,7 +591,9 @@ class Store:
                     source_id=SOURCE,
                 )
             sessions = self.meta("sessions", [], conn=conn)
-            raw = derived(self.raw_rows(symbol, asof, conn=conn), tf, sessions, asof)
+            visible = min(limit, CAPACITY[tf])
+            raw15 = self.raw_rows(symbol, asof, limit=STRATEGY_CAPACITY if strategy else history_capacity(), conn=conn)
+            raw = derived(raw15, tf, sessions, asof)
             bars = project(
                 raw,
                 self.events(symbol, conn=conn),
@@ -532,11 +601,23 @@ class Store:
                 sessions=sessions,
                 timeframe=tf,
             )
+            visible_bars = bars[-visible:]
+            complete_ma = bool(visible_bars) and all(b.get(f"ma{n}") is not None for b in visible_bars for n in MAS)
+            progress = self.history_progress(symbol, conn=conn)
+            history_gaps = len(points(sessions, raw15[0]["timestamp"], raw15[-1]["timestamp"], step=15)) - len(raw15) if raw15 else 0
+            ma_state = "FACTOR_PENDING" if info["factor_coverage"] != "EXPLICIT" else "REBUILD_PENDING" if info["source_id"] != SOURCE else "GAP" if history_gaps else "READY" if complete_ma and len(visible_bars) == visible else progress["stop_reason"] or "PENDING"
             return dict(
                 symbol=symbol,
                 name=info["name"],
                 timeframe=tf,
-                bars=bars[-limit:],
+                bars=visible_bars,
+                ma_history=dict(state=ma_state, required=required_history(tf, visible), available=len(raw),
+                                raw15_count=len(raw15), raw15_capacity=history_capacity(),
+                                visible=len(visible_bars), complete=sum(all(b.get(f"ma{n}") is not None for n in MAS) for b in visible_bars),
+                                first=visible_bars[0]["timestamp"] if visible_bars else None,
+                                last=visible_bars[-1]["timestamp"] if visible_bars else None,
+                                factor_revision=info["factor_revision"], basis_revision=info["basis_revision"],
+                                source_id=info["source_id"], stop_reason=progress["stop_reason"]),
                 state=info["state"]
                 if info["state"]
                 in (
@@ -561,7 +642,7 @@ class Store:
                     "SOURCE_UNAVAILABLE",
                 )
                 else None,
-                row_count=len(raw),
+                row_count=len(visible_bars),
                 capacity=CAPACITY[tf],
                 latest_completed_at=raw[-1]["timestamp"] if raw else None,
                 source_asof=info["updated_at"],
@@ -582,7 +663,7 @@ class Store:
                 factor_coverage=info["factor_coverage"],
                 gap_count=len(info["gaps"]),
                 gaps=info["gaps"],
-                warm_count=len(self.raw_rows(symbol, asof, conn=conn)),
+                warm_count=min(len(raw15), STRATEGY_CAPACITY),
                 warm_target=250,
                 eligible=info["eligible"],
                 listing_status=info["listing_status"],
@@ -590,6 +671,16 @@ class Store:
 
     def snapshot(self):
         with closing(reader(self.path)) as conn:
+            conn.execute("BEGIN")
+            target = latest_point(self.meta("sessions", [], conn=conn), str(now_cn()))
+            refreshed = conn.execute(
+                "SELECT count(*) FROM instrument_state i WHERE i.eligible=1 AND i.source_id=? "
+                "AND EXISTS(SELECT 1 FROM bar15 b WHERE b.symbol=i.symbol AND b.bar_end=? "
+                "AND b.source_id=? AND b.source_count=3)",
+                (SOURCE, target, SOURCE),
+            ).fetchone()[0]
+            expected = conn.execute("SELECT count(*) FROM instrument_state WHERE eligible=1").fetchone()[0]
+            saved = conn.execute("SELECT max(latest_completed15) FROM instrument_state WHERE eligible=1").fetchone()[0]
             states = dict(
                 conn.execute(
                     "SELECT state,count(*) FROM instrument_state WHERE eligible=1 GROUP BY state"
@@ -614,13 +705,31 @@ class Store:
                 last_commit=self.meta("last_commit", conn=conn),
                 calendar_last=max(self.meta("sessions", [], conn=conn), default=None),
                 universe=self.meta("universe", {}, conn=conn),
+                refresh=dict(generation=self.meta("generation", 0, conn=conn), target_15m=target,
+                             latest_completed15=saved, refreshed=refreshed, expected=expected,
+                             updated_at=self.meta("last_commit", conn=conn),
+                             updating=expected == 0 or refreshed < expected),
+                asset_counts=dict(conn.execute("SELECT source_type,count(*) FROM instrument_state WHERE eligible=1 GROUP BY source_type")),
             )
+
+    def prices(self, day):
+        """One batch, saved raw completed closes only, as of the selected day."""
+        with closing(reader(self.path)) as conn:
+            conn.execute("BEGIN")
+            return [dict(r, price_basis="RAW", volume_unit="shares") for r in conn.execute(
+                "SELECT b.symbol,i.name,i.source_type asset_type,i.raw_tick,b.close price,b.bar_end,"
+                "b.source_id,i.factor_revision FROM instrument_state i CROSS JOIN bar15 b ON b.symbol=i.symbol "
+                "AND b.bar_end=(SELECT max(x.bar_end) FROM bar15 x WHERE x.symbol=i.symbol AND x.bar_end<=?) "
+                "WHERE "
+                "substr(b.bar_end,1,10)=? AND b.source_count=3",
+                (day + " 15:00:00", day),
+            )]
 
     def inventory(self, symbol):
         with closing(reader(self.path)) as conn:
             return [
                 dict(timeframe=tf, row_count=n, earliest=a, latest=b, capacity=cap)
-                for tf, table, cap in (("15m", "bar15", 250), ("5m_tail", "tail5", 2))
+                for tf, table, cap in (("15m", "bar15", history_capacity()), ("5m_tail", "tail5", 2))
                 for n, a, b in [
                     conn.execute(
                         f"SELECT count(*),min(bar_end),max(bar_end) FROM {table} WHERE symbol=?",

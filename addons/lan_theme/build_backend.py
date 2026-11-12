@@ -6,7 +6,7 @@ import zipfile
 
 def build(destination=None):
     root = Path(__file__).resolve().parent
-    target = Path(destination) if destination else root / "dist" / "lan-theme-1.0.5.zip"
+    target = Path(destination) if destination else root / "dist" / "lan-theme-1.0.7.zip"
     target.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.write(root / "extension.yaml", "extension.yaml")
