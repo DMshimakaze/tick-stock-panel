@@ -1,6 +1,8 @@
-# 兰 MA55 R1｜lan.ma55 0.3.2
+# 兰 MA55 R1｜lan.ma55 0.3.3
 
 生产路径：公共lan.marketdata HTTP v1完成15m → pipeline.process_symbol → engine.minimal_features/advance → 原SQLite → 官方lan_ma55_summary/day/history。页面只展示结果，股票名称直接打开15m并携带真实确认信息。
+
+0.3.3通过官方v0.3.36扩展管理器加载，兼容范围>=0.3.32,<0.3.37。扩展API/Page Pack仍为v1，冻结engine.py、pipeline.py与已有信号库不作迁移。
 
 唯一BUY规则MA55_15M_MINIMAL_V5_R1，研究源DMshimakaze/DM-Ma55-Method@5d1d0f6e8913f528110c93e054429f050b9851f6。状态revision4与物理schema1分开。30/60m用于观察，页面不计算BUY。原collector、预算和旧页面算法保留为历史源码，不进入生产ZIP。
 

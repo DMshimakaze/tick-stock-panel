@@ -141,7 +141,7 @@ class Worker:
             max(1, 30 - host_background),
         )
         self.state = dict(
-            version="1.0.2",
+            version="1.0.3",
             api_version=1,
             phase="STARTING",
             error=None,

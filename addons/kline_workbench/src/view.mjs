@@ -6,7 +6,7 @@ const CSS=`
 `;
 export function createView(doc) {
   const root=doc.createElement('section');root.className='kw';
-  root.innerHTML=`<style>${CSS}</style><header class="kw-top"><div class="kw-split"><h1>K 线工作台</h1><span class="kw-tag">兰 · 2.0.1</span></div><button data-action="official">官方个股详情 ↗</button></header>
+  root.innerHTML=`<style>${CSS}</style><header class="kw-top"><div class="kw-split"><h1>K 线工作台</h1><span class="kw-tag">兰 · 2.0.2</span></div><button data-action="official">官方个股详情 ↗</button></header>
   <form class="kw-search"><input aria-label="股票或ETF搜索" placeholder="搜索名称 / 代码，如600519.SH" autocomplete="off"><button>搜索 / 打开</button><label class="kw-pin"><input type="checkbox" aria-label="固定关注"> 固定关注</label></form><div class="kw-results" aria-label="搜索结果"></div><div class="kw-error" role="alert"></div>
   <div class="kw-card"><header class="kw-stock"><div><span class="kw-name">选择股票 / ETF</span><span class="kw-code">—</span><div class="kw-muted kw-source">公共滚动行情 · 只读视图</div></div><div class="kw-price"></div></header>
   <div class="kw-toolbar"><div class="kw-periods" role="group" aria-label="K线级别">${['15m','30m','60m'].map(p=>`<button data-period="${p}" aria-pressed="false">${p==='1d'?'日 K':p}</button>`).join('')}</div><div class="kw-tools"><select aria-label="初始显示根数">${[40,80,120,240,0].map(n=>`<option value="${n}">${n?n+'根':'全部'}</option>`).join('')}<option value="custom">自定义</option></select><input type="number" min="10" max="10000" aria-label="自定义可见根数"><button data-action="range">应用视窗</button><button data-action="refresh" title="重新读取持久库，不强制重抓历史">刷新</button></div></div>

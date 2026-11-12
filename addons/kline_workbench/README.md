@@ -1,6 +1,8 @@
-# 兰 K 线工作台｜lan.kline 2.0.1
+# 兰 K 线工作台｜lan.kline 2.0.2
 
 /lan-kline只读展示15/30/60m。后端从lan.marketdata正式HTTP v1取得已保存K/MA，经lan_kline_demand → 轻量视图 → lan_kline_view → ctx.api.extDataRows显示。16个会话槽、client、请求序号和90秒租约隔离需求。
+
+2.0.2适配官方v0.3.36宿主，兼容范围>=0.3.32,<0.3.37；Page Pack API v1与公共行情HTTP v1调用保持原契约。
 
 生产ZIP不含QuantDash collector或行情SQLite store。原workbench.sqlite3及1m/日K文件保留供离线导入和回退，正常运行不写。浏览器仅整理时间轴空白，不从5m重新计算权威OHLC/MA。
 

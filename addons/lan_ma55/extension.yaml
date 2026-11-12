@@ -2,13 +2,13 @@ format: tick-extension-package
 format_version: 1
 id: lan.ma55
 display_name: 兰 MA55 R1
-version: 0.3.2
+version: 0.3.3
 extension_api_version: 1
 author: DMshimakaze
 description: 只读公共已完成15m，运行冻结V5_R1并保留原SQLite确认历史。
 backend: backend.extension
 frontend: frontend/extension.mjs
-requires_app: '>=0.3.32,<0.3.33'
+requires_app: '>=0.3.32,<0.3.37'
 requires_python: '>=3.11'
 platforms: [any]
 requires: ['httpx>=0.28,<0.29']

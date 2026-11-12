@@ -47,10 +47,10 @@ test('native-style compact controls, period persistence, saved MA, date range an
  assert.ok(s.requests.every(r=>r.period));s.close();
 });
 test('strict event timestamp and manifest match unified extension',async()=>{
- assert.equal(extension.version,'2.0.1');assert.equal(extension.routes[0].path,'/lan-kline');
+ assert.equal(extension.version,'2.0.2');assert.equal(extension.routes[0].path,'/lan-kline');
  assert.equal(parseLink('http://tsp/?symbol=000006.SZ&event=2026-11-06T15:00:00&setup=2026-11-06T14:30:00&defense=7.25').defense,7.25);
  assert.equal(parseLink('http://tsp/?event=2026-02-30T15:00:00').event,null);
- const built=await import('../dist/extension.js');assert.equal(built.default.version,'2.0.1');
+ const built=await import('../dist/extension.js');assert.equal(built.default.version,'2.0.2');
 });
 
 test('empty 503 is a service failure with a status link, never ordinary warmup',async(t)=>{

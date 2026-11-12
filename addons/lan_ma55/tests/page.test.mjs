@@ -12,7 +12,7 @@ import { loadInstrument, loadCatalog, refreshInstruments } from '../src/host_dat
 const pause = () => new Promise(resolve => setTimeout(resolve, 20));
 test('Page Pack manifest is self-contained, static and removable', async () => {
   assert.equal(extension.id, 'lan.ma55'); assert.equal(extension.apiVersion, 1);
-  assert.equal(extension.version, '0.3.2');
+  assert.equal(extension.version, '0.3.3');
   assert.equal(extension.routes[0].path, '/lan-ma55');
   assert.equal(extension.navigation[0].label, 'MA55 结构观察');
   const built = await import('../dist/extension.js');

@@ -81,7 +81,7 @@ def test_zip_only_cli_import_reject_rollback_without_checkout(tmp_path, raw_them
     installed = tmp_path / "installed-version"
     with zipfile.ZipFile(archive) as bundle:
         assert "backend/cli.py" in bundle.namelist()
-        assert b"1.0.2" in bundle.read("extension.yaml")
+        assert b"1.0.3" in bundle.read("extension.yaml")
         bundle.extractall(installed)
     source = tmp_path / "input.json"
     source.write_text(json.dumps(raw_theme), encoding="utf-8")

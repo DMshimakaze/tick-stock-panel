@@ -25,7 +25,7 @@ class Worker:
             backend_scanning=True,
             rule_version=RULE_VERSION,
             state_revision=4,
-            version="0.3.2",
+            version="0.3.3",
             source="lan.marketdata HTTP v1",
             error=None,
             started_at=str(now_cn()),

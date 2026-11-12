@@ -2,12 +2,12 @@ format: tick-extension-package
 format_version: 1
 id: lan.marketdata
 display_name: 兰 公共滚动行情
-version: 1.0.2
+version: 1.0.3
 extension_api_version: 1
 author: DMshimakaze
 description: 唯一自有5m采集器、固定容量DuckDB及版本化只读多周期行情接口。
 backend: backend.extension
-requires_app: '>=0.3.32,<0.3.33'
+requires_app: '>=0.3.32,<0.3.37'
 requires_python: '>=3.11'
 platforms: [any]
 requires: ['quantdash==0.1.0', 'httpx>=0.28,<0.29', 'duckdb>=1.5,<1.6', 'pandas>=3,<4']
