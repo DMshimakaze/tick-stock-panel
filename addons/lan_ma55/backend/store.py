@@ -50,6 +50,7 @@ def encoded(value):
 def read_connection(path):
     conn = sqlite3.connect(Path(path).resolve().as_uri() + "?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
     return conn
 
 
@@ -140,6 +141,7 @@ class StateWriter:
             self.conn = sqlite3.connect(self.path)
             self.conn.row_factory = sqlite3.Row
             self.conn.execute("PRAGMA foreign_keys=ON")
+            self.conn.execute("PRAGMA busy_timeout=5000")
             version = self.conn.execute("PRAGMA user_version").fetchone()[0]
             if version not in (0, SCHEMA_VERSION):
                 raise ValueError(

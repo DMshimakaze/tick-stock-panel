@@ -1,52 +1,47 @@
-# 公共滚动行情｜lan.marketdata 1.0.3
+# 公共滚动行情｜lan.marketdata 2.0.0
 
-三个自有扩展中唯一的QuantDash行情生产者。MA55只消费完成15m，工作台只展示已保存15/30/60m。宿主已升级官方v0.3.36；本包沿用公开扩展API v1及原HTTP v1契约，兼容范围为>=0.3.32,<0.3.37。
+官方 TSP v0.3.36 的独立后端扩展（extension API v1）。唯一行情生产者使用 TickFlow SDK 0.1.25 的 raw 5m，真实三根组成完整 15m。MA55 和 K线工作台通过本包 HTTP v2 消费；官方全市场 1m 继续独立运行。本包不导入宿主私有模块、不读取官方 Parquet、不使用 QuantDash SDK。
 
 ## 运行与数据
 
-- 官方startup在 `context.data_dir/user_data/lan_marketdata` 建立单writer DuckDB及OS lease。写入、指标关闭窗口、ACK、裁剪和水位同事务提交，浏览器关闭不停止后台。
-- 每股5m最多144根；15/30/60/120m、daily、2d各最多256根。指标状态另保留最多233个真实收盘。按实际落盘行数验收，不依赖文件压缩或页面裁剪。
-- 请求固定5m、adjust=none，最多100证券/批、5000根/证券；HTTP hooks按实际调用分类计数，滚动预算和429检查点可恢复。当前宿主分钟预留6，共享上限24，较大的宿主预算会缩减共享额度。
-- 北京时间、60秒完成余量、午休分段。3/6/12/24根形成分钟周期、48根形成日K，2d按真实日历组合。缺K保留缺口，量从QuantDash手转为股。
-- QFQ只用显式证券响应的真实事件链，历史asof只纳入当时生效事件。缺覆盖为FACTOR_PENDING；原始tick来自元信息。历史更正需有界重建，无法证明的指标暂停。
-- 最新全池5m优先，先预热15m，再逐页补64交易日（3072根5m）以得到256根60m及MA233。120m、2d按已有历史形成。已预热证券首次查看不重复冷启动。
-- 已登记但未预热的股票查看请求进入现有64项/10分钟需求集合，重复请求合并。最新全池5m仍先完成；历史阶段优先所查看证券，并用同窗口其他股票补足最多100股的网络批量。
+- 在线文件：`data/user_data/lan_marketdata/rolling15.sqlite3`，SQLite WAL、一个 writer/OS lease、短事务、独立只读连接和 busy_timeout。K、因子状态及源水位同事务提交。
+- 每股最多 250 根 raw 15m；尚未完成的 5m 短尾最多 2 根。只持久化 bar15 / tail5 / instrument_state / factor_event / meta，不维护全市场多周期表或独立指标历史。
+- 15m 读取时按真实事件链投影 QFQ，成交量由手转股，成交额为元。明确空事件列表有效；缺证券键/无效因子保持 FACTOR_PENDING，不能补 1。因子和历史修订改变 basis_revision，原始价格不混入复权列。
+- SMA 在有效、连续、同源的窗口上计算。250 根只有末尾 18 个 MA233 点。30m/60m 只对正在查看的证券从 2/4 根完整 15m 聚合，最多 125/62 根，MA233 无值；缺口、午休、跨日不会拼造 K。
+- 北京完成安全余量 75 秒，16 个真实 15m 完成点驱动更新。交易日来自明确的指数日 K 日期，不把工作日当作已确认交易日。节假日、午休和收盘沿用最后真实完成点。
+- 初始冷请求至多 8 股、18 个已有交易日、1200 根 5m/股；已预热后的增量只请求缺少的完成 5m，补缺从对应桶起点开始。每次独立 SDK HTTP 请求计数，minute 默认 8 RPM（配置上限 12）、冷请求默认 2 RPM；已预热增量批量至多 100 股。新安装后全市场历史在正常有界队列中逐步恢复，验收只预热有限样本。
+- 请求前查询官方 `/api/pipeline/jobs`，有活跃任务时让出供应商额度。单 producer/单进程 ownership；429 后按 Retry-After 冷却至少 60 秒，SDK max_retries=0。它不是跨进程统一账号配额预约，不保证其他客户端并发时零 429。
+- 单条不合法 OHLC 被隔离为缺口，不合成其 15m；同一响应的合法股票与历史仍可提交。最新桶异常暂停该股分析，较早缺口由冻结算法按连续 56 根预热。结构错位/冲突重复拒收相应证券，网络错误保留已有缓存。
 
-## DuckDB内存与恢复
+## 配置
 
-私有 `user_data/lan_marketdata/settings.json` 可设置 `"duckdb_memory_limit": "16GB"`。默认 `8GB`，仅接受整数 `1GB`—`32GB`（大小写不敏感）；非法值明确报ERROR。线程固定2。预算是上限，不是预分配；`8GB`按DuckDB十进制单位在连接实际显示为`7.4 GiB`，`16GB`显示为`14.9 GiB`。
+凭证只取启动环境 `TICKFLOW_API_KEY` 或私有 `data/user_data/lan_marketdata/settings.json` 的 `tickflow_api_key`。没有凭证显示 CREDENTIAL_REQUIRED；不读取宿主 secrets_store。配置和凭证不进 Git。可选 `api_base/api_session` 用于本机官方任务状态读取，`minute_requests_per_minute`、`cold_requests_per_minute` 控制本包预算；`collection_symbols` 可限定授权的现场验证范围。
 
-`/status`中的`duckdb_memory_limit`、`duckdb_threads`、`duckdb_buffer_bytes`来自连接实际查询，另列配置值及`database_connected`。writer退出后保留最后成功水位及错误，STARTING、RECOVERING_DB、ERROR在读取接口返回明确503；状态接口始终可查。
+## HTTP v2
 
-网络仍为100股/最多5000根5m。计算/事务按单股进行，指标使用完整输入；SQL临时注册每周期最多144/256根保留尾部，注册资源在finally释放，已处理网络数据及时移除。判空只读一条元信息，不解码全池指标历史。未修改insertion-order设置。
+前缀 `/api/extensions/lan.marketdata/v2`，仅 GET，沿用官方会话认证。
 
-单股DuckDB OOM先回滚，该股K/水位/ACK不推进；保留独占lease，关闭重开本包连接，等待5秒、15秒后最多重试2次，复用已收到的网络批次。`db_retry_attempt`为当前尝试，`db_retry_count`为累计恢复次数，`last_error`保留原因。耗尽或初始化失败转ERROR，不删除、重建或重新导入数据库。回退1.0.1会恢复其1GB限制，仅供紧急隔离；数据先停机另存。
-
-## 正式HTTP v1
-
-前缀 `/api/extensions/lan.marketdata/v1`，仅注册GET。
-
-| 路径 | 内容/上限 |
+| 路径 | 返回 |
 | --- | --- |
-| `/status` | writer、预算、请求计数、最近提交、股票池及最新真实交易日 |
-| `/universe?offset=0&limit=100` | symbol稳定顺序、generation、元信息、修订、日历；不输出指标状态和事件链 |
-| `/bars?symbols=000006.SZ&timeframes=15m,30m,60m&asof=...` | 最多32证券、每周期256根、合计8192根；含来源截至、完成点、source_count、price_basis、因子覆盖、tick、股单位、缺口和预热状态 |
-| `/inventory?symbol=000006.SZ` | 实际落盘行数、容量、首尾完成点 |
+| `/status` | writer/SQLite、实际 HTTP/429、数据源、状态计数、最老/最新完成点、冷队列与配额说明 |
+| `/universe?offset=0&limit=100` | 证券元数据、revision/source/basis/validity、会话日历、data_revision |
+| `/bars?symbols=000001.SZ&timeframes=15m,30m,60m&limit=250&asof=...` | 最多32证券、8000根；raw来源/QFQ基准、缺口、MA、source_count、当前服务错误 |
+| `/inventory?symbol=000001.SZ` | 实际15m和5m短尾行数、首尾与容量 |
 
-认证由宿主处理。v0.3.32的read:ext Token对自定义扩展路由返回403；本机无密码模式及合法面板会话可用。两个消费者的私有settings可提供 `api_session`，只发送宿主tf_session cookie。页面继续使用ctx.api。会话失效时显示DATA_SOURCE_UNAVAILABLE并保留结果，不绕过鉴权。
+v1 已随三个消费包一起切换，不维护第二套行情接口或采集端。writer 退出或源不可用时，只读历史仍可返回并显示错误；SQLite 文件本身不可读才返回明确 503。
 
-## 安装、迁移、回退
+## 旧库迁移及恢复
 
-先安装公共包，再安装MA55和工作台，重启后端并刷新网页。构建入口 `build_backend.py`，ZIP留在忽略的dist。
+先正常停止相关服务并保存一致性备份。使用既有 nga Python 执行：
 
-`import_legacy.py` 只用于显式离线导入一致SQLite快照；正常运行不读取其他插件数据库。MA55快照必须声明已验证RAW_5M_TO_QFQ_15M来源；工作台仅接收明确QuantDash/RAW及有效格点的数据。原库只读，原主键幂等导入并在新库实际裁剪。旧1m保留。
-
-```powershell
-& $PY -B -X utf8 -m addons.lan_marketdata.import_legacy --destination $NewDuckDB --ma55-backup $MA55Snapshot --kline-backup $KlineSnapshot
-& $PY -B -X utf8 -m pytest -q -p no:cacheprovider addons/lan_marketdata/tests_backend
-& $PY -B -X utf8 addons/lan_marketdata/build_backend.py
+```text
+python addons/lan_marketdata/import_legacy.py --source <旧rolling.duckdb> --destination <新rolling15.sqlite3>
 ```
 
-私有settings的 `collection_symbols` 用于限定现场验收证券；省略即完整股票池。`warm_symbols` 可限制深预热，默认逐页推进全池。分母独立于图表会话。
+程序用 DuckDB 官方 read_only 连接读取原包的真实 raw 15m/证券/因子，仅复制每股最后250根。重复执行跳过已导入证券，不覆盖新 TickFlow 数据；不写原文件。导入来源固定 QUANTDASH_LEGACY，只可展示；旧数据不会与未核实的 TickFlow 新 K 拼成有效 BUY 窗口。完整新源窗口会原子替换该股在线窗口；旧原文件一直保留。至少56根重叠及因子完全核实才能接续旧因果状态，否则以新源真实窗口重建并保护原锁/确认。
 
-回退旧两个生产者前，先在官方管理器停用公共包，再回退MA55与工作台并重启。停机后可另存R1信号库、恢复升级前一致SQLite快照；新旧副本都保留。详见[集成验收](SHARED_ROLLING_ACCEPTANCE_20261108.md)。
+回退应先停机、另存新产生的数据，再使用官方管理器 previous_version 及本轮一致性事件库备份。旧 QuantDash 运行包、原 rolling.duckdb、全部旧 BUY 和设置都保留；不在线覆盖数据库。
+
+## 构建与验证
+
+nga Python 运行 `addons/lan_marketdata/build_backend.py` 生成2.0.0包；通过官方管理器安装，与 MA55 0.4.0、K线3.0.0同步重启。定向 pytest 在 `tests_backend`；`tools/benchmark_sqlite.py --database <新的私有测试文件>` 可重现 5600×250 合成 WAL 压测。商业响应、DB、日志、ZIP/dist 不提交。

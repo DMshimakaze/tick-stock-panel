@@ -1,8 +1,10 @@
-# 兰 · 题材与MA55 1.0.3
+# 兰 · 题材与MA55 1.0.4
 
 TSP v0.3.36 独立扩展：合法快照 → 大题材 → Level1/Level2 路径 → 已发布 MA55 BUY/WATCH → 原15m工作台。实现包内 CLI 导入、原子更新、五版本回退、严格股票身份和缓存交集；默认规则为 MA55_15M_MINIMAL_V5_R1，旧 V5 单独切换。
 
 **真实业务状态：BLOCKED_AUTHORIZED_KPL_DATA。** 当前没有合法真实 KPL 快照，正式题材/节点/关系为 0。在线保持 ONLINE_KPL_NOT_VERIFIED。DEMO 和公开接口文档不构成真实数据接入证明。具体已验/未验见 [本轮验收](KPL_REAL_DATA_ACCEPTANCE_20261109.md)。
+
+本轮仅同步 BUY 深链的事件身份、来源、因子修订与风险信息；已有发布表和题材快照接口不变。
 
 ## 构建和安装
 
@@ -14,7 +16,7 @@ pnpm -C addons/lan_theme run build
 & 'D:\Python_Envs\envs\nga\python.exe' -B -X utf8 addons/lan_theme/build_backend.py
 ```
 
-官方导入中心预检 addons/lan_theme/dist/lan-theme-1.0.3.zip，确认本地代码来源并安装，重启后访问 /lan-theme。兼容范围 >=0.3.32,<0.3.37。ZIP 包含 manifest、独立 backend（含 cli.py）和自包含页面，不含用户数据、凭据、DEMO 或第三方响应。
+官方导入中心预检 addons/lan_theme/dist/lan-theme-1.0.4.zip，确认本地代码来源并安装，重启后访问 /lan-theme。兼容范围 >=0.3.36,<0.3.37。ZIP 包含 manifest、独立 backend（含 cli.py）和自包含页面，不含用户数据、凭据、DEMO 或第三方响应。
 
 v0.3.32 Page SDK 的表读写针对官方扩展表，没有本插件原始文件的预检/应用方法，也没有通用自定义路由调用入口。直接 fetch 会绕过 SDK；用原文暂存表转发文件需要增加任务队列协议。本版采用安装包自带 CLI：后端校验所有输入，再原子应用；页面提供操作指引，不增加匿名 HTTP 写入口。
 

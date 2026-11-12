@@ -54,7 +54,10 @@ export function createWorkbenchChart(el, onReadout) {
         lines.get(n).applyOptions({ priceFormat, color });
         lines.get(n).setData(withLineBreaks(points, color)); i++;
       }
-      markers.setMarkers(currentAnchor < 0 ? [] : [{ time: bars[currentAnchor].time, position: 'belowBar', color: '#b89af5', shape: 'arrowUp', text: 'MA55 15m确认' }]);
+      const signalMarkers=currentAnchor < 0 ? [] : [{time:bars[currentAnchor].time,position:'belowBar',color:'#b89af5',shape:'arrowUp',text:'MA55 15m确认'}];
+      const setup=model.setupAnchor?.index??-1;
+      if (setup>=0 && setup!==currentAnchor) signalMarkers.push({time:bars[setup].time,position:'belowBar',color:'#efb96c',shape:'circle',text:'支撑测试'});
+      markers.setMarkers(signalMarkers.sort((a,b)=>a.time-b.time));
       if (reset) range(model.visible, currentAnchor < 0 ? null : currentAnchor);
       report(bars.findLast(b => b.complete)?.time);
     },

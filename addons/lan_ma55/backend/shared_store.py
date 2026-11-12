@@ -4,18 +4,129 @@ from copy import deepcopy
 import json
 
 from .engine import RULE_VERSION, STATE_REVISION, minimal_features
-from .live_store import LiveStore, category
-from .pipeline import empty_record, process_symbol, invalidate
+from .store import StateWriter
+from .pipeline import empty_record, process_symbol, invalidate, previous_end, wall
 from .store import encoded
 
 
-class SharedStore(LiveStore):
+def source_receipt(source, target):
+    return [
+        source.get("source_id", "QUANTDASH_LEGACY"),
+        source.get("revision", 0),
+        source.get("basis_revision", 0),
+        target,
+        RULE_VERSION,
+        STATE_REVISION,
+    ]
+
+
+def category(record, end):
+    s = record["state"]
+    if s["data_asof"] == end and s["valid_run"] >= 56:
+        return "valid"
+    if s["reason"] in ("WARMUP", "INSUFFICIENT_WARMUP"):
+        return "insufficient"
+    return "gap"
+
+
+def phase(record, kind):
+    s = record["state"]
+    return (
+        "DATA_PENDING"
+        if kind != "valid"
+        else "CONFIRMED"
+        if (s.get("structure") or {}).get("locked")
+        else "WATCHING"
+        if (s.get("decision") or {}).get("impulse_recent")
+        else "NO_SETUP"
+    )
+
+
+class SharedStore(StateWriter):
     def __init__(self, path):
         super().__init__(path)
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.executescript("""CREATE TABLE IF NOT EXISTS runtime_meta(key TEXT PRIMARY KEY,payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS security_master(symbol TEXT PRIMARY KEY,payload TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS day_state(symbol TEXT,trade_date TEXT,payload TEXT NOT NULL,PRIMARY KEY(trade_date,symbol));
+            CREATE TABLE IF NOT EXISTS cycle_member(cycle_id TEXT,symbol TEXT,category TEXT NOT NULL,PRIMARY KEY(cycle_id,symbol));""")
         self.conn.execute("""CREATE TABLE IF NOT EXISTS rule_state_archive(
             symbol TEXT,rule_version TEXT,payload TEXT NOT NULL,PRIMARY KEY(symbol,rule_version))""")
         with self.conn:
-            self.set_meta("data_mode", "LAN_MARKETDATA_HTTP_V1_COMPLETED_15M")
+            self.set_meta("data_mode", "LAN_MARKETDATA_HTTP_V2_COMPLETED_15M")
+
+    def meta(self, key, default=None):
+        row = self.conn.execute(
+            "SELECT payload FROM runtime_meta WHERE key=?", (key,)
+        ).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def set_meta(self, key, value):
+        self.conn.execute(
+            "INSERT INTO runtime_meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+            (key, encoded(value)),
+        )
+
+    def master(self):
+        return {
+            row["symbol"]: json.loads(row["payload"])
+            for row in self.conn.execute("SELECT * FROM security_master")
+        }
+
+    def identity(self, end):
+        return f"PRO:{RULE_VERSION}:{self.meta('generation', 1)}:{end}"
+
+    def new_cycle(self, end, expected, now, mode):
+        return dict(
+            cycle_id=self.identity(end),
+            trade_date=end[:10],
+            bar_end=end,
+            mode=mode,
+            expected_symbols=expected,
+            processed_symbols=0,
+            valid_symbols=0,
+            insufficient_symbols=0,
+            gap_symbols=0,
+            failed_symbols=0,
+            new_signals=0,
+            source_asof=None,
+            elapsed_ms=0.0,
+            status="RUNNING",
+            source_health="REPLAY" if mode == "REPLAY" else "UPDATING",
+            updated_at=now,
+            completed_at=None,
+            error=None,
+        )
+
+    @staticmethod
+    def day_row(info, record, end, kind, generation):
+        state = record["state"]
+        events = [
+            e for e in record["confirmations"] if e["confirmed_at"][:10] == end[:10]
+        ]
+        return dict(
+            symbol=info["symbol"],
+            name=info["name"],
+            market_date=end[:10],
+            generation=generation,
+            phase=phase(record, kind),
+            category=kind,
+            reason=state["reason"],
+            bar_end=state["data_asof"] or "",
+            processed_at=record.get("updated_at", ""),
+            events_json=encoded(events),
+            decision_json=encoded(state.get("decision") or {}),
+        )
+
+    def day_rows(self, day, symbols=None):
+        rows = [
+            json.loads(r[0])
+            for r in self.conn.execute(
+                "SELECT payload FROM day_state WHERE trade_date=? ORDER BY symbol",
+                (day,),
+            )
+        ]
+        return rows if symbols is None else [r for r in rows if r["symbol"] in symbols]
 
     def source_master(self, rows, overview, generation):
         with self.conn:
@@ -38,13 +149,7 @@ class SharedStore(LiveStore):
         for source in rows:
             symbol = source["symbol"]
             prior = previous.get(symbol)
-            receipt = [
-                source.get("revision"),
-                source.get("basis_revision"),
-                target,
-                RULE_VERSION,
-                STATE_REVISION,
-            ]
+            receipt = source_receipt(source, target)
             if source_marks.get(symbol) == receipt:
                 continue
             incompatible = bool(
@@ -54,20 +159,54 @@ class SharedStore(LiveStore):
                     or prior["state"].get("state_revision") != STATE_REVISION
                 )
             )
+            source_id = source.get("source_id", "QUANTDASH_LEGACY")
+            source_changed = bool(
+                prior
+                and prior["state"].get("shared_source_id", "QUANTDASH_LEGACY")
+                != source_id
+            )
+            verified = source.get("transition") == "OVERLAP_VERIFIED"
             basis_changed = bool(
                 prior
                 and prior["state"].get("source_basis_revision")
                 != source.get("basis_revision")
+                and not (source_changed and verified)
             )
             bars = source.get("bars", [])
-            restore = (
+            history_lost = bool(
+                prior
+                and bars
+                and prior["state"].get("processed_at")
+                and bars[0]["timestamp"] > prior["state"]["processed_at"]
+                and previous_end(wall(bars[0]["timestamp"]), sessions)
+                != prior["state"]["processed_at"]
+            )
+            allowed = source.get("analysis_allowed", True) and source.get(
+                "state"
+            ) not in (
+                "FACTOR_PENDING",
+                "REBUILD_PENDING",
+                "METADATA_PENDING",
+                "SOURCE_DISCREPANCY",
+                "SOURCE_UNAVAILABLE",
+            )
+            allowed = allowed and source.get("price_basis") == "QFQ"
+            restore = bool(
                 not prior
                 or incompatible
                 or basis_changed
                 or source.get("correction", False)
+                or history_lost
+                or (source_changed and not verified)
             )
-            record = empty_record(symbol) if restore else deepcopy(prior)
-            if restore and prior:
+            record = (
+                empty_record(symbol)
+                if restore and allowed
+                else deepcopy(prior)
+                if prior
+                else empty_record(symbol)
+            )
+            if restore and prior and allowed:
                 record["confirmations"] = deepcopy(prior["confirmations"])
                 record["risks"] = deepcopy(prior["risks"])
             if incompatible:
@@ -86,20 +225,39 @@ class SharedStore(LiveStore):
             lock_index = next(
                 (i for i, b in enumerate(bars) if b["timestamp"] == lock_at), -1
             )
-            unrecoverable = bool(
-                (
+            check_lock = bool(
+                lock_at
+                and (
                     incompatible
+                    or history_lost
+                    or basis_changed
+                    or source.get("correction", False)
+                    or (source_changed and not verified)
                     or (prior or {}).get("state", {}).get("migration_lock_at")
                 )
-                and lock_at
-                and lock_index < 55
             )
+            lock_reproduced = False
+            if check_lock and allowed and lock_index >= 55:
+                prefix, _ = process_symbol(
+                    symbol,
+                    bars[: lock_index + 1],
+                    sessions=sessions,
+                    raw_tick=source.get("raw_tick"),
+                    source_asof=target,
+                    first_seen_at=now,
+                )
+                reconstructed = prefix["state"].get("structure") or {}
+                lock_reproduced = bool(
+                    reconstructed.get("locked")
+                    and (reconstructed.get("last_buy") or {}).get("at") == lock_at
+                )
+            unrecoverable = check_lock and not lock_reproduced
             reset_at = None
             if unrecoverable:
                 # A real full departure or failed support resets a prior lock
                 # regardless of its missing internals, using 55 causal closes.
                 for i, bar in enumerate(bars[55:], 55):
-                    if not bar.get("valid"):
+                    if not bar.get("valid") or bar["timestamp"] <= lock_at:
                         continue
                     feature = minimal_features(bars[max(0, i - 55) : i], bar, [])
                     if bar["close"] < feature["ma55"] * 0.99 or (
@@ -109,12 +267,10 @@ class SharedStore(LiveStore):
                         reset_at = bar["timestamp"]
                         unrecoverable = False
                         break
-            if (
-                source.get("state")
-                in ("FACTOR_PENDING", "REBUILD_PENDING", "METADATA_PENDING")
-                or source.get("price_basis") != "QFQ"
-            ):
-                invalidate(record["state"], source.get("state") or "FACTOR_PENDING")
+            if not allowed:
+                # Hold causal state/locks until a usable source window arrives.
+                # A failed supplier response cannot erase the last verified state.
+                record["state"]["reason"] = source.get("state") or "FACTOR_PENDING"
                 record["updated_at"] = now
             elif unrecoverable:
                 invalidate(record["state"], "VERSION_HISTORY_INSUFFICIENT")
@@ -144,13 +300,34 @@ class SharedStore(LiveStore):
                         if e["event_id"] in old_ids or e["confirmed_at"] >= reset_at
                     ]
                 record["state"].pop("migration_lock_at", None)
+            old_ids = {e["event_id"] for e in (prior or {}).get("confirmations", [])}
+            for event in record["confirmations"]:
+                if event["event_id"] not in old_ids:
+                    event.update(
+                        source_id=source_id,
+                        basis_id=source.get("basis_id"),
+                        factor_revision=source.get("factor_revision"),
+                        basis_revision=source.get("basis_revision"),
+                    )
+                elif (
+                    source_id != event.get("source_id", "QUANTDASH_LEGACY")
+                    and not verified
+                    and prior
+                ):
+                    record["risks"][event["event_id"]] = deepcopy(
+                        prior["risks"].get(event["event_id"], {})
+                    )
             record["state"].update(
                 state_revision=STATE_REVISION,
-                source_basis_revision=source.get("basis_revision"),
                 shared_source_asof=source.get("source_asof"),
                 shared_receipt=receipt,
             )
-            kind = category(record, target)
+            if allowed:
+                record["state"].update(
+                    source_basis_revision=source.get("basis_revision"),
+                    shared_source_id=source_id,
+                )
+            kind = category(record, target) if allowed else "gap"
             records.append(record)
             kinds[symbol] = kind
             info = dict(symbol=symbol, name=source.get("name", symbol))

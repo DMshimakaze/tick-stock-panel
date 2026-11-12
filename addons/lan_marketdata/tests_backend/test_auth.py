@@ -51,14 +51,14 @@ def test_host_password_off_on_session_and_api_token(tmp_path, monkeypatch):
     monkeypatch.setattr(
         extension,
         "worker",
-        SimpleNamespace(status=lambda: dict(api_version=1, phase="READY")),
+        SimpleNamespace(status=lambda: dict(api_version=2, phase="READY")),
     )
     app = FastAPI()
     app.middleware("http")(auth_middleware)
     app.include_router(router)
     extension.setup(SimpleNamespace(include_router=app.include_router))
     with live_client(app) as client:
-        path = "/api/extensions/lan.marketdata/v1/status"
+        path = "/api/extensions/lan.marketdata/v2/status"
         assert client.get(path).status_code == 200
         _, token = api_tokens.create_token(
             tmp_path, "test", ["read:ext", "write:ext", "read:market"]

@@ -1,78 +1,49 @@
-"""Controlled legacy import checks; no production data is included."""
-
 import json
-import sqlite3
-
-import pytest
-
+import duckdb
+from addons.lan_marketdata.import_legacy import migrate
 from addons.lan_marketdata.backend.store import Store
-from addons.lan_marketdata.import_legacy import ma55_import, kline_import
+from addons.lan_marketdata.backend.grid import LEGACY, aggregate
+from .test_rolling import sample
 
 
-def test_unknown_ma55_price_provenance_preserves_source_and_destination(tmp_path):
-    path = tmp_path / "old.sqlite3"
-    with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE runtime_meta(key TEXT,payload TEXT)")
-        conn.execute(
-            "INSERT INTO runtime_meta VALUES(?,?)", ("data_mode", json.dumps("UNKNOWN"))
-        )
-    store = Store(tmp_path / "rolling.duckdb")
+def test_offline_import_readonly_idempotent_and_bounded(tmp_path):
+    sessions, five = sample(251)
+    source = tmp_path / "old.duckdb"
+    conn = duckdb.connect(str(source))
+    conn.execute("CREATE TABLE meta(key VARCHAR,payload VARCHAR)")
+    conn.execute("CREATE TABLE instrument(symbol VARCHAR,payload VARCHAR)")
+    conn.execute(
+        "CREATE TABLE bars(symbol VARCHAR,timeframe VARCHAR,stamp VARCHAR,payload VARCHAR)"
+    )
+    for k, v in {"sessions": sessions, "universe": {"expected": 1}}.items():
+        conn.execute("INSERT INTO meta VALUES(?,?)", [k, json.dumps(v)])
+    info = dict(
+        symbol="600000.SH",
+        name="Synthetic",
+        eligible=True,
+        raw_tick=0.01,
+        source_type="stock",
+        events=[],
+        factors_day=sessions[-1],
+    )
+    conn.execute(
+        "INSERT INTO instrument VALUES(?,?)", [info["symbol"], json.dumps(info)]
+    )
+    bars = aggregate(five, sessions, max(five))["15m"]
+    conn.executemany(
+        "INSERT INTO bars VALUES(?,?,?,?)",
+        [(info["symbol"], "15m", b["timestamp"], json.dumps(b)) for b in bars],
+    )
+    conn.close()
+    before = source.stat().st_size
+    target = tmp_path / "new.sqlite3"
+    assert migrate(source, target)["bars15"] == 250
+    assert migrate(source, target)["skipped"] == 1
+    assert source.stat().st_size == before
+    store = Store(target)
     try:
-        with pytest.raises(ValueError, match="provenance"):
-            ma55_import(store, path)
-        assert not store.inventory()
+        out = store.read(info["symbol"], "15m", max(five))
+        assert out["source_id"] == LEGACY and out["row_count"] == 250
+        assert out["state"] == "REBUILD_PENDING" and not out["analysis_allowed"]
     finally:
         store.close()
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT count(*) FROM runtime_meta").fetchone()[0] == 1
-
-
-def test_legacy_raw_grid_is_checked_without_rewriting_source(tmp_path):
-    path = tmp_path / "old.sqlite3"
-    with sqlite3.connect(path) as conn:
-        conn.executescript("""CREATE TABLE runtime_meta(key TEXT,value TEXT);
-            CREATE TABLE tracked_symbol(symbol TEXT,metadata TEXT,events TEXT);
-            CREATE TABLE bar_5m(symbol TEXT,end_time TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,amount REAL,source TEXT,basis TEXT);
-            CREATE TABLE bar_daily AS SELECT * FROM bar_5m WHERE 0;""")
-        conn.execute(
-            "INSERT INTO runtime_meta VALUES(?,?)",
-            ("sessions", json.dumps(["2026-11-06"])),
-        )
-        conn.execute(
-            "INSERT INTO tracked_symbol VALUES(?,?,?)",
-            (
-                "600000.SH",
-                json.dumps(
-                    dict(symbol="600000.SH", type="stock", ext=dict(tick_size=0.01))
-                ),
-                "[]",
-            ),
-        )
-        for at in ("09:35:00", "09:37:00"):
-            conn.execute(
-                "INSERT INTO bar_5m VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (
-                    "600000.SH",
-                    "2026-11-06 " + at,
-                    10,
-                    12,
-                    9,
-                    11,
-                    3,
-                    3300,
-                    "QuantDash",
-                    "RAW",
-                ),
-            )
-    store = Store(tmp_path / "rolling.duckdb")
-    try:
-        result = kline_import(store, path)
-        assert result["rejected"] == 1
-        assert (
-            store.raw_rows("600000.SH", "5m")[0]["timestamp"] == "2026-11-06 09:35:00"
-        )
-        assert len(store.raw_rows("600000.SH", "5m")) == 1
-    finally:
-        store.close()
-    with sqlite3.connect(path) as conn:
-        assert conn.execute("SELECT count(*) FROM bar_5m").fetchone()[0] == 2

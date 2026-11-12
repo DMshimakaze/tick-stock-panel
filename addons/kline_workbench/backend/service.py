@@ -18,9 +18,9 @@ class Worker:
         self.settings = settings
         self.stop, self.lock = Event(), Lock()
         self.state = dict(
-            version="2.0.2",
+            version="3.0.0",
             phase="STARTING",
-            source="lan.marketdata HTTP v1",
+            source="lan.marketdata HTTP v2",
             minute_request_limit=0,
             requests={"minute_requests": 0, "period_1m": 0},
             error=None,
@@ -60,9 +60,19 @@ class Worker:
             source="lan.marketdata",
             row_count=primary["row_count"],
             warm_count=primary.get("warm_count", 0),
-            warm_target=256,
+            warm_target=250,
+            capacity=primary.get("capacity", 250),
+            source_id=primary.get("source_id"),
+            transition=primary.get("transition"),
+            valid_ma_lengths={
+                r["timeframe"]: {
+                    str(n): sum(b.get(f"ma{n}") is not None for b in r["bars"])
+                    for n in (55, 233)
+                }
+                for r in rows
+            },
             gap_count=primary.get("gap_count", 0),
-            error="",
+            error=primary.get("error_code") or "",
             requests={"minute_requests": 0, "period_1m": 0},
         )
         public = data.get("service_status", {})
@@ -84,7 +94,16 @@ class Worker:
             asof=primary.get("latest_completed_at"),
             source_asof=primary.get("source_asof"),
             source="lan.marketdata",
-            basis_note="真实事件链前复权"
+            source_id=primary.get("source_id"),
+            transition=primary.get("transition"),
+            correction=primary.get("correction", False),
+            factor_revision=primary.get("factor_revision"),
+            basis_revision=primary.get("basis_revision"),
+            basis_note=(
+                "QuantDash迁移历史，只读展示，等待TickFlow重建"
+                if primary.get("source_id") == "QUANTDASH_LEGACY"
+                else "TickFlow真实5m聚合 / 事件链前复权"
+            )
             if primary.get("price_basis") == "QFQ"
             else "因子待补，显示原始价格",
         )
@@ -123,7 +142,7 @@ class Worker:
             self.published = {}
             return
         symbols = sorted({d["requested_symbol"] for d in demands})
-        # 16 session slots x 3 periods x 256 bars is split below the v1 limit.
+        # 16 session slots x 3 periods x 250 bars is split below the v2 limit.
         datasets = {}
         for offset in range(0, len(symbols), 10):
             data = self.source.bars(

@@ -1,234 +1,301 @@
-"""One bounded DuckDB. Raw bars, source receipts and watermarks commit together."""
+"""Single SQLite WAL writer, raw 250 x 15m retention, independent read connections."""
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import json
+from math import isclose
 from pathlib import Path
-import re
-from threading import RLock
+import sqlite3
+from time import time
 
-import duckdb
-import pandas as pd
+from .grid import (
+    CAPACITY,
+    FIELDS,
+    LEGACY,
+    SOURCE,
+    aggregate,
+    bucket_end,
+    derived,
+    points,
+    project,
+)
+from .lease import ProcessLease
 
-from .grid import CAPACITY, MAS, aggregate, project, two_day, points, now_cn, basis_key
+COLUMNS = (
+    "symbol",
+    "name",
+    "eligible",
+    "source_type",
+    "raw_tick",
+    "listing_date",
+    "listing_status",
+    "source_id",
+    "latest_completed15",
+    "latest_source5",
+    "revision",
+    "basis_revision",
+    "factor_revision",
+    "factor_coverage",
+    "factors_day",
+    "state",
+    "gaps",
+    "transition",
+    "correction",
+    "rebuild_from",
+    "attempted",
+    "next_retry",
+    "updated_at",
+    "metadata_source",
+)
+BAR_COLUMNS = ("symbol", "bar_end", *FIELDS, "source_id", "source_count")
+DEFAULTS = dict(
+    name="",
+    eligible=False,
+    source_type="stock",
+    raw_tick=None,
+    listing_date=None,
+    listing_status="NOT_PROVIDED",
+    source_id=SOURCE,
+    latest_completed15=None,
+    latest_source5=None,
+    revision=0,
+    basis_revision=0,
+    factor_revision=0,
+    factor_coverage="MISSING",
+    factors_day=None,
+    state="WARMUP",
+    gaps=[],
+    transition="NEW",
+    correction=False,
+    rebuild_from=None,
+    attempted=None,
+    next_retry=0,
+    updated_at=None,
+    metadata_source="TICKFLOW_INSTRUMENTS",
+)
+DDL = """
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS instrument_state(
+ symbol TEXT PRIMARY KEY,name TEXT,eligible INTEGER,source_type TEXT,raw_tick REAL,listing_date TEXT,
+ listing_status TEXT,source_id TEXT,latest_completed15 TEXT,latest_source5 TEXT,
+ revision INTEGER,basis_revision INTEGER,factor_revision INTEGER,factor_coverage TEXT,factors_day TEXT,
+ state TEXT,gaps TEXT,transition TEXT,correction INTEGER,rebuild_from TEXT,attempted TEXT,
+ next_retry REAL,updated_at TEXT,metadata_source TEXT);
+CREATE TABLE IF NOT EXISTS bar15(
+ symbol TEXT,bar_end TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,amount REAL,
+ source_id TEXT,source_count INTEGER CHECK(source_count=3),PRIMARY KEY(symbol,bar_end));
+CREATE TABLE IF NOT EXISTS tail5(
+ symbol TEXT,bar_end TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,amount REAL,
+ PRIMARY KEY(symbol,bar_end));
+CREATE TABLE IF NOT EXISTS factor_event(
+ symbol TEXT,ordinal INTEGER,day TEXT,ex_factor REAL CHECK(ex_factor>0),PRIMARY KEY(symbol,ordinal));
+"""
 
 
 def encoded(value):
     return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
 
+def reader(path):
+    conn = sqlite3.connect(
+        Path(path).resolve().as_uri() + "?mode=ro", uri=True, timeout=5
+    )
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=5000")
+    return conn
+
+
+def unpack(row):
+    if row is None:
+        return None
+    info = dict(row)
+    info["gaps"] = json.loads(info["gaps"])
+    info["eligible"] = bool(info["eligible"])
+    info["correction"] = bool(info["correction"])
+    info["gap_count"] = len(info["gaps"])
+    return info
+
+
 class Store:
-    def __init__(self, path, *, memory_limit="8GB"):
-        if not isinstance(memory_limit, str) or not re.fullmatch(
-            r"(?:[1-9]|[12][0-9]|3[0-2])GB", memory_limit.strip().upper()
-        ):
-            raise ValueError("duckdb_memory_limit must be an integer from 1GB to 32GB")
-        self.memory_limit = memory_limit.strip().upper()
-        self.path = Path(path)
+    def __init__(self, path):
+        self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.lock = RLock()
-        self.conn = duckdb.connect(
-            str(path), config={"threads": 2, "memory_limit": self.memory_limit}
-        )
-        self.connection_settings = {}
-        self.connection_status()
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS meta(key VARCHAR PRIMARY KEY,payload VARCHAR NOT NULL)"
-        )
-        self.conn.execute(
-            "CREATE TABLE IF NOT EXISTS instrument(symbol VARCHAR PRIMARY KEY,payload VARCHAR NOT NULL)"
-        )
-        self.conn.execute("""CREATE TABLE IF NOT EXISTS bars(symbol VARCHAR,timeframe VARCHAR,stamp VARCHAR,
-                             payload VARCHAR NOT NULL,PRIMARY KEY(symbol,timeframe,stamp))""")
-
-    def connection_status(self):
-        with self.lock:
-            if self.conn is not None:
-                limit, threads, buffer_bytes = self.conn.execute(
-                    "SELECT current_setting('memory_limit'), current_setting('threads'), "
-                    "(SELECT coalesce(sum(memory_usage_bytes),0) FROM duckdb_memory())"
-                ).fetchone()
-                self.connection_settings = dict(
-                    duckdb_memory_limit=limit,
-                    duckdb_threads=threads,
-                    duckdb_memory_limit_configured=self.memory_limit,
-                    duckdb_buffer_bytes=buffer_bytes,
-                )
-            return dict(
-                self.connection_settings, database_connected=self.conn is not None
-            )
-
-    def reopen(self):
-        # The failed symbol transaction has rolled back. Keep the process lease;
-        # only this connection and its transient buffers are replaced.
-        with self.lock:
-            self.close(checkpoint=False)
-            self.conn = duckdb.connect(
-                str(self.path), config={"threads": 2, "memory_limit": self.memory_limit}
-            )
-            self.connection_status()
+        self.lease = ProcessLease(self.path.with_suffix(".writer.lock"))
+        try:
+            self.conn = sqlite3.connect(self.path, timeout=5)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.execute("PRAGMA journal_mode=WAL")
+            self.conn.execute("PRAGMA synchronous=NORMAL")
+            self.conn.execute("PRAGMA busy_timeout=5000")
+            self.conn.executescript(DDL)
+            self.conn.commit()
+        except Exception:
+            self.lease.close()
+            raise
 
     @contextmanager
     def transaction(self):
-        with self.lock:
-            self.conn.execute("BEGIN TRANSACTION")
-            try:
-                yield
-                self.conn.execute("COMMIT")
-            except BaseException:
-                self.conn.execute("ROLLBACK")
-                raise
+        with self.conn:
+            yield
 
-    def meta(self, key, default=None):
-        with self.lock:
-            row = self.conn.execute(
-                "SELECT payload FROM meta WHERE key=?", [key]
-            ).fetchone()
-            return json.loads(row[0]) if row else default
+    def meta(self, key, default=None, *, conn=None):
+        row = (
+            (conn or self.conn)
+            .execute("SELECT payload FROM meta WHERE key=?", (key,))
+            .fetchone()
+        )
+        return json.loads(row[0]) if row else default
 
     def set_meta(self, key, value):
         self.conn.execute(
-            "INSERT OR REPLACE INTO meta VALUES(?,?)", [key, encoded(value)]
+            "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
+            (key, encoded(value)),
         )
 
-    def instruments(self):
-        with self.lock:
-            return {
-                s: json.loads(p)
-                for s, p in self.conn.execute(
-                    "SELECT * FROM instrument ORDER BY symbol"
-                ).fetchall()
-            }
+    def instrument(self, symbol, *, conn=None):
+        return unpack(
+            (conn or self.conn)
+            .execute("SELECT * FROM instrument_state WHERE symbol=?", (symbol,))
+            .fetchone()
+        )
 
-    def instrument(self, symbol):
-        with self.lock:
-            row = self.conn.execute(
-                "SELECT payload FROM instrument WHERE symbol=?", [symbol]
-            ).fetchone()
-            return json.loads(row[0]) if row else None
-
-    def universe(self):
-        # Indicator close windows and event chains are source-owned state,
-        # never part of a market-wide metadata response.
-        with self.lock:
-            rows = self.conn.execute("""SELECT symbol,json_merge_patch(payload,'{"indicators":null,"events":null}')
-                                      FROM instrument ORDER BY symbol""").fetchall()
-            return {s: json.loads(p) for s, p in rows}
-
-    def universe_page(self, offset, limit):
-        with self.lock:
-            total = self.conn.execute("SELECT count(*) FROM instrument").fetchone()[0]
-            rows = self.conn.execute(
-                """SELECT json_merge_patch(payload,'{"indicators":null,"events":null}')
-                                      FROM instrument ORDER BY symbol LIMIT ? OFFSET ?""",
-                [limit, offset],
-            ).fetchall()
-            return total, [json.loads(r[0]) for r in rows]
-
-    def put_instrument(self, row):
+    def _put(self, info):
+        values = [encoded(info[k]) if k == "gaps" else info[k] for k in COLUMNS]
+        update = ",".join(f"{k}=excluded.{k}" for k in COLUMNS[1:])
         self.conn.execute(
-            "INSERT OR REPLACE INTO instrument VALUES(?,?)",
-            [row["symbol"], encoded(row)],
+            f"INSERT INTO instrument_state VALUES({','.join('?' for _ in COLUMNS)}) "
+            f"ON CONFLICT(symbol) DO UPDATE SET {update}",
+            values,
         )
 
     def save_master(self, rows, overview, sessions):
-        with self.transaction():
-            old = self.instruments()
-            generation = self.meta("generation", 0) + int(
-                {s for s, r in old.items() if r.get("eligible")}
-                != {r["symbol"] for r in rows if r.get("eligible")}
-            )
-            merged = []
-            for row in rows:
-                previous = old.pop(row["symbol"], {})
-                merged.append(dict(previous, **row))
-            for row in old.values():
-                merged.append(dict(row, eligible=False))
-            frame = pd.DataFrame(
-                [(r["symbol"], encoded(r)) for r in merged],
-                columns=["symbol", "payload"],
-            )
-            self.conn.register("master_incoming", frame)
-            try:
-                self.conn.execute(
-                    "INSERT OR REPLACE INTO instrument SELECT * FROM master_incoming"
-                )
-            finally:
-                self.conn.unregister("master_incoming")
-            self.set_meta("generation", generation)
-            self.set_meta("universe", overview)
-            self.set_meta(
-                "sessions", sorted(set(self.meta("sessions", [])) | set(sessions))
-            )
-            self.set_meta("master_day", str(now_cn().date()))
-
-    def raw_rows(self, symbol, tf, asof="9999", limit=256):
-        rows = self.conn.execute(
-            """SELECT payload FROM bars WHERE symbol=? AND timeframe=? AND stamp<=?
-                                   ORDER BY stamp DESC LIMIT ?""",
-            [symbol, tf, asof, limit],
-        ).fetchall()
-        return [json.loads(row[0]) for row in reversed(rows)]
-
-    def _write(self, symbol, frames):
-        # Indicators used the complete causal input above. Persist only each
-        # period's surviving tail, instead of inserting 3072 raw rows then
-        # deleting 2928 of them in the same transaction.
-        for tf, bars in frames.items():
-            retained = sorted(bars, key=lambda r: r["timestamp"])[-CAPACITY[tf] :]
-            if not retained:
-                continue
-            incoming = pd.DataFrame(
-                [(symbol, tf, r["timestamp"], encoded(r)) for r in retained],
-                columns=["symbol", "timeframe", "stamp", "payload"],
-            )
-            self.conn.register("incoming", incoming)
-            try:
-                self.conn.execute("INSERT OR REPLACE INTO bars SELECT * FROM incoming")
-            finally:
-                self.conn.unregister("incoming")
-        for tf, capacity in CAPACITY.items():
-            self.conn.execute(
-                """DELETE FROM bars WHERE symbol=? AND timeframe=? AND stamp IN
-                (SELECT stamp FROM bars WHERE symbol=? AND timeframe=? ORDER BY stamp DESC OFFSET ?)""",
-                [symbol, tf, symbol, tf, capacity],
-            )
-
-    def indicators(self, symbol, frames, info, asof, sessions):
-        """Persist <=233 raw closes per period, including 5m's shorter K window.
-
-        A new batch touches bounded windows only. Factor changes reproject these
-        real closes; an affected MA without its full causal window stays null.
-        """
-        snapshots = info.get("indicators", {})
-        for tf, incoming in frames.items():
-            if not incoming:
-                continue
-            window = {r["timestamp"]: r for r in snapshots.get(tf, [])}
-            window.update(
-                {
-                    r["timestamp"]: r
-                    for r in self.raw_rows(symbol, tf, limit=CAPACITY[tf])
-                }
-            )
-            window.update({r["timestamp"]: r for r in incoming})
-            ordered = [window[t] for t in sorted(window)]
-            projected = {
-                r["timestamp"]: r
-                for r in project(
-                    ordered, info.get("events"), asof, sessions=sessions, timeframe=tf
+        with self.conn:
+            old_members = {
+                r[0]
+                for r in self.conn.execute(
+                    "SELECT symbol FROM instrument_state WHERE eligible=1"
                 )
             }
-            for row in incoming:
-                row["_ma"] = {
-                    f"ma{n}": projected[row["timestamp"]][f"ma{n}"] for n in MAS
-                }
-                row["_ma_basis"] = basis_key(
-                    info.get("events"), asof, info.get("basis_revision", 0)
+            members = {r["symbol"] for r in rows if r.get("eligible")}
+            self.conn.execute("UPDATE instrument_state SET eligible=0")
+            for row in rows:
+                previous = self.instrument(row["symbol"]) or dict(DEFAULTS)
+                self._put(
+                    dict(previous, **{k: v for k, v in row.items() if k in COLUMNS})
                 )
-            snapshots[tf] = [
-                dict(timestamp=r["timestamp"], close=r["close"]) for r in ordered[-233:]
+            self.set_meta(
+                "generation", self.meta("generation", 0) + int(old_members != members)
+            )
+            self.set_meta("universe", overview)
+            self.set_meta("master_day", max(sessions, default=None))
+            self.set_sessions(sessions)
+            self.set_meta("data_revision", self.meta("data_revision", 0) + 1)
+
+    def put_metadata(self, rows):
+        """Apply an explicit small metadata response without changing full-market membership."""
+        with self.conn:
+            for row in rows:
+                previous = self.instrument(row["symbol"]) or dict(DEFAULTS)
+                self._put(
+                    dict(previous, **{k: v for k, v in row.items() if k in COLUMNS})
+                )
+            self.set_meta("data_revision", self.meta("data_revision", 0) + 1)
+
+    def set_sessions(self, sessions):
+        old = self.meta("sessions", [])
+        combined = sorted(set(old) | set(sessions))
+        if old != combined:
+            self.set_meta("calendar_revision", self.meta("calendar_revision", 0) + 1)
+            self.set_meta("sessions", combined)
+
+    def universe(self):
+        return {
+            r["symbol"]: unpack(r)
+            for r in self.conn.execute("SELECT * FROM instrument_state ORDER BY symbol")
+        }
+
+    def universe_page(self, offset, limit):
+        with closing(reader(self.path)) as conn:
+            conn.execute("BEGIN")
+            total = conn.execute("SELECT count(*) FROM instrument_state").fetchone()[0]
+            rows = [
+                unpack(r)
+                for r in conn.execute(
+                    "SELECT * FROM instrument_state ORDER BY symbol LIMIT ? OFFSET ?",
+                    (limit, offset),
+                )
             ]
-        info["indicators"] = snapshots
+            return dict(
+                total=total,
+                rows=rows,
+                generation=self.meta("generation", 0, conn=conn),
+                data_revision=self.meta("data_revision", 0, conn=conn),
+                universe=self.meta("universe", {}, conn=conn),
+                sessions=self.meta("sessions", [], conn=conn),
+            )
+
+    def events(self, symbol, *, conn=None):
+        db = conn or self.conn
+        info = self.instrument(symbol, conn=db)
+        if not info or info["factor_coverage"] != "EXPLICIT":
+            return None
+        return [
+            dict(r)
+            for r in db.execute(
+                "SELECT day,ex_factor FROM factor_event WHERE symbol=? ORDER BY ordinal",
+                (symbol,),
+            )
+        ]
+
+    def _factors(self, symbol, events):
+        self.conn.execute("DELETE FROM factor_event WHERE symbol=?", (symbol,))
+        if events is not None:
+            self.conn.executemany(
+                "INSERT INTO factor_event VALUES(?,?,?,?)",
+                [(symbol, i, e["day"], e["ex_factor"]) for i, e in enumerate(events)],
+            )
+
+    def raw_rows(self, symbol, asof="9999", *, conn=None):
+        rows = (
+            (conn or self.conn)
+            .execute(
+                "SELECT * FROM bar15 WHERE symbol=? AND bar_end<=? ORDER BY bar_end DESC LIMIT 250",
+                (symbol, asof),
+            )
+            .fetchall()
+        )
+        return [
+            dict(
+                timestamp=r["bar_end"],
+                **{k: r[k] for k in FIELDS},
+                source_id=r["source_id"],
+                source=r["source_id"],
+                source_count=r["source_count"],
+                complete=True,
+            )
+            for r in reversed(rows)
+        ]
+
+    def _write(self, symbol, bars):
+        self.conn.executemany(
+            "INSERT INTO bar15 VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(symbol,bar_end) DO UPDATE SET "
+            "open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,"
+            "volume=excluded.volume,amount=excluded.amount,source_id=excluded.source_id,source_count=excluded.source_count",
+            [
+                (
+                    symbol,
+                    b["timestamp"],
+                    *(b.get(k) for k in FIELDS),
+                    b["source_id"],
+                    b["source_count"],
+                )
+                for b in bars[-250:]
+            ],
+        )
+        self.conn.execute(
+            "DELETE FROM bar15 WHERE symbol=? AND bar_end < "
+            "(SELECT bar_end FROM bar15 WHERE symbol=? ORDER BY bar_end DESC LIMIT 1 OFFSET 249)",
+            (symbol, symbol),
+        )
 
     def accept(
         self,
@@ -241,138 +308,195 @@ class Store:
         now,
         events=None,
         factor_response=False,
-        checkpoint=None,
-        source="QUANTDASH_RAW_5M",
-        receipt=None,
+        rebuild=False,
     ):
-        """Input may exceed a window during warmup; disk retention never does.
-
-        Corrections outside the retained raw tail require a bounded source replay.
-        Until it completes consumers see REBUILD_PENDING, not stale valid MA.
-        """
-        with self.transaction():
-            info = self.instrument(symbol)
-            if info is None:
-                raise ValueError("Metadata must precede bars")
-            old_raw = self.raw_rows(symbol, "5m", limit=144)
-            old_by_time = {
-                r["timestamp"]: {
-                    k: r.get(k)
-                    for k in ("open", "high", "low", "close", "volume", "amount")
-                }
-                for r in old_raw
+        info = self.instrument(symbol)
+        if info is None:
+            raise ValueError("Metadata must precede bars")
+        old = self.raw_rows(symbol)
+        switching = info["source_id"] != SOURCE
+        replace = switching or (rebuild and end >= (info["latest_completed15"] or ""))
+        five = (
+            {}
+            if replace
+            else {
+                r["bar_end"]: {k: r[k] for k in FIELDS}
+                for r in self.conn.execute(
+                    "SELECT * FROM tail5 WHERE symbol=?", (symbol,)
+                )
             }
-            raw = dict(old_by_time)
-            raw.update(received)
-            frames = aggregate(raw, sessions, end)
-            correction = any(
-                t <= info.get("latest5", "") and t not in old_by_time for t in received
+        )
+        five.update(received)
+        incoming = aggregate(five, sessions, end)["15m"]
+        if (not incoming and not received) or (
+            switching and len(incoming) < 56 and len(old) >= 56
+        ):
+            self.failed([symbol], end, now, "SOURCE_UNAVAILABLE")
+            return
+        old_factors = self.events(symbol)
+        new_events = events if factor_response else (None if switching else old_factors)
+        by_old = {b["timestamp"]: b for b in old}
+        overlaps = [b for b in incoming if b["timestamp"] in by_old]
+        mismatch = any(
+            any(
+                not isclose(
+                    b[k], by_old[b["timestamp"]][k], rel_tol=1e-12, abs_tol=1e-9
+                )
+                for k in FIELDS
+                if b.get(k) is not None and by_old[b["timestamp"]].get(k) is not None
             )
-            changed = any(
-                t in old_by_time and old_by_time[t] != r for t, r in received.items()
+            or any(
+                (b.get(k) is None) != (by_old[b["timestamp"]].get(k) is None)
+                for k in FIELDS
             )
-            if changed:
-                # Invalidate precisely the corrected source buckets before replacing.
-                for tf, count in (
-                    ("15m", 3),
-                    ("30m", 6),
-                    ("60m", 12),
-                    ("120m", 24),
-                    ("daily", 48),
-                ):
-                    for t, r in received.items():
-                        if t not in old_by_time or old_by_time[t] == r:
-                            continue
-                        minute = int(t[11:13]) * 60 + int(t[14:16])
-                        base = 570 if minute <= 690 else 780
-                        target = (
-                            t[:10] + " 15:00:00"
-                            if tf == "daily"
-                            else f"{t[:10]} {(base + ((minute - base + count * 5 - 1) // (count * 5)) * count * 5) // 60:02}:{(base + ((minute - base + count * 5 - 1) // (count * 5)) * count * 5) % 60:02}:00"
-                        )
-                        self.conn.execute(
-                            "DELETE FROM bars WHERE symbol=? AND timeframe=? AND stamp=?",
-                            [symbol, tf, target],
-                        )
-                info["rebuild_pending"] = True
-            if factor_response:
-                if info.get("events") != events:
-                    info["basis_revision"] = info.get("basis_revision", 0) + 1
+            for b in overlaps
+        )
+        changed = bool(overlaps and mismatch)
+        transition = info["transition"]
+        if switching:
+            transition = (
+                "OVERLAP_VERIFIED"
+                if len(overlaps) >= 56
+                and not mismatch
+                and new_events is not None
+                and old_factors == new_events
+                else "SOURCE_DISCREPANCY"
+                if mismatch
+                else "REBUILT_TICKFLOW"
+            )
+        corrected = changed and not switching
+        if corrected:
+            transition = "HISTORY_REVISED"
+        info["correction"] = corrected
+        if corrected or switching or (factor_response and old_factors != events):
+            info["basis_revision"] += 1
+        if factor_response and old_factors != events:
+            info["factor_revision"] += 1
+        retained = {b["timestamp"]: b for b in ([] if replace else old)}
+        retained.update({b["timestamp"]: b for b in incoming})
+        raw = [retained[t] for t in sorted(retained)][-250:]
+        expected = points(
+            sessions,
+            max(start[:10], info["listing_date"] or start[:10]) + " 09:35:00",
+            end,
+        )
+        missing5 = [t for t in expected if t >= start and t not in five]
+        wanted = points(
+            sessions,
+            raw[0]["timestamp"] if raw else start,
+            max(end, raw[-1]["timestamp"] if raw else end),
+            step=15,
+        )
+        gaps = [t for t in wanted if t not in retained]
+        tail_end = max((bucket_end(t, 15) for t in five), default=None)
+        used = {b["timestamp"] for b in incoming}
+        tail = [
+            (t, r)
+            for t, r in sorted(five.items())
+            if bucket_end(t, 15) == tail_end and tail_end not in used
+        ][-2:]
+        state = (
+            "FACTOR_PENDING"
+            if new_events is None
+            else "SOURCE_DISCREPANCY"
+            if transition == "SOURCE_DISCREPANCY" and len(raw) < 56
+            else "GAP"
+            if gaps or missing5
+            else "READY"
+            if len(raw) >= 56
+            else "WARMUP"
+        )
+        modified = (
+            switching
+            or corrected
+            or (factor_response and old_factors != events)
+            or any(b["timestamp"] not in by_old for b in incoming)
+            or state != info["state"]
+            or gaps[-250:] != info["gaps"]
+        )
+        with self.conn:
+            if replace:
+                self.conn.execute("DELETE FROM bar15 WHERE symbol=?", (symbol,))
+            self._write(symbol, incoming)
+            self.conn.execute("DELETE FROM tail5 WHERE symbol=?", (symbol,))
+            self.conn.executemany(
+                "INSERT INTO tail5 VALUES(?,?,?,?,?,?,?,?)",
+                [(symbol, t, *(r.get(k) for k in FIELDS)) for t, r in tail],
+            )
+            if factor_response or switching:
+                self._factors(symbol, new_events)
                 info.update(
-                    events=events,
+                    factor_coverage="EXPLICIT" if new_events is not None else "MISSING",
                     factors_day=now[:10],
-                    factor_source="QUANTDASH_EX_FACTORS_EXPLICIT_SYMBOL",
                 )
-            expected = points(sessions, start, end)
-            missing = [t for t in expected if t not in raw]
-            if len(received) >= 3072 and not missing:
-                info["rebuild_pending"] = False
-            elif correction and len(received) < 3072:
-                info["rebuild_pending"] = True
-            # Already derived longer history survives eviction of its raw inputs.
-            daily = {r["timestamp"]: r for r in self.raw_rows(symbol, "daily")}
-            daily.update({r["timestamp"]: r for r in frames["daily"]})
-            frames["2d"] = two_day(list(daily.values()), sessions)
-            for bars in frames.values():
-                for bar in bars:
-                    if source != "QUANTDASH_RAW_5M":
-                        bar["source"] = source
-                    bar["available_at"] = bar["timestamp"]
-            self.indicators(symbol, frames, info, now, sessions)
-            self._write(symbol, frames)
-            latest = max(received, default=info.get("latest5", ""))
             info.update(
-                latest5=max(info.get("latest5", ""), latest),
-                source_asof=now,
-                attempted=end,
-                gap_count=len(missing),
-                gaps=missing[:64],
-                retry_at="" if not missing else str(now_cn()),
-                revision=info.get("revision", 0) + 1,
-                correction=changed or correction,
-                warm_count=len(self.raw_rows(symbol, "60m")),
-                warm_target=256,
+                source_id=SOURCE,
+                transition=transition,
+                state=state,
+                gaps=gaps[-250:],
+                latest_completed15=raw[-1]["timestamp"] if raw else None,
+                latest_source5=max(
+                    [
+                        t
+                        for t in (info["latest_source5"], max(received, default=None))
+                        if t
+                    ],
+                    default=None,
+                ),
+                revision=info["revision"] + int(modified),
+                attempted=max(end, info["attempted"] or ""),
+                updated_at=now,
+                next_retry=0 if state in ("READY", "WARMUP") else time() + 300,
+                rebuild_from=gaps[0] if gaps else None,
             )
-            if not missing and len(self.raw_rows(symbol, "15m")) >= 56:
-                info["cold_done"] = True
-            if not missing:
-                if not info.get("warm_start") or start < info["warm_start"]:
-                    info["warm_start"] = start
-            if receipt:
-                info.update(receipt)
-                info["cold_done"] = info.get("cold_done", False) or (
-                    receipt.get("stage") == "COLD" and not missing
-                )
-                info.pop("request_error", None)
-            self.put_instrument(info)
+            self._put(info)
             self.set_meta("last_commit", now)
-            if checkpoint is not None:
-                self.set_meta("source_checkpoint", checkpoint)
+            self.set_meta(
+                "data_revision", self.meta("data_revision", 0) + int(modified)
+            )
         return info
 
-    def failed(self, symbols, *, target, now, message, checkpoint):
-        from datetime import timedelta
-        from .grid import wall
+    def import_legacy(self, info, bars, events, now):
+        if self.instrument(info["symbol"]) is not None:
+            return False
+        row = dict(DEFAULTS)
+        row.update({k: v for k, v in info.items() if k in COLUMNS})
+        row.update(
+            source_id=LEGACY,
+            state="REBUILD_PENDING",
+            transition="LEGACY_DISPLAY_ONLY",
+            factor_coverage="EXPLICIT" if events is not None else "MISSING",
+            updated_at=now,
+        )
+        for b in bars:
+            b.update(source=LEGACY, source_id=LEGACY)
+        row["latest_completed15"] = bars[-1]["timestamp"] if bars else None
+        row["latest_source5"] = None
+        with self.conn:
+            self._put(row)
+            self._write(row["symbol"], bars)
+            self._factors(row["symbol"], events)
+        return True
 
-        with self.transaction():
+    def failed(self, symbols, end, now, message):
+        with self.conn:
             for symbol in symbols:
                 info = self.instrument(symbol)
-                attempts = info.get("attempts", 0) + 1
-                info.update(
-                    attempts=attempts,
-                    live_attempt=target,
-                    request_error=message,
-                    retry_at=str(
-                        wall(now)
-                        + timedelta(seconds=min(3600, 60 * 2 ** min(attempts, 5)))
-                    ),
-                )
-                self.put_instrument(info)
-            self.set_meta("source_checkpoint", checkpoint)
+                if info:
+                    info.update(
+                        state=message,
+                        attempted=end,
+                        updated_at=now,
+                        next_retry=time() + 300,
+                        revision=info["revision"] + 1,
+                    )
+                    self._put(info)
+            self.set_meta("data_revision", self.meta("data_revision", 0) + 1)
 
-    def read(self, symbol, tf, asof, limit=256):
-        with self.lock:
-            info = self.instrument(symbol)
+    def read(self, symbol, tf, asof, limit=250):
+        with closing(reader(self.path)) as conn:
+            conn.execute("BEGIN")
+            info = self.instrument(symbol, conn=conn)
             if info is None:
                 return dict(
                     symbol=symbol,
@@ -381,95 +505,114 @@ class Store:
                     state="METADATA_PENDING",
                     row_count=0,
                     capacity=CAPACITY[tf],
+                    source_id=SOURCE,
                 )
-            raw = self.raw_rows(symbol, tf, asof, CAPACITY[tf])
+            sessions = self.meta("sessions", [], conn=conn)
+            raw = derived(self.raw_rows(symbol, asof, conn=conn), tf, sessions, asof)
             bars = project(
                 raw,
-                info.get("events") if info.get("factors_day") else None,
+                self.events(symbol, conn=conn),
                 asof,
-                sessions=self.meta("sessions", []),
+                sessions=sessions,
                 timeframe=tf,
             )
-            for bar in bars:
-                if bar.get("_ma_basis") == basis_key(
-                    info.get("events"), asof, info.get("basis_revision", 0)
-                ):
-                    bar.update(bar.get("_ma", {}))
-                bar.pop("_ma", None)
-                bar.pop("_ma_basis", None)
-            state = (
-                "REBUILD_PENDING"
-                if info.get("rebuild_pending")
-                else "FACTOR_PENDING"
-                if info.get("events") is None
-                else "GAP"
-                if info.get("gap_count")
-                else "READY"
-                if bars
-                else "WARMING"
-            )
-            if state in ("REBUILD_PENDING", "FACTOR_PENDING"):
-                for bar in bars:
-                    bar["valid"] = False
-                    for n in MAS:
-                        bar[f"ma{n}"] = None
             return dict(
                 symbol=symbol,
-                name=info.get("name", symbol),
+                name=info["name"],
                 timeframe=tf,
                 bars=bars[-limit:],
-                state=state,
+                state=info["state"]
+                if info["state"]
+                in (
+                    "READY",
+                    "WARMUP",
+                    "GAP",
+                    "FACTOR_PENDING",
+                    "REBUILD_PENDING",
+                    "SOURCE_DISCREPANCY",
+                    "SOURCE_UNAVAILABLE",
+                )
+                else "SOURCE_UNAVAILABLE",
+                error_code=info["state"]
+                if info["state"]
+                not in (
+                    "READY",
+                    "WARMUP",
+                    "GAP",
+                    "FACTOR_PENDING",
+                    "REBUILD_PENDING",
+                    "SOURCE_DISCREPANCY",
+                    "SOURCE_UNAVAILABLE",
+                )
+                else None,
                 row_count=len(raw),
                 capacity=CAPACITY[tf],
                 latest_completed_at=raw[-1]["timestamp"] if raw else None,
-                source_asof=info.get("source_asof"),
-                price_basis="QFQ" if info.get("events") is not None else "RAW",
-                basis_id=f"QFQ:{asof[:10]}:{info.get('basis_revision', 0)}",
-                basis_revision=info.get("basis_revision", 0),
-                revision=info.get("revision", 0),
-                raw_tick=info.get("raw_tick"),
-                asset_type=info.get("source_type"),
+                source_asof=info["updated_at"],
+                source_id=info["source_id"],
+                transition=info["transition"],
+                analysis_allowed=info["source_id"] == SOURCE
+                and info["state"] in ("READY", "WARMUP", "GAP"),
+                price_basis="QFQ" if info["factor_coverage"] == "EXPLICIT" else "RAW",
+                basis_id=f"{info['source_id']}:{asof[:10]}:{info['basis_revision']}",
+                basis_revision=info["basis_revision"],
+                factor_revision=info["factor_revision"],
+                revision=info["revision"],
+                correction=info["correction"],
+                raw_tick=info["raw_tick"],
+                asset_type=info["source_type"],
                 volume_unit="shares",
-                factor_source=info.get("factor_source"),
-                factor_coverage="EXPLICIT_SYMBOL_RESPONSE"
-                if info.get("events") is not None
-                else "UNVERIFIED",
-                gap_count=info.get("gap_count", 0),
-                gaps=info.get("gaps", []),
-                warm_count=info.get("warm_count", 0),
-                warm_target=256,
-                correction=info.get("correction", False),
-                eligible=info.get("eligible", False),
-                listing_status=info.get("listing_status", "NOT_PROVIDED"),
+                factor_source=info["source_id"] + "_EX_FACTORS",
+                factor_coverage=info["factor_coverage"],
+                gap_count=len(info["gaps"]),
+                gaps=info["gaps"],
+                warm_count=len(self.raw_rows(symbol, asof, conn=conn)),
+                warm_target=250,
+                eligible=info["eligible"],
+                listing_status=info["listing_status"],
             )
 
-    def inventory(self, symbol=None):
-        with self.lock:
-            sql = "SELECT symbol,timeframe,count(*),min(stamp),max(stamp) FROM bars"
-            rows = self.conn.execute(
-                sql
-                + (" WHERE symbol=?" if symbol else "")
-                + " GROUP BY symbol,timeframe ORDER BY symbol,timeframe",
-                [symbol] if symbol else [],
-            ).fetchall()
-            return [
-                dict(
-                    symbol=s,
-                    timeframe=tf,
-                    row_count=n,
-                    capacity=CAPACITY[tf],
-                    earliest=a,
-                    latest=b,
+    def snapshot(self):
+        with closing(reader(self.path)) as conn:
+            states = dict(
+                conn.execute(
+                    "SELECT state,count(*) FROM instrument_state WHERE eligible=1 GROUP BY state"
                 )
-                for s, tf, n, a, b in rows
+            )
+            oldest, newest, count = conn.execute(
+                "SELECT min(latest_completed15),max(latest_completed15),count(*) FROM instrument_state"
+            ).fetchone()
+            return dict(
+                data_revision=self.meta("data_revision", 0, conn=conn),
+                generation=self.meta("generation", 0, conn=conn),
+                states=states,
+                source_counts=dict(
+                    conn.execute(
+                        "SELECT source_id,count(*) FROM instrument_state WHERE eligible=1 GROUP BY source_id"
+                    )
+                ),
+                pending_symbols=sum(v for k, v in states.items() if k != "READY"),
+                oldest_15m=oldest,
+                latest_15m=newest,
+                instruments=count,
+                last_commit=self.meta("last_commit", conn=conn),
+                calendar_last=max(self.meta("sessions", [], conn=conn), default=None),
+                universe=self.meta("universe", {}, conn=conn),
+            )
+
+    def inventory(self, symbol):
+        with closing(reader(self.path)) as conn:
+            return [
+                dict(timeframe=tf, row_count=n, earliest=a, latest=b, capacity=cap)
+                for tf, table, cap in (("15m", "bar15", 250), ("5m_tail", "tail5", 2))
+                for n, a, b in [
+                    conn.execute(
+                        f"SELECT count(*),min(bar_end),max(bar_end) FROM {table} WHERE symbol=?",
+                        (symbol,),
+                    ).fetchone()
+                ]
             ]
 
-    def close(self, *, checkpoint=True):
-        with self.lock:
-            if self.conn is not None:
-                try:
-                    if checkpoint:
-                        self.conn.execute("CHECKPOINT")
-                finally:
-                    self.conn.close()
-                    self.conn = None
+    def close(self):
+        self.conn.close()
+        self.lease.close()

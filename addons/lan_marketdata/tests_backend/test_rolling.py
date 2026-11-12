@@ -1,279 +1,238 @@
+"""Synthetic exchange fixtures; no commercial data or inferred production calendars."""
+
 from datetime import date, timedelta
 from math import fsum
-from types import SimpleNamespace
+import sqlite3
 
 import pytest
-from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from addons.lan_marketdata.backend.grid import (
-    CAPACITY,
-    COUNTS,
     aggregate,
-    points,
+    as_ms,
     latest_point,
-    stamp,
+    normalize_five,
+    points,
+    wall,
 )
 from addons.lan_marketdata.backend.store import Store
-from addons.lan_marketdata.backend.lease import ProcessLease
-from addons.lan_marketdata.backend.runtime import task, classify
-from addons.lan_marketdata.backend import extension
 
 
-def days(n):
-    result = []
-    d = date(2024, 1, 2)
-    while len(result) < n:
-        if d.weekday() < 5:
-            result.append(str(d))
-        d += timedelta(days=1)
-    return result
-
-
-def source(sessions):
-    return {
+def sample(count=250):
+    days = []
+    day = date(2026, 1, 5)
+    while len(days) < (count + 15) // 16 + 1:
+        if day.weekday() < 5:
+            days.append(str(day))
+        day += timedelta(days=1)
+    stamps = points(days, days[0], days[-1] + " 15:00:00")[: count * 3]
+    rows = {
         t: dict(
-            open=10 + i / 1000,
-            high=12 + i / 1000,
-            low=9 + i / 1000,
-            close=11 + i / 1000,
-            volume=100 + i,
-            amount=None,
+            open=10 + i / 10000,
+            high=10.1 + i / 10000,
+            low=9.9 + i / 10000,
+            close=10.02 + i / 10000,
+            volume=1000 + i,
+            amount=(1000 + i) * (10.02 + i / 10000),
         )
-        for i, t in enumerate(points(sessions, sessions[0], sessions[-1] + " 15:00:00"))
+        for i, t in enumerate(stamps)
     }
+    return days, rows
 
 
-def seed(store, sessions, symbol="600000.SH"):
+def opened(tmp_path, sessions):
+    store = Store(tmp_path / "rolling15.sqlite3")
     store.save_master(
         [
             dict(
-                symbol=symbol,
-                name=symbol,
-                source_type="stock",
-                raw_tick=0.01,
+                symbol="600000.SH",
+                name="Synthetic",
                 eligible=True,
+                raw_tick=0.01,
+                source_type="stock",
             )
         ],
-        dict(expected=1),
+        {"expected": 1},
         sessions,
     )
+    return store
 
 
-def test_real_bucket_ohlcv_lunch_day_gaps_and_completion():
-    sessions = days(2)
-    raw = source(sessions)
-    frames = aggregate(raw, sessions, max(raw))
-    assert {tf: len(frames[tf]) for tf in COUNTS if tf in frames} == {
-        "5m": 96,
-        "15m": 32,
-        "30m": 16,
-        "60m": 8,
-        "120m": 4,
-        "daily": 2,
-    }
-    for tf in ("15m", "30m", "60m", "120m", "daily"):
-        bar = frames[tf][0]
-        parts = list(raw.values())[: COUNTS[tf]]
-        assert bar["open"] == parts[0]["open"] and bar["close"] == parts[-1]["close"]
-        assert bar["high"] == max(r["high"] for r in parts) and bar["low"] == min(
-            r["low"] for r in parts
-        )
-        assert (
-            bar["volume"] == fsum(r["volume"] for r in parts)
-            and bar["source_count"] == COUNTS[tf]
-        )
-    partial = aggregate(raw, sessions, sessions[-1] + " 14:59:00")
-    assert len(partial["daily"]) == 1 and len(partial["120m"]) == 3
-    del raw[stamp(sessions[-1], 580)]
-    broken = aggregate(raw, sessions, max(raw))
-    assert (
-        len(broken["15m"]) == 31
-        and len(broken["60m"]) == 7
-        and len(broken["daily"]) == 1
-    )
-    assert all(
-        b["timestamp"][11:16] not in ("12:00", "13:00")
-        for rows in broken.values()
-        for b in rows
-    )
-
-
-def test_every_persisted_window_rolls_restarts_and_ma233_survives(tmp_path):
-    sessions = days(530)
-    path = tmp_path / "rolling.duckdb"
-    store = Store(path)
-    seed(store, sessions)
-    for offset in range(0, len(sessions), 80):
-        page = sessions[offset : offset + 80]
-        raw = source(page)
-        store.accept(
-            "600000.SH",
-            raw,
-            sessions=sessions,
-            start=min(raw),
-            end=max(raw),
-            now=max(raw),
-            events=[],
-            factor_response=True,
-        )
-        assert all(r["row_count"] <= r["capacity"] for r in store.inventory())
-    counts = {r["timeframe"]: r["row_count"] for r in store.inventory()}
-    assert counts == CAPACITY
-    before = store.read("600000.SH", "60m", sessions[-1] + " 15:00:00")
-    assert before["bars"][-1]["ma233"] is not None
-    assert before["bars"][-1]["ma233"] == pytest.approx(
-        fsum(b["close"] for b in before["bars"][-233:]) / 233
-    )
-    store.close()
-    store = Store(path)
-    assert store.read("600000.SH", "60m", sessions[-1] + " 15:00:00") == before
-    assert all(r["row_count"] <= r["capacity"] for r in store.inventory())
-    store.close()
-
-
-def test_factor_pending_event_chain_tick_shares_and_asof(tmp_path):
-    sessions = days(2)
-    store = Store(tmp_path / "r.duckdb")
-    seed(store, sessions)
-    raw = source(sessions)
-    store.accept(
-        "600000.SH", raw, sessions=sessions, start=min(raw), end=max(raw), now=max(raw)
-    )
-    assert store.read("600000.SH", "15m", max(raw))["state"] == "FACTOR_PENDING"
-    events = [dict(day=sessions[-1], ex_factor=2)]
-    store.accept(
+def put(store, rows, sessions, **kw):
+    return store.accept(
         "600000.SH",
-        {},
+        rows,
         sessions=sessions,
-        start=max(raw),
-        end=max(raw),
-        now=max(raw),
-        events=events,
+        start=min(rows),
+        end=max(rows),
+        now=max(rows),
+        events=[],
         factor_response=True,
+        **kw,
     )
-    read = store.read("600000.SH", "15m", max(raw))
-    assert (
-        read["bars"][0]["adjust_factor"] == 0.5
-        and read["bars"][-1]["adjust_factor"] == 1
-    )
-    assert read["raw_tick"] == 0.01 and read["volume_unit"] == "shares"
-    historical = store.read("600000.SH", "15m", sessions[0] + " 15:00:00")
-    assert (
-        historical["bars"][0]["adjust_factor"] == 1
-    )  # later event cannot leak into historical asof
-    store.close()
-
-
-def test_single_writer_lease_and_rolled_back_receipt(tmp_path, monkeypatch):
-    lease = ProcessLease(tmp_path / "writer.lock")
-    with pytest.raises(RuntimeError):
-        ProcessLease(tmp_path / "writer.lock")
-    lease.close()
-    sessions = days(2)
-    store = Store(tmp_path / "r.duckdb")
-    seed(store, sessions)
-    raw = source(sessions)
-    monkeypatch.setattr(
-        store, "_write", lambda *a: (_ for _ in ()).throw(OSError("disk boundary"))
-    )
-    with pytest.raises(OSError):
-        store.accept(
-            "600000.SH",
-            raw,
-            sessions=sessions,
-            start=min(raw),
-            end=max(raw),
-            now=max(raw),
-        )
-    assert not store.inventory() and not store.instrument("600000.SH").get("latest5")
-    store.close()
-
-
-def test_full_market_sweep_is_independent_of_ui_and_precedes_warmup():
-    sessions = days(70)
-    target = sessions[-1] + " 15:00:00"
-    master = {
-        f"{i:06}.SZ": dict(
-            eligible=True,
-            cold_done=True,
-            warm_count=0,
-            latest5=target,
-            live_attempt=target,
-        )
-        for i in range(5101)
-    }
-    master["000090.SZ"]["latest5"] = sessions[-2] + " 15:00:00"
-    master["000090.SZ"]["live_attempt"] = ""
-    work = task(master, sessions, target, target, {"000001.SZ"})
-    assert work[2] == "LIVE" and work[3] == ["000090.SZ"]
-    master["000090.SZ"]["latest5"] = target
-    assert task(master, sessions, target, target, {"000001.SZ"})[2] == "WARM"
-    candidates = {s: s for s in ("600000.SH", "588170.SH", "920001.BJ")}
-    metadata = {
-        s: dict(
-            type="etf" if s == "588170.SH" else "stock",
-            region="CN",
-            exchange=s[-2:],
-            ext={"tick_size": 0.001 if s == "588170.SH" else 0.01},
-        )
-        for s in candidates
-    }
-    rows, overview = classify(candidates, metadata, {"600000.SH"}, sessions[-1])
-    assert (
-        overview["expected"] == 2
-        and next(r for r in rows if r["symbol"] == "588170.SH")["raw_tick"] == 0.001
-    )
-
-
-def test_read_only_versioned_api_bounds_startup_and_errors(tmp_path, monkeypatch):
-    app = FastAPI()
-    extension.setup(SimpleNamespace(include_router=app.include_router))
-    monkeypatch.setattr(extension, "worker", None)
-    client = TestClient(app)
-    assert client.get("/api/extensions/lan.marketdata/v1/universe").status_code == 503
-    sessions = ["2026-11-05", "2026-11-06"]
-    store = Store(tmp_path / "r.duckdb")
-    seed(store, sessions)
-    fake = SimpleNamespace(
-        store=store,
-        demand=lambda s: None,
-        status=lambda: dict(api_version=1, phase="READY"),
-    )
-    monkeypatch.setattr(extension, "worker", fake)
-    assert (
-        client.get(
-            "/api/extensions/lan.marketdata/v1/bars",
-            params={"symbols": "600000.SH", "timeframes": "15m"},
-        ).json()["api_version"]
-        == 1
-    )
-    for params in [
-        dict(symbols="600000"),
-        dict(symbols="600000.SH", timeframes="1m"),
-        dict(symbols=",".join(f"{i:06}.SZ" for i in range(32)), timeframes="15m,60m"),
-    ]:
-        assert (
-            client.get(
-                "/api/extensions/lan.marketdata/v1/bars", params=params
-            ).status_code
-            == 422
-        )
-    assert (
-        client.post("/api/extensions/lan.marketdata/v1/bars", json={}).status_code
-        == 405
-    )
-    store.close()
 
 
 @pytest.mark.parametrize(
-    "now,expected",
-    [
-        ("2026-11-08 12:00:00", "2026-11-06 15:00:00"),
-        ("2026-11-09 09:35:59", "2026-11-06 15:00:00"),
-        ("2026-11-09 09:36:00", "2026-11-09 09:35:00"),
-        ("2026-11-09 12:00:00", "2026-11-09 11:30:00"),
-    ],
+    "count,values", [(232, 0), (233, 1), (250, 18), (251, 18), (1000, 18)]
 )
-def test_completion_margin_weekend_and_lunch(now, expected):
-    assert latest_point(["2026-11-06", "2026-11-09"], now) == expected
+def test_retention_and_real_ma233(tmp_path, count, values):
+    sessions, rows = sample(count)
+    store = opened(tmp_path, sessions)
+    try:
+        put(store, rows, sessions)
+        frame = store.read("600000.SH", "15m", max(rows))
+        assert frame["row_count"] == min(250, count)
+        assert sum(b["ma233"] is not None for b in frame["bars"]) == values
+        if values:
+            closes = [b["close"] for b in frame["bars"]]
+            assert frame["bars"][-1]["ma233"] == fsum(closes[-233:]) / 233
+        assert store.conn.execute("SELECT count(*) FROM tail5").fetchone()[0] <= 2
+        assert set(
+            r[0]
+            for r in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        ) == {"meta", "instrument_state", "bar15", "tail5", "factor_event"}
+        for tf, maximum in (("30m", 125), ("60m", 62)):
+            bars = store.read("600000.SH", tf, max(rows))["bars"]
+            assert len(bars) <= maximum
+            assert all(b["ma233"] is None for b in bars)
+            assert all(b["source_count"] == int(tf[:-1]) // 5 for b in bars)
+    finally:
+        store.close()
+
+
+def test_session_labels_holiday_timezone_and_missing_five():
+    sessions = ["2026-09-30", "2026-10-09"]
+    assert latest_point(sessions, "2026-10-01 14:00:00") == "2026-09-30 15:00:00"
+    assert latest_point(sessions, "2026-10-09T01:46:15+00:00") == "2026-10-09 09:45:00"
+    assert latest_point(sessions, "2026-10-09 13:15:30") == "2026-10-09 11:30:00"
+    assert latest_point(sessions, "2026-10-09 13:16:15") == "2026-10-09 13:15:00"
+    assert latest_point(sessions, "2026-10-09 15:01:15") == "2026-10-09 15:00:00"
+    assert str(wall("2026-10-08T16:00:00Z")) == "2026-10-09 00:00:00"
+    days, rows = sample(2)
+    del rows[next(iter(rows))]
+    assert len(aggregate(rows, days, max(rows))["15m"]) == 1
+    assert aggregate(rows, [], max(rows))["15m"] == []
+
+
+def test_compact_units_auction_and_duplicate_conflict():
+    at = "2026-11-11 09:35:00"
+    data = dict(
+        timestamp=[as_ms(at)],
+        open=[10],
+        high=[11],
+        low=[9],
+        close=[10],
+        volume=[2],
+        amount=[2000],
+    )
+    assert normalize_five(data, at, at)[0][at]["volume"] == 200
+    data["timestamp"] = [as_ms("2026-11-11 09:30:00")]
+    with pytest.raises(ValueError, match="NON_COMPLETED"):
+        normalize_five(data, "2026-11-11 09:30:00", at)
+    data.update(
+        timestamp=[as_ms(at)] * 2,
+        open=[10, 10],
+        high=[11, 11],
+        low=[9, 9],
+        close=[10, 11],
+        volume=[2, 2],
+        amount=[2000, 2200],
+    )
+    with pytest.raises(ValueError, match="CONFLICTING"):
+        normalize_five(data, at, at)
+
+
+def test_gap_correction_factor_reprojection_and_short_tail(tmp_path):
+    sessions, rows = sample(250)
+    store = opened(tmp_path, sessions)
+    try:
+        missing = dict(rows)
+        removed = list(rows)[-2]
+        del missing[removed]
+        put(store, missing, sessions)
+        assert store.read("600000.SH", "15m", max(rows))["state"] == "GAP"
+        assert store.conn.execute("SELECT count(*) FROM tail5").fetchone()[0] == 2
+        put(store, {t: rows[t] for t in list(rows)[-3:]}, sessions)
+        assert store.read("600000.SH", "15m", max(rows))["row_count"] == 250
+        changed = {t: dict(rows[t], high=12) for t in list(rows)[-3:]}
+        put(store, changed, sessions)
+        out = store.read("600000.SH", "15m", max(rows))
+        assert out["correction"] and out["bars"][-1]["high"] == 12
+        event = [{"day": sessions[-1], "ex_factor": 2}]
+        store.accept(
+            "600000.SH",
+            changed,
+            sessions=sessions,
+            start=min(changed),
+            end=max(changed),
+            now=max(rows),
+            events=event,
+            factor_response=True,
+        )
+        out = store.read("600000.SH", "15m", sessions[-1] + " 15:00:00")
+        assert out["bars"][0]["adjust_factor"] == 0.5
+        store.accept(
+            "600000.SH",
+            changed,
+            sessions=sessions,
+            start=min(changed),
+            end=max(changed),
+            now=max(rows),
+            events=None,
+            factor_response=True,
+        )
+        assert all(
+            b["ma233"] is None
+            for b in store.read("600000.SH", "15m", max(rows))["bars"]
+        )
+    finally:
+        store.close()
+
+
+def test_commit_failure_keeps_bars_and_receipt(tmp_path, monkeypatch):
+    sessions, rows = sample(60)
+    store = opened(tmp_path, sessions)
+    try:
+        put(store, rows, sessions)
+        before = store.instrument("600000.SH")
+
+        def fail(symbol, bars):
+            raise sqlite3.OperationalError("synthetic disk failure")
+
+        monkeypatch.setattr(store, "_write", fail)
+        with pytest.raises(sqlite3.OperationalError):
+            put(store, rows, sessions)
+        assert store.instrument("600000.SH") == before
+        assert store.read("600000.SH", "15m", max(rows))["row_count"] == 60
+    finally:
+        store.close()
+
+
+def test_bad_vendor_bar_is_a_gap_not_a_fabricated_complete_bucket(tmp_path):
+    sessions, rows = sample(250)
+    stamps = list(rows)
+    compact = dict(
+        timestamp=[as_ms(t) for t in stamps],
+        **{
+            k: [row[k] / 100 if k == "volume" else row[k] for row in rows.values()]
+            for k in ("open", "high", "low", "close", "volume", "amount")
+        },
+    )
+    compact["high"][250] = 1
+    valid, invalid = normalize_five(compact, min(rows), max(rows))
+    assert invalid == [stamps[250]] and len(valid) == 749
+    store = opened(tmp_path, sessions)
+    try:
+        put(store, valid, sessions)
+        before = store.instrument("600000.SH")
+        assert store.read("600000.SH", "15m", max(rows))["row_count"] == 249
+        assert store.read("600000.SH", "15m", max(rows))["state"] == "GAP"
+        group = {t: rows[t] for t in stamps[249:252]}
+        put(store, group, sessions)
+        assert (
+            store.instrument("600000.SH")["latest_source5"] == before["latest_source5"]
+        )
+        assert store.read("600000.SH", "15m", max(rows))["row_count"] == 250
+    finally:
+        store.close()

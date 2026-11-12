@@ -80,11 +80,13 @@ def test_v5_history_revision4_schema1_replay_and_restart(tmp_path, scenarios):
             )
             == []
         )
-        assert store.conn.execute("SELECT count(*) FROM recent_bar").fetchone()[0] == 0
-        assert (
-            store.conn.execute("SELECT count(*) FROM collection_journal").fetchone()[0]
-            == 0
-        )
+        tables = {
+            r[0]
+            for r in store.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+        assert "recent_bar" not in tables and "collection_journal" not in tables
     with SharedStore(path) as store:
         assert [
             tuple(r) for r in store.conn.execute("SELECT * FROM signal_event")
@@ -200,3 +202,115 @@ def test_private_tuowei_real_5m_replay_r1_first_red_and_rolling_restart(tmp_path
         if bar["timestamp"] == "2026-11-04 11:30:00":
             assert not added
     assert STATE_REVISION == 4 and RULE_VERSION.endswith("_V5_R1")
+
+
+def test_supplier_pending_keeps_old_lock_and_other_stock_can_confirm(
+    tmp_path, scenarios
+):
+    case = scenarios["single"]
+    end = case["bars"][-1]["timestamp"]
+    symbol = "600000.SH"
+    prior, _ = process_symbol(
+        symbol,
+        case["bars"],
+        sessions=case["sessions"],
+        raw_tick=0.01,
+        source_asof=end,
+        first_seen_at=end,
+    )
+    old_structure = deepcopy(prior["state"]["structure"])
+    with SharedStore(tmp_path / "s.sqlite3") as store:
+        store.source_master(
+            [
+                dict(symbol=symbol, eligible=True),
+                dict(symbol="000001.SZ", eligible=True),
+            ],
+            dict(expected=2),
+            1,
+        )
+        store.save([prior], {symbol: "valid"}, store.new_cycle(end, 2, end, "REPLAY"))
+        old = [
+            tuple(r)
+            for r in store.conn.execute(
+                "SELECT * FROM signal_event WHERE symbol=?", (symbol,)
+            )
+        ]
+        unavailable = packet(case, revision=2)
+        unavailable.update(
+            source_id="TICKFLOW_RAW_5M",
+            state="FACTOR_PENDING",
+            analysis_allowed=False,
+            price_basis="RAW",
+        )
+        good = dict(
+            packet(case),
+            symbol="000001.SZ",
+            source_id="TICKFLOW_RAW_5M",
+            analysis_allowed=True,
+        )
+        store.consume(
+            [unavailable, good],
+            sessions=case["sessions"],
+            target=end,
+            now=end,
+            live_after=end,
+        )
+        saved = store.records([symbol])[0][symbol]
+        assert saved["state"]["structure"] == old_structure
+        assert [
+            tuple(r)
+            for r in store.conn.execute(
+                "SELECT * FROM signal_event WHERE symbol=?", (symbol,)
+            )
+        ] == old
+        assert (
+            store.conn.execute(
+                "SELECT count(*) FROM signal_event WHERE symbol='000001.SZ'"
+            ).fetchone()[0]
+            > 0
+        )
+
+
+def test_verified_source_change_preserves_causal_memory_and_receipt(
+    tmp_path, scenarios
+):
+    case = scenarios["single"]
+    end = case["bars"][-1]["timestamp"]
+    symbol = "600000.SH"
+    prior, _ = process_symbol(
+        symbol,
+        case["bars"],
+        sessions=case["sessions"],
+        raw_tick=0.01,
+        source_asof=end,
+        first_seen_at=end,
+    )
+    with SharedStore(tmp_path / "s.sqlite3") as store:
+        store.source_master([dict(symbol=symbol, eligible=True)], dict(expected=1), 1)
+        prior["state"].update(
+            shared_source_id="QUANTDASH_LEGACY", source_basis_revision=0
+        )
+        store.save([prior], {symbol: "valid"}, store.new_cycle(end, 1, end, "REPLAY"))
+        incoming = dict(
+            packet(case),
+            source_id="TICKFLOW_RAW_5M",
+            transition="OVERLAP_VERIFIED",
+            basis_revision=1,
+            analysis_allowed=True,
+        )
+        store.consume(
+            [incoming], sessions=case["sessions"], target=end, now=end, live_after=end
+        )
+        current = store.records([symbol])[0][symbol]["state"]
+        for key in ("structure", "feature_history", "slot_volumes", "sequence"):
+            assert current[key] == prior["state"][key]
+        assert (
+            store.consume(
+                [incoming],
+                sessions=case["sessions"],
+                target=end,
+                now=end,
+                live_after=end,
+            )
+            == []
+        )

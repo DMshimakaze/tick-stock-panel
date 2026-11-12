@@ -6,12 +6,19 @@ from threading import Event, Lock, Thread
 from time import monotonic
 import httpx
 
-from .market import now_cn
+from datetime import datetime, timedelta, timezone
+
 from .market_client import Client
 from .result_publisher import Publisher
-from .shared_store import SharedStore
+from .shared_store import SharedStore, source_receipt
 from .engine import RULE_VERSION
 from .worker_lease import ProcessLease
+
+
+def now_cn():
+    return datetime.now(timezone(timedelta(hours=8))).replace(
+        tzinfo=None, microsecond=0
+    )
 
 
 class Worker:
@@ -25,8 +32,8 @@ class Worker:
             backend_scanning=True,
             rule_version=RULE_VERSION,
             state_revision=4,
-            version="0.3.3",
-            source="lan.marketdata HTTP v1",
+            version="0.4.0",
+            source="lan.marketdata HTTP v2",
             error=None,
             started_at=str(now_cn()),
             minute_request_limit=0,
@@ -73,10 +80,19 @@ class Worker:
         last_history = 0
         last_status = 0
         historical_dates = []
+        observed_revision = None
         try:
             with SharedStore(self.folder / "state.sqlite3") as store:
                 while not self.stop.is_set():
                     try:
+                        source_status = self.source.status()
+                        data_revision = source_status.get("data_revision")
+                        if (
+                            data_revision is not None
+                            and data_revision == observed_revision
+                        ):
+                            self.stop.wait(5)
+                            continue
                         first = self.source.universe()
                         if first["total"] == 0 or not first.get("latest_completed_at"):
                             raise ValueError(
@@ -121,14 +137,7 @@ class Worker:
                         changed = [
                             r["symbol"]
                             for r in eligible
-                            if receipts.get(r["symbol"])
-                            != [
-                                r.get("revision", 0),
-                                r.get("basis_revision", 0),
-                                target,
-                                RULE_VERSION,
-                                4,
-                            ]
+                            if receipts.get(r["symbol"]) != source_receipt(r, target)
                         ]
                         for offset in range(0, len(changed), 24):
                             if self.stop.is_set():
@@ -165,8 +174,16 @@ class Worker:
                         )
                         self.report(**summary, phase="WAITING", source_asof=target)
                         self.publish_status()
+                        observed_revision = first.get("data_revision")
+                        self.report(
+                            requests={
+                                "http_requests": self.source.requests,
+                                "minute_requests": 0,
+                                "period_1m": 0,
+                            }
+                        )
                         failures = 0
-                        self.stop.wait(10)
+                        self.stop.wait(5)
                     except (httpx.HTTPError, ValueError) as exc:
                         failures += 1
                         status = (

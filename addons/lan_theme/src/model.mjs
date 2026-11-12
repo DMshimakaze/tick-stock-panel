@@ -113,6 +113,12 @@ export function workbenchLink(symbol,event) {
   for(const [source,key] of [['confirmed_at','event'],['setup_at','setup']]) if(event?.[source]) params.set(key,event[source].replace(' ','T'));
   if(event?.defense>0) params.set('defense',String(event.defense));
   if(event?.adjust_factor>0) params.set('factor',String(event.adjust_factor));
+  if (event?.event_id) params.set('event_id', event.event_id);
+  if (event) params.set('source', event.source_id || 'QUANTDASH_LEGACY');
+  if (event?.basis_id) params.set('basis_id', event.basis_id);
+  if (event?.factor_revision !== undefined) params.set('factor_revision', String(event.factor_revision));
+  if (event?.basis_revision !== undefined) params.set('basis_revision', String(event.basis_revision));
+  if (event?.risk_text) params.set('risk', event.risk_text);
   return '/lan-kline?'+params;
 }
 

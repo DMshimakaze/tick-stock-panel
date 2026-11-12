@@ -7,8 +7,8 @@ import re
 import threading
 import time
 
-QUANTDASH_REQUESTS_PER_MINUTE = 24
-QUANTDASH_RETRY_MARGIN = 1.0
+REQUESTS_PER_MINUTE = 8
+RETRY_MARGIN = 1.0
 
 
 class CollectionStopped(Exception):
@@ -24,7 +24,7 @@ class RequestDeferred(Exception):
 
 
 class RollingBudget:
-    def __init__(self, limit=QUANTDASH_REQUESTS_PER_MINUTE, clock=time.monotonic):
+    def __init__(self, limit=REQUESTS_PER_MINUTE, clock=time.monotonic):
         self.limit = limit
         self.clock = clock
         self.sent = deque()
@@ -102,6 +102,6 @@ def retry_seconds(exc=None, header=None, now=None):
 
 def rate_limit_delay(exc, header, attempt):
     return max(
-        retry_seconds(exc, header) + QUANTDASH_RETRY_MARGIN,
+        retry_seconds(exc, header) + RETRY_MARGIN,
         min(300, 2 ** min(attempt, 9)),
     )
