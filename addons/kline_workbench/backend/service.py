@@ -18,7 +18,7 @@ class Worker:
         self.settings = settings
         self.stop, self.lock = Event(), Lock()
         self.state = dict(
-            version="3.1.0",
+            version="3.1.1",
             phase="STARTING",
             source="lan.ma55 HTTP v1",
             minute_request_limit=0,

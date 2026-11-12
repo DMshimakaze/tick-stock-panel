@@ -1,5 +1,6 @@
-// Values read from the native FinancialPlot and CHART_COLORS in v0.3.32.
+// Values match the native FinancialPlot and chartTheme in v0.3.36.
 export const UP='#C74040', DOWN='#2D9B65';
+export const MA_PERIODS=[5,10,20,30,55,233];
 export const MA_COLORS=['#F59E0B','#8B5CF6','#3B82F6','#EC4899','#F97316','#14B8A6'];
 export function watchTheme(el, apply) {
   const doc=el.ownerDocument, win=doc.defaultView;

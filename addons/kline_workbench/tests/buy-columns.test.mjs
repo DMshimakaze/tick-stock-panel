@@ -28,8 +28,25 @@ test('public primitive follows pan, zoom, pixel ratio and pane height every draw
   primitive.detached(); assert.equal(primitive.chart,null);
 });
 
-test('chart contains no moving-average line creation path', async () => {
+test('chart restores MA LineSeries while BUY coloring is attached only to price candles', async () => {
   const source=await readFile(new URL('../src/chart.mjs',import.meta.url),'utf8');
-  assert.doesNotMatch(source,/LineSeries|withLineBreaks|maColors/);
-  assert.match(source,/attachPrimitive/);
+  assert.match(source,/chart\.addSeries\(LineSeries/);
+  assert.match(source,/candles\.attachPrimitive\(priceColumns\)/);
+  assert.doesNotMatch(source,/volume\.attachPrimitive|createSeriesMarkers|createPriceLine|MA55防守/);
+});
+
+test('off-axis columns skip missing coordinates and keep the same soft color after theme and size changes',()=>{
+ const primitive=new BuyColumns(),rects=[];
+ let spacing=8,offset=0;
+ primitive.attached({chart:{timeScale:()=>({options:()=>({barSpacing:spacing}),timeToCoordinate:t=>t===2?null:t*spacing+offset})},requestUpdate(){}});
+ primitive.setTimes([1,2,1]);
+ for(const background of ['#09090b','#ffffff']){
+  const context={background,save(){},restore(){},fillRect(...rect){rects.push(rect);}};
+  primitive.draw({useBitmapCoordinateSpace:fn=>fn({context,horizontalPixelRatio:1.5,bitmapSize:{height:180}})});
+  assert.equal(context.fillStyle,'#ff7383');assert.equal(context.globalAlpha,.08);
+ }
+ assert.deepEqual(rects,[[6,0,12,180],[6,0,12,180]]);
+ spacing=12;offset=-6;rects.length=0;
+ primitive.draw({useBitmapCoordinateSpace:fn=>fn({context:{save(){},restore(){},fillRect(...r){rects.push(r);}},horizontalPixelRatio:2,bitmapSize:{height:300}})});
+ assert.deepEqual(rects,[[0,0,24,300]]);
 });

@@ -1,4 +1,4 @@
-// All page IO uses the public Page SDK; saved bars and MAs come from lan.marketdata.
+// All page IO uses the public Page SDK; saved bars and MAs come from lan.ma55.
 import { epoch, stamp } from './aggregate.mjs';
 export const DEMAND = 'lan_kline_demand', VIEW = 'lan_kline_view', SLOTS = 16, LEASE_MS = 90000;
 export const fullSymbol = text => /^\d{6}\.(SH|SZ|BJ)$/.test(text.trim().toUpperCase()) ? text.trim().toUpperCase() : null;
@@ -28,9 +28,17 @@ export function savedSeries(data, period) {
   return {bars,continuous,validCount:rows.length,gaps:bars.filter(b=>!b.complete).length,
     dataAsOf:last,dates:[...new Set(rows.map(r=>r.timestamp.slice(0,10)))]};
 }
-export function savedAverages(bars, periods) {
-  return new Map(periods.map(n=>[n,bars.map(b=>Number.isFinite(b['ma'+n]) && b.complete?
-    {time:b.time,value:b['ma'+n]}:{time:b.time})]));
+export function savedAverages(bars, periods, timeframe='15m') {
+  const step=Number(timeframe.slice(0,-1))*60;
+  return new Map(periods.map(n=>{
+    const points=bars.map(b=>Number.isFinite(b['ma'+n]) && b.complete?
+      {time:b.time,value:b['ma'+n]}:{time:b.time});
+    // LWC skips whitespace when joining line points. Color the outgoing segment
+    // transparent across missing values and session breaks, keeping real times.
+    for(let i=0;i<points.length-1;i++) if(points[i].value!==undefined &&
+      (points[i+1].value===undefined || points[i+1].time-points[i].time>step)) points[i].color='transparent';
+    return [n,points];
+  }));
 }
 export function createReader(api, { clientId = globalThis.crypto.randomUUID(), clock = Date.now } = {}) {
   let current = null, scope = null, generation = 0, lastDemand = 0, lastRevision = null, disposed = false;
