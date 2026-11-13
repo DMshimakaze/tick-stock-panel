@@ -81,7 +81,7 @@ export function mountResults(el, ctx) {
       const q=quote(row);
       return q && q.bar_end?.slice(0,10)===model.date && Number.isFinite(q.price) && q.price>0 ? q.price.toLocaleString('zh-CN',{minimumFractionDigits:q.asset_type==='etf'?3:2,maximumFractionDigits:q.asset_type==='etf'?3:2}) : '—';
     };
-    root.innerHTML = `<style>${CSS}</style>${renderStatus(s,busy,model.error)}
+    root.innerHTML = `<style>${CSS}</style>${renderStatus(s,busy,model.error,model.runtimeDetails)}
       <div class="mr-tools"><label>交易日 <select aria-label="结果交易日" data-control="date">${dates.map(day => `<option ${model.date===day?'selected':''}>${esc(day)}</option>`).join('') || '<option>等待历史</option>'}</select></label><button data-action="latest">最新</button><input aria-label="证券搜索" data-control="query" value="${esc(model.query)}" placeholder="名称 / 代码"><button data-action="search">搜索</button>${model.query?'<button data-action="clear">清除</button>':''}</div>
       <h2>${model.date===s.market_date?'最新交易日':!model.pinned && s.pending_publish?'上次有效交易日':'历史交易日'} ${esc(model.date||'待确认')} · ${model.dayInfo?.ready?`${buyCount} BUY`:'发布中'}${s.pending_publish && !model.pinned?' · 新结果正在发布':''}</h2>
       <div class="mr-tabs">${[['buy','BUY'],['watch','观察中'],['history','历史确认']].map(([key,label])=>`<button data-action="tab" data-tab="${key}" class="${model.tab===key?'active':''}">${label}</button>`).join('')}</div>
@@ -152,7 +152,7 @@ export function mountResults(el, ctx) {
     if (e.target.dataset.control === 'date') { model.date = e.target.value; model.pinned = true; model.page = 0; model.selected = null; model.rows = []; model.dayInfo = null; model.loading = true; void refresh(true); }
   };
     const key = e => { if ((e.key==='Enter'||e.key===' ') && e.target.matches('[data-row]')) { e.preventDefault(); e.target.querySelector('[data-stock-link]').click(); return; } if (e.key === 'Enter' && e.target.dataset.control === 'query') { model.page = 0; render(); } };
-  const toggle = e => { if(e.target.classList?.contains('mr-diagnostics')) model.diagnostics=e.target.open; };
+  const toggle = e => { if(e.target.classList?.contains('mr-diagnostics')) model.diagnostics=e.target.open; if(e.target.classList?.contains('mr-runtime-detail')) model.runtimeDetails=e.target.open; };
   root.addEventListener('toggle',toggle,true);
   root.addEventListener('click', click); root.addEventListener('input', input); root.addEventListener('change', change); root.addEventListener('keydown', key);
   render(); void refresh();

@@ -91,7 +91,7 @@ def test_retention_and_real_ma233(tmp_path, count, values):
             for r in store.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
-        ) == {"meta", "instrument_state", "bar15", "tail5", "factor_event", "ma_history_progress"}
+        ) == {"meta", "instrument_state", "bar15", "tail5", "factor_event", "ma_history_progress", "chart_cache"}
         for tf, maximum in (("30m", 125), ("60m", 62)):
             bars = store.read("600000.SH", tf, max(rows))["bars"]
             assert len(bars) <= maximum

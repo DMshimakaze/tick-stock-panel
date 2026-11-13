@@ -126,12 +126,13 @@ class Worker:
         self.stop, self.lock = Event(), Lock()
         self.store = self.owner = self.collector = None
         self.demands = {}
+        self.cache_demands = {}
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(
             int(settings.get("cold_requests_per_minute", 2))
         )
         self.state = dict(
-            version="0.7.3",
+            version="0.8.2",
             api_version=1,
             phase="STARTING",
             active_operation="IDLE",
@@ -187,6 +188,12 @@ class Worker:
             for symbol in symbols:
                 if symbol in self.demands or len(self.demands) < 64:
                     self.demands[symbol] = monotonic()
+
+    def demand_cache(self, symbols):
+        with self.lock:
+            for symbol in symbols:
+                if len(self.cache_demands) < 64:
+                    self.cache_demands[symbol] = monotonic()
 
     def report(self, **values):
         with self.lock:
@@ -453,6 +460,14 @@ class Worker:
                             if s in scope or s in demanded
                         }
                     work = task(master, sessions, target, now, demanded)
+                    # New completed data wins. Chart demand only rebuilds saved
+                    # facts; it cannot enqueue commercial history requests.
+                    if not work or work[2] != "LIVE":
+                        with self.lock:
+                            cache_symbols = list(self.cache_demands)[:8]
+                            for symbol in cache_symbols:
+                                self.cache_demands.pop(symbol, None)
+                        self.store.warm_cache(cache_symbols)
                     # Live completed buckets always win. An already warm chart's
                     # requested lookback precedes the general cold backlog.
                     if not work or work[2] == "COLD":

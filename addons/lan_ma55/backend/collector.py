@@ -66,7 +66,7 @@ class Collector:
             raise RequestDeferred(monotonic() + 10)
         minute = (
             request.url.path.endswith("/klines/batch")
-            and request.url.params.get("period") == "5m"
+            and request.url.params.get("period") in ("1m", "5m", "10m", "15m", "30m", "60m")
         )
         budget = self.budgets["minute" if minute else "metadata"]
         delay = budget.delay()
@@ -278,3 +278,18 @@ class Collector:
 
     def close(self):
         self.tf.close()
+
+    def native15_shadow(self, symbols, start, end, *, count=1280):
+        """Explicit bounded experiment; never called by the production scheduler."""
+        from .native15_shadow import normalize_native
+
+        if not 1 <= len(symbols) <= 8 or not 1 <= count <= 1280:
+            raise ValueError("Native shadow limited to 8 symbols and 1280 bars")
+        data = self.request(lambda: self.tf.klines.batch(
+            symbols, period="15m", adjust="none", start_time=as_ms(start),
+            end_time=as_ms(end), count=count, as_dataframe=False,
+            batch_size=100, max_workers=1, show_progress=False,
+        ))
+        if set(data) - set(symbols):
+            raise ValueError("UNREQUESTED_SYMBOL")
+        return {s: normalize_native(data[s], start, end) for s in symbols if s in data}

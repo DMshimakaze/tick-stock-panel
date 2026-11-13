@@ -14,12 +14,14 @@ const base={phase:'LIVE',active_operation:'COLLECTING_5M',sync_mode:'LIVE_CATCHU
   refresh:{refreshed:9,expected:20},analysis:{calculated:6,expected:20},
   latest_day_buy_count:4,latest_buy_date:'2026-11-13'};
 
-test('published independent facts produce six KPIs and two exact progress values',()=>{
+test('published independent facts produce five colored KPIs and two in-card progress values',()=>{
   const dom=new JSDOM(renderStatus(base));
   const d=dom.window.document;
-  assert.equal(d.querySelectorAll('.mr-kpi').length,6);
+  assert.equal(d.querySelectorAll('.mr-kpi').length,5);
   assert.deepEqual([...d.querySelectorAll('[role=progressbar]')].map(e=>[e.getAttribute('aria-valuenow'),e.getAttribute('aria-valuemax')]),[['9','20'],['6','20']]);
-  for(const text of ['17','3','10:45','盘中增量追赶','历史队列 12','正在采集完成的5m','10:30','10:15','10:51']) assert.ok(d.body.textContent.includes(text),text);
+  for(const text of ['股票 17','ETF 3','20','10:45','盘中增量追赶','剩余待补历史12','正在采集 15m 输入','10:30','10:15','10:51']) assert.ok(d.body.textContent.includes(text),text);
+  assert.ok(!d.querySelector('.mr-runtime-detail').open);
+  assert.equal(d.querySelectorAll('.mr-runtime [role=progressbar]').length,0);
   assert.ok(!d.body.textContent.includes('7,661'));
   dom.window.close();
 });
@@ -28,7 +30,7 @@ test('operation, history queue and sync mode remain independent',()=>{
   for(const [op,text] of [['COLLECTING_5M','采集'],['AGGREGATING_15M','生成完整15m'],['CALCULATING_MA55','计算MA55'],['PUBLISHING','发布结果']]){
     const dom=new JSDOM(renderStatus({...base,active_operation:op}));
     assert.match(dom.window.document.body.textContent,new RegExp(text));
-    assert.match(dom.window.document.body.textContent,/历史队列 12/);
+    assert.match(dom.window.document.body.textContent,/剩余待补历史12/);
     dom.window.close();
   }
   assert.equal(statusModel({...base,active_operation:'IDLE',sync_mode:'WAIT_NEXT_BAR'}).label,'等待下一根');
@@ -46,6 +48,8 @@ test('missing facts never become zero, all-current, or a system-date trading day
   assert.equal(dom.window.document.querySelector('[role=progressbar]').getAttribute('aria-valuetext'),'尚未核实');
   assert.match(CSS,/flex:0 1 260px/);
   assert.match(CSS,/repeat\(2,minmax\(0,1fr\)\)/);
+  assert.match(CSS,/"JetBrains Mono","IBM Plex Mono",ui-monospace,monospace/);
+  assert.match(CSS,/font-family:inherit;font-size:13px/);
   dom.window.close();
   const unverified=new JSDOM(renderStatus({monitoring_verified:false,refresh:{refreshed:0,expected:0},analysis:{calculated:0,expected:0}}));
   assert.ok(!unverified.window.document.body.textContent.includes('0 / 0'));

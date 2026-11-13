@@ -16,6 +16,7 @@ def assert_oracle(store, sessions, five, end):
         full = derived(history, tf, sessions, end)
         closes = [r["close"] for r in full]
         frame = store.read("600000.SH", tf, end)
+        assert frame["cache"]["hit"]
         assert len(frame["bars"]) == cap
         assert frame["ma_history"]["state"] == "READY"
         for i, actual in enumerate(frame["bars"], len(full) - cap):
@@ -31,6 +32,7 @@ def test_all_periods_survive_1280_evictions_restart_and_old_backfill(tmp_path):
     put(store, {t: five[t] for t in times[3090:3840]}, sessions)
     store.backfill("600000.SH", {t: five[t] for t in times[:3090]}, sessions=sessions,
                    start=times[0], end=times[3089], now=times[3839])
+    store.warm_cache(["600000.SH"])
     assert len(store.raw_rows("600000.SH", limit=1280)) == 1280
     assert_oracle(store, sessions, five, times[3839])
     for step in range(1, 1281):
@@ -64,6 +66,7 @@ def test_real_missing_slot_and_unconfirmed_factors_never_claim_complete(tmp_path
     group = list(five)[-300:-297]
     store.backfill("600000.SH", {t: five[t] for t in group}, sessions=sessions,
                    start=group[0], end=group[-1], now=max(five))
+    store.warm_cache(["600000.SH"])
     assert_oracle(store, sessions, five, max(five))
     store.accept("600000.SH", {t: five[t] for t in list(five)[-3:]}, sessions=sessions,
                  start=list(five)[-3], end=max(five), now=max(five), events=None, factor_response=True)

@@ -182,7 +182,7 @@ def adjustment(events, day, asof):
     return 1 / prod(e["ex_factor"] for e in events if day < e["day"] <= asof[:10])
 
 
-def project(rows, events, asof, *, sessions, timeframe):
+def project(rows, events, asof, *, sessions, timeframe, periods=MAS):
     result, continuous, previous = [], [], None
     schedule = (
         points(sessions, rows[0]["timestamp"][:10], asof, step=int(timeframe[:-1]))
@@ -212,7 +212,7 @@ def project(rows, events, asof, *, sessions, timeframe):
             continuous = []
         if bar["valid"]:
             continuous.append(bar["close"])
-        for n in MAS:
+        for n in periods:
             bar[f"ma{n}"] = fsum(continuous[-n:]) / n if len(continuous) >= n else None
         result.append(bar)
         previous = bar

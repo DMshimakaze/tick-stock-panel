@@ -167,11 +167,11 @@ def setup(registrar):
             if not cutoff or not current or cutoff > current:
                 raise HTTPException(422, "asof exceeds latest completed exchange point")
             rows = [store.read(s, tf, cutoff, limit) for s in codes for tf in tfs]
-            worker.demand(
+            worker.demand_cache(
                 [
                     r["symbol"]
                     for r in rows
-                    if r.get("ma_history", {}).get("state") != "READY"
+                    if not r.get("cache", {}).get("hit")
                 ]
             )
             return dict(

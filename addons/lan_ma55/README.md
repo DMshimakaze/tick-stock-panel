@@ -1,4 +1,4 @@
-# 兰 MA55 R1｜lan.ma55 0.7.3
+# 兰 MA55 R1｜lan.ma55 0.8.2
 
 生产链：一个 TickFlow raw 5m 适配器 → 三根完整 5m 聚合 15m → 原 SQLite 内的冻结 R1 → 官方 Ext Data 发布。唯一在线个人行情/策略库为 `data/user_data/lan_ma55/state.sqlite3`。K 线工作台通过本机 HTTP v1 只读，题材页继续消费 `lan_ma55_summary/day/history`。宿主固定 v0.3.36。
 
@@ -8,7 +8,7 @@
 
 `runtime.py` 负责单 worker，`collector.py` 唯一拥有个人行情 SDK，`market_grid.py` 聚合/投影，`market_store.py` 管理 raw 窗口，`unified_store.py` 用同一连接提交行情、策略、风险和收据。HTTP 使用独立只读连接，关闭页面后继续维护。
 
-SQLite WAL、短事务、writer lease、每股默认保留 1,280 根完成 raw 15m 和 2 根未完成 5m；容量由 `max(1280, (visible+232)×周期比例+聚合边界)` 计算。30/60m 从完整同源历史按需聚合，在 QFQ 投影和六 SMA 完成后才裁剪到 250/125/62 根。冻结策略单独读取最近 250 根，指标准备状态不参与 BUY。
+SQLite WAL、短事务、writer lease、每股默认保留 1,280 根完成 raw 15m 和 2 根未完成 5m；容量由 `max(1280, (visible+232)×周期比例+聚合边界)` 计算。`indicator_cache.py` 在同库维护15/30/60m有界图表快照和六SMA滚动状态，可见窗口250/125/62根。冻结策略单独读取最近250根的价格/因子输入，按原冻结逻辑计算特征。
 
 同股同目标桶最多尝试一次；优先最新桶，再低速冷预热。minute 总预算默认 8 RPM、配置上限 12，冷预算默认 2 RPM，冷调用包含在总预算内。任务集合受证券元数据及最多 64 个短期查看需求约束。429 按响应冷却。请求收据记录 endpoint、能力、状态、延迟、标的数和重试数，滚动保留约一万行。
 
@@ -34,7 +34,17 @@ SQLite WAL、短事务、writer lease、每股默认保留 1,280 根完成 raw 1
 
 验过后停机替换原状态路径，原 SQLite、DuckDB、workbench 移入受限归档。官方管理器停用 lan.marketdata；退役包不启动 writer 或 SDK。回退先停机另存新状态，再按 previous_version 和一致性快照恢复。
 
-`pnpm --dir addons/lan_ma55 build` 后由现有 nga Python 执行 build_backend.py，通过官方管理器安装、重启。本轮只更新 MA55；K线3.2.1、题材1.0.7保持已安装版本。定向测试在 tests_backend、tests_market 和 Node tests。冻结 oracle 使用指定提交的只读副本和私人行情包。`tools/run_stress.py --output <新私人目录> --symbols 5600` 是已有离线压力工具，本轮未重跑。DB、商业返回、日志、截图、ZIP/dist 和私人参考包均不提交。
+`pnpm --dir addons/lan_ma55 build` 后由现有 nga Python 执行 build_backend.py，通过官方管理器安装、重启。本轮只更新MA55；K线3.2.1、题材1.0.7保持已安装版本。定向测试在tests_backend、tests_market和Node tests。冻结oracle使用指定提交的只读副本和私人行情包。`tools/run_stress.py --output <新私人目录> --symbols 5600` 重放隔离库和注入transport的官方1s/3s调用链。DB、商业返回、日志、截图、ZIP/dist和私人参考包均不提交。
+
+## 0.8.2 增量图表与原生15m判定
+
+生产继续使用真实三根5m聚合15m。原生`15m`已用同一授权账号进行七证券、三HTTP的同窗对照，出现真实OHLCV/amount差异，且冻结pipeline要求`source_count=3`。`native15_shadow.py`保留真实`source_count=1`及独立来源，不进入生产调度或BUY表。明细见[本轮验收](../../docs/diagnostics/TSP_MA55_Native15_Incremental_UI_20261113.md)。
+
+缓存每证券三个快照，包含来源、价格/因子/日历修订、元数据、完成时间、连续性和最多233个滚动收盘。连续新K在原行情事务内追加六SMA；每233步以`math.fsum`重定基准。首次、补缺、修订或换源先使旧快照失效，空闲writer再从有界raw15重建，最新行情和冻结计算优先。当前图表命中时只读快照；历史窗口或缓存待建时从保存raw有界投影，`cache.hit=false`明确标识。GET只登记缓存重建需求，不触发商业历史取数或BUY重算。
+
+结果页五张卡分别显示监控总量、真实目标、目标K到达、实际计算和已发布BUY；两条小进度位于卡内。运行状态带保留动作、成功时间和单行阻塞，详情默认折叠。正文继承宿主Inter字体栈，数字采用官方JetBrains Mono / IBM Plex Mono字体栈；暗亮主题、桌面五卡/中屏三卡/手机两卡及260px搜索已实图核验。
+
+零商业流量工具：`python -m addons.lan_ma55.tools.cache_benchmark --source <只读快照> --output <新私人目录>`；`python -m addons.lan_ma55.tools.native15_transport_benchmark --output <新私人目录>`。真实shadow工具必须在生产owner停机维护时运行，明确提供至多8个证券及私人输出路径，最多3次HTTP、零重试；不用于确认账户共享配额。
 
 ## 0.7.3 盘中目标与运行面板
 

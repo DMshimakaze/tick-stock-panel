@@ -236,7 +236,7 @@ def serve(owner):
     extension.worker = SimpleNamespace(
         store=owner.market,
         status=lambda: dict(api_version=1, phase="ISOLATED", **owner.market.snapshot()),
-        demand=lambda s: None,
+        demand_cache=lambda s: None,
     )
     extension.data_path = owner.path
     extension.setup(SimpleNamespace(include_router=app.include_router))

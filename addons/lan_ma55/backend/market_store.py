@@ -25,6 +25,7 @@ from .market_grid import (
     now_cn,
 )
 from .worker_lease import ProcessLease
+from . import indicator_cache
 
 COLUMNS = (
     "symbol",
@@ -145,6 +146,7 @@ class Store:
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.execute("PRAGMA busy_timeout=5000")
             self.conn.executescript(DDL)
+            self.conn.executescript(indicator_cache.DDL)
             self.conn.commit()
         except Exception:
             if self.lease:
@@ -478,6 +480,9 @@ class Store:
                 rebuild_from=gaps[0] if gaps else None,
             )
             self._put(info)
+            older_insert = any(b["timestamp"] not in by_old and old and b["timestamp"] <= old[-1]["timestamp"] for b in incoming)
+            self.update_cache(symbol, info, raw, new_events, sessions,
+                              rebuild=corrected or switching or older_insert, append_only=True)
             self.set_meta("last_commit", now)
             self.set_meta(
                 "data_revision", self.meta("data_revision", 0) + int(modified)
@@ -515,6 +520,7 @@ class Store:
             if info["factor_coverage"] == "EXPLICIT" and info["state"] in ("READY", "WARMUP", "GAP"):
                 info["state"] = "GAP" if gaps else "READY" if len(raw) >= 56 else "WARMUP"
             self._put(info)
+            self.update_cache(symbol, info, raw, self.events(symbol), sessions, rebuild=True, append_only=True)
             self.conn.execute(
                 "INSERT INTO ma_history_progress(symbol,scanned_before,stop_reason,next_retry) VALUES(?,?,?,?) ON CONFLICT(symbol) DO UPDATE SET "
                 "scanned_before=excluded.scanned_before,stop_reason=excluded.stop_reason,next_retry=excluded.next_retry",
@@ -554,7 +560,31 @@ class Store:
             self._put(row)
             self._write(row["symbol"], bars)
             self._factors(row["symbol"], events)
+            self.update_cache(row["symbol"], row, bars, events, self.meta("sessions", []), rebuild=True)
         return True
+
+    def update_cache(self, symbol, info, raw, events, sessions, *, rebuild=False, append_only=False):
+        return indicator_cache.update(self.conn, symbol, info, raw, events, sessions,
+                                      self.meta("calendar_revision", 0), rebuild=rebuild, append_only=append_only)
+
+    def warm_cache(self, symbols=(), limit=8):
+        """Writer-only rebuild of saved facts; never calls a supplier or strategy."""
+        candidates = list(dict.fromkeys(symbols))[:limit]
+        if not candidates:
+            candidates = [r[0] for r in self.conn.execute(
+                "SELECT i.symbol FROM instrument_state i LEFT JOIN chart_cache c "
+                "ON c.symbol=i.symbol AND c.timeframe='15m' WHERE i.latest_completed15 IS NOT NULL "
+                "AND (c.symbol IS NULL OR c.version!=? OR c.calendar_revision!=? "
+                "OR c.basis_revision!=i.basis_revision OR c.factor_revision!=i.factor_revision "
+                "OR c.source_id!=i.source_id OR c.metadata!=json_array(i.source_type,i.raw_tick,i.listing_date,i.factor_coverage)) "
+                "ORDER BY i.symbol LIMIT ?", (indicator_cache.VERSION, self.meta("calendar_revision", 0), limit))]
+        with self.transaction():
+            for symbol in candidates:
+                info = self.instrument(symbol)
+                if info:
+                    self.update_cache(symbol, info, self.raw_rows(symbol, limit=history_capacity()),
+                                      self.events(symbol), self.meta("sessions", []), rebuild=True)
+        return candidates
 
     def failed(self, symbols, end, now, message):
         with self.transaction():
@@ -592,27 +622,29 @@ class Store:
                 )
             sessions = self.meta("sessions", [], conn=conn)
             visible = min(limit, CAPACITY[tf])
-            raw15 = self.raw_rows(symbol, asof, limit=STRATEGY_CAPACITY if strategy else history_capacity(), conn=conn)
-            raw = derived(raw15, tf, sessions, asof)
-            bars = project(
-                raw,
-                self.events(symbol, conn=conn),
-                asof,
-                sessions=sessions,
-                timeframe=tf,
-            )
-            visible_bars = bars[-visible:]
+            events = self.events(symbol, conn=conn)
+            cached = None if strategy else indicator_cache.read(conn, symbol, tf, asof, visible, info,
+                self.meta("calendar_revision", 0, conn=conn), events)
+            if cached:
+                visible_bars = cached["bars"]
+                available, raw_count, history_gaps = cached["available"], cached["raw15_count"], cached["history_gaps"]
+            else:
+                raw15 = self.raw_rows(symbol, asof, limit=STRATEGY_CAPACITY if strategy else history_capacity(), conn=conn)
+                raw = derived(raw15, tf, sessions, asof)
+                visible_bars = project(raw, events, asof, sessions=sessions, timeframe=tf,
+                                       periods=() if strategy else MAS)[-visible:]
+                available, raw_count = len(raw), len(raw15)
+                history_gaps = len(points(sessions, raw15[0]["timestamp"], raw15[-1]["timestamp"], step=15)) - len(raw15) if raw15 else 0
             complete_ma = bool(visible_bars) and all(b.get(f"ma{n}") is not None for b in visible_bars for n in MAS)
             progress = self.history_progress(symbol, conn=conn)
-            history_gaps = len(points(sessions, raw15[0]["timestamp"], raw15[-1]["timestamp"], step=15)) - len(raw15) if raw15 else 0
             ma_state = "FACTOR_PENDING" if info["factor_coverage"] != "EXPLICIT" else "REBUILD_PENDING" if info["source_id"] != SOURCE else "GAP" if history_gaps else "READY" if complete_ma and len(visible_bars) == visible else progress["stop_reason"] or "PENDING"
             return dict(
                 symbol=symbol,
                 name=info["name"],
                 timeframe=tf,
                 bars=visible_bars,
-                ma_history=dict(state=ma_state, required=required_history(tf, visible), available=len(raw),
-                                raw15_count=len(raw15), raw15_capacity=history_capacity(),
+                ma_history=dict(state=ma_state, required=required_history(tf, visible), available=available,
+                                raw15_count=raw_count, raw15_capacity=history_capacity(),
                                 visible=len(visible_bars), complete=sum(all(b.get(f"ma{n}") is not None for n in MAS) for b in visible_bars),
                                 first=visible_bars[0]["timestamp"] if visible_bars else None,
                                 last=visible_bars[-1]["timestamp"] if visible_bars else None,
@@ -644,7 +676,7 @@ class Store:
                 else None,
                 row_count=len(visible_bars),
                 capacity=CAPACITY[tf],
-                latest_completed_at=raw[-1]["timestamp"] if raw else None,
+                latest_completed_at=visible_bars[-1]["timestamp"] if visible_bars else None,
                 source_asof=info["updated_at"],
                 source_id=info["source_id"],
                 transition=info["transition"],
@@ -663,7 +695,8 @@ class Store:
                 factor_coverage=info["factor_coverage"],
                 gap_count=len(info["gaps"]),
                 gaps=info["gaps"],
-                warm_count=min(len(raw15), STRATEGY_CAPACITY),
+                cache=cached["cache"] if cached else dict(hit=False, version=indicator_cache.VERSION, state="REBUILD_PENDING"),
+                warm_count=min(raw_count, STRATEGY_CAPACITY),
                 warm_target=250,
                 eligible=info["eligible"],
                 listing_status=info["listing_status"],

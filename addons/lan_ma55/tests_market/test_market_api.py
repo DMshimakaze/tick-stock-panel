@@ -13,7 +13,7 @@ def test_v2_is_bounded_and_keeps_saved_history_when_writer_stops(tmp_path, monke
     worker = SimpleNamespace(
         store=store,
         status=lambda: dict(api_version=1, phase="SOURCE_UNAVAILABLE"),
-        demand=lambda values: demands.extend(values),
+        demand_cache=lambda values: demands.extend(values),
     )
     monkeypatch.setattr(extension, "worker", worker)
     app = FastAPI()
