@@ -493,7 +493,7 @@ def run(folder, count=5600):
                             batch = job["warm"][job["position"] : job["position"] + 100]
                             start = job["first"]
                             factors = {}
-                        received, errors = collector.fetch(
+                        received, errors = collector.fetch_five(
                             batch, start, job["target"], cold=cold
                         )
                         assert not errors

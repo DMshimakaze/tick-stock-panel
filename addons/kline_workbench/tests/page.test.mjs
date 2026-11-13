@@ -53,10 +53,10 @@ test('native-style compact controls, period persistence, saved MA, date range an
  assert.ok(s.requests.every(r=>r.period));s.close();
 });
 test('strict event timestamp and manifest match unified extension',async()=>{
- assert.equal(extension.version,'3.2.1');assert.equal(extension.routes[0].path,'/lan-kline');
+ assert.equal(extension.version,'3.3.0');assert.equal(extension.routes[0].path,'/lan-kline');
  assert.equal(parseLink('http://tsp/?symbol=000006.SZ&event=2026-11-06T15:00:00&setup=2026-11-06T14:30:00&defense=7.25').defense,7.25);
  assert.equal(parseLink('http://tsp/?event=2026-02-30T15:00:00').event,null);
- const built=await import('../dist/extension.js');assert.equal(built.default.version,'3.2.1');
+ const built=await import('../dist/extension.js');assert.equal(built.default.version,'3.3.0');
 });
 
 test('empty 503 is a service failure with a status link, never ordinary warmup',async(t)=>{
@@ -118,7 +118,7 @@ test('valid legacy MA choices migrate while deep links keep every historical BUY
  source.events={rows:[bars.at(-12),bars.at(-8),bars.at(-1)].map((b,i)=>({payload:{event_id:'old-'+i,confirmed_at:b.timestamp,setup_at:bars.at(-14).timestamp,defense:8,rule_version:'saved-rule'}})),total:3,truncated:false};
  const s=setup(source,'http://tsp/lan-kline?symbol=600519.SH&period=15m&event='+encodeURIComponent(bars.at(-1).timestamp),{visible:80,period:'15m',mas:[{period:5,enabled:true},{period:233,enabled:false},{period:999,enabled:true}],extra:'old-tool'});
  t.after(()=>s.close());await pause();
- assert.equal(s.updates.at(-1).m.buys.length,3);assert.match(s.$('.kw-buy-count').textContent,/历史BUY 3/);
+ assert.equal(s.updates.at(-1).m.buys.length,3);assert.match(s.$('.kw-buy-count').textContent,/历史冻结BUY 3/);
  assert.equal(s.$('[data-action="add-ma"]'),null);assert.equal(s.dom.window.document.querySelectorAll('[data-ma-toggle]').length,6);
  assert.equal(s.$('[data-ma-toggle="233"]').checked,false);assert.equal(s.$('[data-ma-toggle="5"]').checked,true);
  const stored=JSON.parse(s.dom.window.localStorage.getItem('lan.kline.preferences.v2'));

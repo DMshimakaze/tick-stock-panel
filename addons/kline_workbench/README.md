@@ -1,6 +1,6 @@
-# 兰 K线工作台｜lan.kline 3.2.1
+# 兰 K线工作台｜lan.kline 3.3.0
 
-TSP v0.3.36 独立 Page Pack。页面沿用宿主主题变量、系统字体、卡片和紧凑控件，价格图与独立成交量 pane 为主体。
+TSP v0.3.36 独立 Page Pack。当前默认读取 MA55 原生15m与人工复核候选；冻结历史深链显式携带 archive 来源，分别读取原行情与原事件。需求桥新增 source 字段，同一证券的两个来源可在不同会话独立打开。页面沿用宿主主题变量、系统字体、卡片和紧凑控件，价格图与独立成交量 pane 为主体。
 
 - 价格 pane 恢复六条真实 LineSeries：MA5 / MA10 / MA20 / MA30 / MA55 / MA233，沿用固定颜色，与蜡烛共用右侧价格尺度。每项图例按“名称、数值、checkbox”排列，窄屏自动换行。
 - 六条均线初次默认全选，开关仅改变对应 series 的 visible，不触发行情读取、BUY 计算或蜡烛重载。`lan.kline.preferences.v2` 仅保存 period / visible / maVisible；合法 v1 均线设置可迁移。
@@ -19,7 +19,7 @@ pnpm --dir addons/kline_workbench build
 & D:\Python_Envs\envs\nga\python.exe -m unittest addons.kline_workbench.tests.test_backend
 ```
 
-将本机构建的 `dist/lan-kline-3.2.1.zip` 交给官方扩展管理器 inspect、候选前端加载校验、安装，正常重启后打开 `/lan-kline`。不迁移 MA55 数据库。
+将本机构建的 `dist/lan-kline-3.3.0.zip` 交给官方扩展管理器 inspect、候选前端加载校验、安装，正常重启后打开 `/lan-kline`。不迁移 MA55 数据库。
 
 ## 2026-11-12 完整均线验收
 
@@ -27,6 +27,6 @@ lan.ma55 在同一 SQLite 保留默认1,280根 raw 15m，从完整同源历史�
 
 本轮 K线 Node 39项、三个页面共60项通过；后台全矩阵、滚动1,280根、重启、真实股票/沪深ETF、数学对照、压力和安装结果见 `docs/diagnostics/TSP_MA_Complete_ETF_Compact_20261112.md`。上一轮250根库的18/0/0个MA233是已修复基线。
 
-当前发布组合为 lan.ma55 0.6.3、lan.kline 3.2.1、lan.theme 1.0.7，宿主为官方v0.3.36。原BUY和风险逐行核对保留；新增真实REPLAY事件另计。后台深历史由既有owner低优先级维护，页面读取不创建SDK或重复全量补拉。
+2026-11-12当时发布组合为 lan.ma55 0.6.3、lan.kline 3.3.0、lan.theme 1.0.7，宿主为官方v0.3.36。原BUY和风险逐行核对保留；新增真实REPLAY事件另计。后台深历史由既有owner低优先级维护，页面读取不创建SDK或重复全量补拉。
 
 任务前版本为 lan.ma55 0.5.2、lan.kline 3.1.1、lan.theme 1.0.5；按报告中的安装状态快照恢复，先正常停机并另存本轮新增状态。官方管理器的 previous 可作快速回退，完整步骤及本机一致性快照位置见报告。ZIP、商业输入、数据库、截图与日志只存本机。

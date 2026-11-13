@@ -1,7 +1,7 @@
 """One bounded TickFlow SDK owner; actual HTTP hooks account for all SDK calls."""
 
 from collections import Counter, deque
-from datetime import datetime
+from datetime import datetime, timedelta
 import json
 from math import isfinite
 from threading import Event, Lock
@@ -10,7 +10,8 @@ from time import monotonic
 import httpx
 from tickflow import TickFlow, TickFlowError
 
-from .market_grid import BEIJING, as_ms, latest_point, normalize_five, wall
+from .market_grid import BEIJING, as_ms, latest_point, normalize_five, wall, now_cn
+from .native15_shadow import normalize_native
 from .request_budget import (
     CollectionStopped,
     RequestDeferred,
@@ -94,6 +95,7 @@ class Collector:
             if "ex-factors" in request.url.path
             else "metadata",
             symbol_count=len(symbols),
+            period=request.url.params.get("period"),
             at=str(datetime.now(BEIJING).replace(tzinfo=None, microsecond=0)),
         )
         with self.lock:
@@ -193,13 +195,13 @@ class Collector:
         )
 
     def session_evidence(self, now):
-        """Confirm a day from real completed index 5m, never from its weekday."""
+        """Confirm today with completed native15; no 5m session probe."""
         day = now[:10]
-        end = latest_point([day], now, step=5)
+        end = latest_point([day], now, step=15)
         if wall(now).weekday() >= 5 or not end:
             return dict(confirmed_day=None, source_asof=None)
-        self.report(active_operation="COLLECTING_5M")
-        rows, errors = self.fetch(["000001.SH"], day + " 09:35:00", end)
+        self.report(active_operation="COLLECTING_NATIVE15")
+        rows, errors = self.fetch(["000001.SH"], day + " 09:45:00", end)
         if errors and not rows.get("000001.SH"):
             raise SourceError()
         actual = {t: r for t, r in rows["000001.SH"].items() if r["volume"] > 0}
@@ -240,7 +242,8 @@ class Collector:
             ]
         return result
 
-    def fetch(self, symbols, start, end, *, cold=False):
+    def fetch_five(self, symbols, start, end, *, cold=False):
+        """Explicit offline archive comparison only; never used by the worker."""
         maximum = 8 if cold else 100
         if not 1 <= len(symbols) <= maximum:
             raise ValueError(
@@ -276,13 +279,39 @@ class Collector:
                 errors[symbol] = dict(code=str(exc), timestamps=None)
         return valid, errors
 
+    def fetch(self, symbols, start, end, *, cold=False, count=1280):
+        """One production native15 HTTP, isolated validation per security."""
+        if not 1 <= len(symbols) <= 100 or not 1 <= count <= 1280:
+            raise ValueError("Native15 batch limited to 100 symbols / 1280 bars")
+        cutoff = min(end, str(now_cn() - timedelta(seconds=75)))
+        data = self.request(lambda: self.tf.klines.batch(
+            symbols, period="15m", adjust="none", start_time=as_ms(start),
+            end_time=as_ms(end), count=count, as_dataframe=False,
+            batch_size=100, max_workers=1, show_progress=False,
+        ))
+        if set(data) - set(symbols):
+            raise ValueError("UNREQUESTED_SYMBOL")
+        valid, errors = {}, {}
+        for symbol in symbols:
+            if symbol not in data:
+                errors[symbol] = dict(code="SOURCE_UNAVAILABLE", timestamps=None)
+                continue
+            try:
+                rows, diagnostic = normalize_native(data[symbol], start, cutoff)
+                valid[symbol] = {b["timestamp"]: b for b in rows}
+                self.metrics["unfinished_native15_rows"] += diagnostic["unfinished"]
+                if diagnostic["invalid"]:
+                    errors[symbol] = dict(code="INVALID_NATIVE15_OHLCV", timestamps=diagnostic["invalid"])
+                    self.metrics["invalid_native15_rows"] += len(diagnostic["invalid"])
+            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+                errors[symbol] = dict(code=str(exc) if isinstance(exc, ValueError) else "INVALID_NATIVE15_SCHEMA", timestamps=None)
+        return valid, errors
+
     def close(self):
         self.tf.close()
 
     def native15_shadow(self, symbols, start, end, *, count=1280):
         """Explicit bounded experiment; never called by the production scheduler."""
-        from .native15_shadow import normalize_native
-
         if not 1 <= len(symbols) <= 8 or not 1 <= count <= 1280:
             raise ValueError("Native shadow limited to 8 symbols and 1280 bars")
         data = self.request(lambda: self.tf.klines.batch(

@@ -1,11 +1,11 @@
 format: tick-extension-package
 format_version: 1
 id: lan.ma55
-display_name: 兰 MA55 R1
-version: 0.8.2
+display_name: 兰 MA55 原生15m候选
+version: 0.9.3
 extension_api_version: 1
 author: DMshimakaze
-description: 单后端维护统一行情与冻结V5_R1，保留原SQLite确认历史。
+description: TickFlow原生15m生产与人工复核候选，旧冻结BUY独立保留。
 backend: backend.extension
 frontend: frontend/extension.mjs
 requires_app: '>=0.3.36,<0.3.37'

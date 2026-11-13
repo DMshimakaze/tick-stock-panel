@@ -1,5 +1,5 @@
 /** Read-only Page Pack. SQLite/backend is the only producer of MA55 events. */
-const SUMMARY = 'lan_ma55_summary', DAY = 'lan_ma55_day', HISTORY = 'lan_ma55_history';
+const SUMMARY = 'lan_ma55_native15_summary_v1', DAY = 'lan_ma55_day', HISTORY = 'lan_ma55_history';
 import { CSS } from './styles.mjs';
 import { escapeHtml as esc, renderStatus } from './status-view.mjs';
 const num = (v, digits = 0) => Number.isFinite(v) ? v.toLocaleString('zh-CN', { maximumFractionDigits: digits }) : '未知';
@@ -12,7 +12,7 @@ const phase = value => ({ RUNNING: '后台持续更新', WAITING: '等待新的�
 const reason = value => ({ VERSION_HISTORY_INSUFFICIENT: '旧确认状态缺少足够真实历史，等待重建', FACTOR_PENDING: '因子覆盖待补', REBUILD_PENDING: '更正数据重建中', METADATA_PENDING: '证券元信息待补', WARMUP: '不足56根连续完成15m', INSUFFICIENT_WARMUP: '不足56根连续完成15m',
   EMPTY_OR_OMITTED_5M: '源未返回有效5m，原因未确认', MISSING_5M: '缺少真实5m', MISSING_COMPLETED_15M: '15m不连续，重新预热',
   HISTORICAL_FACTOR_UNAVAILABLE: '因子覆盖未确认，暂停BUY', PRICE_BASIS_CHANGED: '价格基准变化，重新预热',
-  TICK_UNAVAILABLE: '报价tick未确认，暂停BUY',
+  TICK_UNAVAILABLE: '报价tick未确认，暂停BUY', INPUT_REVISION_LOCK_HISTORY_REQUIRED:'输入修订后旧结构锁尚未由真实历史复现，保留锁并暂停新候选',
   SAME_SUPPORT_SWING: '同一支撑波段已确认', CLOSE_BELOW_SUPPORT: '收盘跌破支撑', AWAIT_SUPPORT_TEST: '等待支撑测试',
   AWAIT_FIRST_RED: '等待第一根转强', NO_REAL_ADVANCE: '尚无有效推动', BUY_STRUCTURE: '结构已确认',
   INVALID_OR_INCOMPLETE_OHLCV: 'K线字段或完整性无效' }[value] || value || '—');
@@ -38,14 +38,17 @@ export async function readSummary(api) {
   return result.rows.length ? JSON.parse(result.rows[0].payload_json) : null;
 }
 export async function readDay(api, day, summary) {
+  const native = summary.signal_family === 'NATIVE15_REVIEW_V1';
+  const dayTable = native ? 'lan_ma55_native15_day_v1' : DAY;
+  const historyTable = native ? 'lan_ma55_native15_history_v1' : HISTORY;
   if (day === (summary.published_market_date || summary.market_date)) {
-    const data = await api.extDataRows(DAY, { limit: 20000 });
+    const data = await api.extDataRows(dayTable, { limit: 20000 });
     // Saved confirmations survive a universe-generation change. Only the two
     // refresh metrics use the current generation/target snapshot.
     const rows = data.rows.filter(r => r.market_date === day);
     return { ready: rows.length > 0, cycle: summary.cycle, rows };
   }
-  const data = await api.extDataRows(HISTORY, { limit: 1 });
+  const data = await api.extDataRows(historyTable, { limit: 1 });
   const entry = data.rows.length ? JSON.parse(data.rows[0].payload_json).days[day] : null;
   return entry ? { ready: true, historical: true, ...entry } : { ready: false, rows: [] };
 }
@@ -53,7 +56,7 @@ export async function readDay(api, day, summary) {
 export function mountResults(el, ctx) {
   const root = el.ownerDocument.createElement('section'); root.className = 'mr'; el.append(root);
   let disposed = false, busy = false, timer, signature = '', shown = [];
-  const model = { summary: null, date: '', pinned: false, tab: 'buy', query: '', page: 0,
+  const model = { summary: null, legacySummary: null, date: '', pinned: false, tab: 'buy', query: '', page: 0,
     rows: [], prices: new Map(), selected: null, dayInfo: null, error: '', loading: true, workbench: 'checking' };
   function visibleRows() {
     const query = model.query.trim().toLowerCase(), out = [];
@@ -70,11 +73,11 @@ export function mountResults(el, ctx) {
     if (disposed) return;
     const focus = root.contains(root.ownerDocument.activeElement) && root.ownerDocument.activeElement.dataset.control === 'query'
       ? { start: root.ownerDocument.activeElement.selectionStart, end: root.ownerDocument.activeElement.selectionEnd } : null;
-    const s = model.summary || {}, cycle = s.cycle || {}, universe = s.universe || {};
+    const s = model.summary || {}, resultSummary = model.tab==='history' ? model.legacySummary || {} : s, cycle = s.cycle || {}, universe = s.universe || {};
     const all = visibleRows(), pages = Math.max(1, Math.ceil(all.length / 50));
     model.page = Math.min(model.page, pages - 1); shown = all.slice(model.page * 50, model.page * 50 + 50);
     const buyCount = model.rows.reduce((n, r) => n + JSON.parse(r.events_json || '[]').length, 0);
-    const dates = [...new Set([s.published_market_date, s.market_date, ...(s.available_dates || [])].filter(Boolean))].sort().reverse();
+    const dates = [...new Set([resultSummary.published_market_date, resultSummary.market_date, ...(resultSummary.available_dates || [])].filter(Boolean))].sort().reverse();
     const active = model.selected, selected = active?.row, event = active?.event, d = active?.decision;
     const quote = row => model.prices.get(row.symbol);
     const price = row => {
@@ -82,15 +85,15 @@ export function mountResults(el, ctx) {
       return q && q.bar_end?.slice(0,10)===model.date && Number.isFinite(q.price) && q.price>0 ? q.price.toLocaleString('zh-CN',{minimumFractionDigits:q.asset_type==='etf'?3:2,maximumFractionDigits:q.asset_type==='etf'?3:2}) : '—';
     };
     root.innerHTML = `<style>${CSS}</style>${renderStatus(s,busy,model.error,model.runtimeDetails)}
-      <div class="mr-tools"><label>交易日 <select aria-label="结果交易日" data-control="date">${dates.map(day => `<option ${model.date===day?'selected':''}>${esc(day)}</option>`).join('') || '<option>等待历史</option>'}</select></label><button data-action="latest">最新</button><input aria-label="证券搜索" data-control="query" value="${esc(model.query)}" placeholder="名称 / 代码"><button data-action="search">搜索</button>${model.query?'<button data-action="clear">清除</button>':''}</div>
-      <h2>${model.date===s.market_date?'最新交易日':!model.pinned && s.pending_publish?'上次有效交易日':'历史交易日'} ${esc(model.date||'待确认')} · ${model.dayInfo?.ready?`${buyCount} BUY`:'发布中'}${s.pending_publish && !model.pinned?' · 新结果正在发布':''}</h2>
-      <div class="mr-tabs">${[['buy','BUY'],['watch','观察中'],['history','历史确认']].map(([key,label])=>`<button data-action="tab" data-tab="${key}" class="${model.tab===key?'active':''}">${label}</button>`).join('')}</div>
-      <div class="mr-table"><table><thead><tr><th>名称</th><th title="所选交易日最近完成15m原价收盘；逐项悬停查看时间；无当日有效值显示—">价格</th><th title="冻结BUY的 confirmed_at，北京时间">确认时间</th></tr></thead><tbody>${shown.map(({row,event:e},i)=>{
+      <div class="mr-tools"><label>交易日 <select aria-label="结果交易日" data-control="date" ${busy?'disabled':''}>${dates.map(day => `<option ${model.date===day?'selected':''}>${esc(day)}</option>`).join('') || '<option>等待历史</option>'}</select></label><button data-action="latest">最新</button><input aria-label="证券搜索" data-control="query" value="${esc(model.query)}" placeholder="名称 / 代码"><button data-action="search">搜索</button>${model.query?'<button data-action="clear">清除</button>':''}</div>
+      <h2>${model.date===s.market_date?'最新交易日':!model.pinned && s.pending_publish?'上次有效交易日':'历史交易日'} ${esc(model.date||'待确认')} · ${model.dayInfo?.ready?`${buyCount} ${model.tab==='history'?'历史冻结 BUY':'人工复核候选'}`:'发布中'}${s.pending_publish && !model.pinned?' · 新结果正在发布':''}</h2>
+      <div class="mr-tabs">${[['buy','买点候选'],['watch','观察中'],['history','历史冻结 BUY']].map(([key,label])=>`<button data-action="tab" data-tab="${key}" ${busy?'disabled':''} class="${model.tab===key?'active':''}">${label}</button>`).join('')}</div>
+      <div class="mr-table"><table><thead><tr><th>名称</th><th title="所选交易日最近完成15m原价收盘；逐项悬停查看时间；无当日有效值显示—">价格</th><th title="确认时刻，北京时间；原生候选与历史冻结BUY分别存储">确认时间</th></tr></thead><tbody>${shown.map(({row,event:e},i)=>{
         const q=quote(row);
-        return `<tr data-row="${i}" tabindex="0" aria-label="打开${esc(row.name)}K线"><td><a class="mr-kline" data-stock-link href="${esc(workbenchUrl(row.symbol,e))}">${esc(row.name)}</a>${q?.asset_type==='etf'?'<span class="mr-type">ETF</span>':''}<span class="mr-code">${esc(row.symbol)}</span></td><td class="mr-price" title="${esc(q?.bar_end?.slice(0,10)===model.date?`${q.bar_end} · 原价完成15m收盘 · ${q.source_id}`:'所选日无有效完成15m价格')}">${price(row)}</td><td>${esc(e?.confirmed_at?.slice(0,16)||'—')}</td></tr>`;
-      }).join('')}</tbody></table>${shown.length?'':`<div class="mr-empty">${model.loading?'正在读取…':!model.dayInfo?.ready?'所选日结果发布中':model.tab==='watch'?'暂无观察结构':'所选日暂无已确认 BUY'}</div>`}</div>
+        return `<tr data-row="${i}" tabindex="0" aria-label="打开${esc(row.name)}K线"><td><a class="mr-kline" data-stock-link href="${esc(workbenchUrl(row.symbol,e))}">${esc(row.name)}</a>${q?.asset_type==='etf'?'<span class="mr-type">ETF</span>':''}<span class="mr-code">${esc(row.symbol)}</span></td><td class="mr-price" title="${esc(q?.bar_end?.slice(0,10)===model.date?`${q.bar_end} · 原价完成15m收盘 · ${q.source_id}`:'所选日无有效完成15m价格')}">${price(row)}</td><td>${esc(e?.confirmed_at?.slice(0,16)||'—')}${e?`<span class="mr-code">${esc(model.tab==='history'?'旧5m / 迁移历史':e.mode==='REPLAY'?'历史候选':'当日新增 · '+mode(e.mode))}</span>`:''}</td></tr>`;
+      }).join('')}</tbody></table>${shown.length?'':`<div class="mr-empty">${model.loading?'正在读取…':!model.dayInfo?.ready?'所选日结果发布中':model.tab==='watch'?'暂无观察结构':model.tab==='history'?'所选日暂无历史冻结 BUY':'所选日暂无原生15m候选'}</div>`}</div>
       <div class="mr-pager"><button data-action="previous" ${model.page===0?'disabled':''}>上一页</button><span>${model.page+1} / ${pages} · ${all.length}条</span><button data-action="next" ${model.page+1>=pages?'disabled':''}>下一页</button></div>
-      <details class="mr-diagnostics" ${model.diagnostics?'open':''}><summary>数据状态 / 详情</summary><p>${esc(phase(s.phase))} · ${esc(cycle.bar_end||'')} · 股票 ${num(universe.stock)} / ETF ${num(universe.etf)}</p><p>有效 ${num(cycle.valid_symbols)} · 不足 ${num(cycle.insufficient_symbols)} · 缺口 ${num(cycle.gap_symbols)} · 失败 ${num(cycle.failed_symbols)} · 缺tick ${num(universe.unpriced)}</p><p>5m请求 ${num(s.requests?.minute_requests)} / HTTP ${num(s.requests?.http_requests)} · 待预热 ${num(s.pending_symbols)}</p><button data-action="tab" data-tab="data">查看证券状态</button><details><summary>后台状态</summary><pre>${esc(JSON.stringify(s,null,2))}</pre></details><div>${shown.map(({row,event:e},i)=>`<button data-detail="${i}">${esc(row.name)} · ${esc(reason(row.reason))}${e?' · '+esc(mode(e.mode)):''}</button>`).join('')}</div>
+      <details class="mr-diagnostics" ${model.diagnostics?'open':''}><summary>数据状态 / 详情</summary><p>${esc(phase(s.phase))} · ${esc(cycle.bar_end||'')} · 股票 ${num(universe.stock)} / ETF ${num(universe.etf)}</p><p>有效 ${num(cycle.valid_symbols)} · 不足 ${num(cycle.insufficient_symbols)} · 缺口 ${num(cycle.gap_symbols)} · 失败 ${num(cycle.failed_symbols)} · 缺tick ${num(universe.unpriced)}</p><p>原生15m请求 ${num(s.requests?.period_15m)} / HTTP ${num(s.requests?.http_requests)} · 待预热 ${num(s.pending_symbols)}</p><button data-action="tab" data-tab="data">查看证券状态</button><details><summary>后台状态</summary><pre>${esc(JSON.stringify(s,null,2))}</pre></details><div>${shown.map(({row,event:e},i)=>`<button data-detail="${i}">${esc(row.name)} · ${esc(reason(row.reason))}${e?' · '+esc(mode(e.mode)):''}</button>`).join('')}</div>
       ${selected?`<section class="mr-panel mr-selected"><h2>${esc(selected.name)} ${esc(selected.symbol)}</h2><p>${esc(reason(selected.reason))}</p><p>支撑测试 ${esc(event?.setup_at||d?.support_test_time||'—')} · 确认 ${esc(event?.confirmed_at||'尚未确认')} · ${esc(mode(event?.mode))}</p><p>首次看到 ${esc(event?.first_seen_at||'—')} · ${esc(event?.risk_text||'')}</p><pre>${esc(JSON.stringify({event,decision:d},null,2))}</pre><button data-action="preview" ${ctx.ui?.openStockPreview?'':'disabled'}>官方个股详情 ↗</button> ${model.workbench==='enabled'?`<a href="${esc(workbenchUrl(selected.symbol,event))}" class="mr-kline">15 分钟 K ↗</a>`:'<span>安装并启用独立分钟K工作台后可打开K线。</span>'}</section>`:''}</details>`;
     if (focus) {
       const input = root.querySelector('[data-control="query"]');
@@ -105,15 +108,22 @@ export function mountResults(el, ctx) {
       const summary = await readSummary(ctx.api);
       if (disposed) return;
       model.summary = summary;
-      const prices = await ctx.api.extDataRows('lan_ma55_prices_v1', {limit:1});
+      const prices = await ctx.api.extDataRows(model.tab==='history'?'lan_ma55_prices_v1':'lan_ma55_native15_prices_v1', {limit:1});
       if (disposed) return;
       const projection = prices.rows[0]?.payload_json ? JSON.parse(prices.rows[0].payload_json) : {};
       model.prices = new Map((projection.rows || []).map(q=>[q.symbol,q]));
       if (summary) {
-        const date = !model.pinned || !model.date ? summary.published_market_date || summary.market_date || '' : model.date;
-        const key = `${date}:${summary.generation}:${summary.revision}:${summary.day_published_revision || ''}:${summary.history_published_at || ''}`;
+        let resultSummary = summary;
+        if (model.tab==='history') {
+          const old = await ctx.api.extDataRows('lan_ma55_summary',{limit:1});
+          if (disposed) return;
+          model.legacySummary = old.rows.length ? JSON.parse(old.rows[0].payload_json) : {};
+          resultSummary = model.legacySummary;
+        }
+        const date = !model.pinned || !model.date ? resultSummary.published_market_date || resultSummary.market_date || '' : model.date;
+        const key = `${model.tab}:${date}:${resultSummary.generation}:${resultSummary.revision}:${summary.day_published_revision || ''}:${summary.history_published_at || ''}`;
         if (date && (force || key !== signature)) {
-          const info = await readDay(ctx.api, date, summary);
+          const info = await readDay(ctx.api, date, resultSummary);
           if (disposed) return;
           if (info.ready || model.pinned || !model.rows.length) {
             model.date = date; model.dayInfo = info; model.rows = info.rows;
@@ -135,7 +145,15 @@ export function mountResults(el, ctx) {
     const button = e.target.closest('[data-action]'); if (!button || button.disabled) return;
     const action = button.dataset.action;
     if (action === 'refresh') { await refresh(true); return; }
-    if (action === 'tab') { model.tab = button.dataset.tab; model.page = 0; if(model.tab==='data') model.diagnostics=true; }
+    if (action === 'tab') {
+      const nextTab=button.dataset.tab;
+      if ((nextTab==='history') !== (model.tab==='history')) {
+        model.rows=[];model.prices=new Map();model.dayInfo=null;model.loading=true;
+      }
+      model.tab=nextTab;model.page=0;model.selected=null;
+      if(model.tab==='data') model.diagnostics=true;
+      signature='';await refresh(true);return;
+    }
     else if (action === 'search') model.page = 0;
     else if (action === 'clear') { model.query=''; model.page=0; }
     else if (action === 'previous' || action === 'next') model.page += action === 'next' ? 1 : -1;

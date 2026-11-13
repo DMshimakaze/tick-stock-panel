@@ -83,7 +83,7 @@ class BridgeTests(unittest.TestCase):
                     calls.append((symbols, kwargs))
                     return payload()
 
-                def events(self, symbol, start, end):
+                def events(self, symbol, start, end, **kwargs):
                     return dict(rows=[],total=0,truncated=False)
 
             worker.source.close()

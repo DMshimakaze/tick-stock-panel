@@ -103,7 +103,7 @@ def run(data_dir, output):
     try:
         metadata, overview = classify(collector.metadata(symbols), target[:10])
         factors = collector.factors(symbols)
-        received, errors = collector.fetch(symbols, first, target, cold=True)
+        received, errors = collector.fetch_five(symbols, first, target, cold=True)
         with UnifiedStore(output / "smoke.sqlite3") as owner:
             owner.refresh_master(metadata, overview, sessions)
             with owner.conn:

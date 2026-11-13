@@ -17,6 +17,7 @@ DEMAND_FIELDS = [
     ("request_id", "string"),
     ("period", "string"),
     ("pinned", "int"),
+    ("source", "string"),
 ]
 VIEW_FIELDS = [
     ("scope", "string"),
@@ -70,10 +71,12 @@ class Publisher:
                 if (
                     current["mode"] != "snapshot"
                     or not current["market_level"]
-                    or [(f["name"], f["dtype"]) for f in current["fields"]]
-                    != [(f["name"], f["dtype"]) for f in config["fields"]]
+                    or not {(f["name"], f["dtype"]) for f in current["fields"]}
+                    <= {(f["name"], f["dtype"]) for f in config["fields"]}
                 ):
                     raise ValueError("Kline bridge ID has a different schema")
+                if current["fields"] != config["fields"]:
+                    self.http.put(f"/api/ext-data/{config['id']}", json={"fields": config["fields"]}).raise_for_status()
             else:
                 self.http.post("/api/ext-data", json=config).raise_for_status()
 
@@ -84,13 +87,14 @@ class Publisher:
         response.raise_for_status()
         now = int(time.time() * 1000)
         return [
-            r
+            dict(r, source=r.get("source") or "native")
             for r in response.json()["rows"]
             if str(r["scope"]) in {str(i) for i in range(SLOTS)}
             and 0 <= now - r["request_ms"] < LEASE_MS
             and re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", r["requested_symbol"])
             and r["period"] in ("15m", "30m", "60m")
             and r["pinned"] in (-1, 0, 1)
+            and (r.get("source") or "native") in ("native", "archive")
         ]
 
     def publish(self, rows):

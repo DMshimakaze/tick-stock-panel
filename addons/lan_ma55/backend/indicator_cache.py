@@ -93,16 +93,16 @@ def append(raw, events, asof, sessions, tf, rolling, saved, *, exact=False):
     return dict(closes=list(queue), sums=sums, last=previous, source_id=previous_source, steps=steps)
 
 
-def update(conn, symbol, info, raw15, events, sessions, calendar_revision, *, rebuild=False, append_only=False):
+def update(conn, symbol, info, raw15, events, sessions, calendar_revision, *, rebuild=False, append_only=False, table="chart_cache"):
     """Append new complete buckets, or rebuild bounded history after a real revision."""
     if not raw15:
-        conn.execute("DELETE FROM chart_cache WHERE symbol=?", (symbol,))
+        conn.execute(f"DELETE FROM {table} WHERE symbol=?", (symbol,))
         return dict(appended=0, rebuilt=0)
     asof = raw15[-1]["timestamp"]
     gaps = len(points(sessions, raw15[0]["timestamp"], asof, step=15)) - len(raw15)
     result = dict(appended=0, rebuilt=0)
     for tf, capacity in CAPACITY.items():
-        prior = conn.execute("SELECT * FROM chart_cache WHERE symbol=? AND timeframe=?", (symbol, tf)).fetchone()
+        prior = conn.execute(f"SELECT * FROM {table} WHERE symbol=? AND timeframe=?", (symbol, tf)).fetchone()
         compatible = not rebuild and matches(prior, info, calendar_revision)
         # A new event entering the projection day changes all prior QFQ values.
         if compatible and adjustment(events, prior["basis_day"], asof) not in (None, 1):
@@ -110,7 +110,7 @@ def update(conn, symbol, info, raw15, events, sessions, calendar_revision, *, re
         if append_only and not compatible:
             # Live BUY processing must not wait for an MA233 cold rebuild.
             # Delete in the raw transaction; the idle writer rebuilds saved facts.
-            conn.execute("DELETE FROM chart_cache WHERE symbol=? AND timeframe=?", (symbol, tf))
+            conn.execute(f"DELETE FROM {table} WHERE symbol=? AND timeframe=?", (symbol, tf))
             continue
         if compatible:
             rolling, saved = json.loads(prior["rolling"]), json.loads(prior["bars"])
@@ -123,7 +123,7 @@ def update(conn, symbol, info, raw15, events, sessions, calendar_revision, *, re
         rolling = append(incoming, events, asof, sessions, tf, rolling, saved, exact=not compatible)
         result["appended"] += len(incoming)
         available = frame_count(raw15, tf)
-        conn.execute("INSERT OR REPLACE INTO chart_cache VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
+        conn.execute(f"INSERT OR REPLACE INTO {table} VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", (
             symbol, tf, VERSION, info["source_id"], info["basis_revision"], info["factor_revision"],
             calendar_revision, metadata(info), asof[:10], raw15[0]["timestamp"], asof, len(raw15), gaps,
             available, dumps(saved[-capacity:]), dumps(rolling),
@@ -131,8 +131,8 @@ def update(conn, symbol, info, raw15, events, sessions, calendar_revision, *, re
     return result
 
 
-def read(conn, symbol, tf, asof, limit, info, calendar_revision, events):
-    row = conn.execute("SELECT * FROM chart_cache WHERE symbol=? AND timeframe=?", (symbol, tf)).fetchone()
+def read(conn, symbol, tf, asof, limit, info, calendar_revision, events, *, table="chart_cache"):
+    row = conn.execute(f"SELECT * FROM {table} WHERE symbol=? AND timeframe=?", (symbol, tf)).fetchone()
     if not matches(row, info, calendar_revision):
         return None
     bars = [b for b in unpack(row["bars"]) if b["timestamp"] <= asof]

@@ -18,10 +18,10 @@ def source(tmp_path, reply, **kw):
 
 
 def test_real_sdk_shape_and_one_bad_symbol_does_not_block_others(tmp_path):
-    at = "2026-11-11 09:35:00"
+    at = "2026-11-11 09:45:00"
 
     def reply(r):
-        assert r.url.params["period"] == "5m" and r.url.params["adjust"] == "none"
+        assert r.url.params["period"] == "15m" and r.url.params["adjust"] == "none"
         good = dict(
             timestamp=[as_ms(at)],
             open=[10],
@@ -39,7 +39,7 @@ def test_real_sdk_shape_and_one_bad_symbol_does_not_block_others(tmp_path):
     try:
         valid, errors = c.fetch(["600000.SH", "688827.SH"], at, at, cold=True)
         assert valid["600000.SH"][at]["volume"] == 200
-        assert errors == {"688827.SH": dict(code="INVALID_5M_OHLCV", timestamps=[at])}
+        assert errors == {"688827.SH": dict(code="INVALID_NATIVE15_OHLCV", timestamps=[at])}
         assert valid["688827.SH"] == {}
         assert c.metrics["http_requests"] == c.metrics["minute_requests"] == 1
     finally:
@@ -78,7 +78,7 @@ def test_429_cooldown_no_automatic_retry(tmp_path):
     )
     try:
         with pytest.raises(RequestDeferred):
-            c.fetch(["600000.SH"], "2026-11-11 09:35:00", "2026-11-11 09:45:00")
+            c.fetch(["600000.SH"], "2026-11-11 09:45:00", "2026-11-11 09:45:00")
         assert c.metrics["http_429_count"] == c.metrics["http_requests"] == 1
         assert c.budgets["minute"].delay() > 79
     finally:
@@ -93,7 +93,7 @@ def test_public_host_job_owns_priority(tmp_path):
     )
     try:
         with pytest.raises(RequestDeferred):
-            c.fetch(["600000.SH"], "2026-11-11 09:35:00", "2026-11-11 09:45:00")
+            c.fetch(["600000.SH"], "2026-11-11 09:45:00", "2026-11-11 09:45:00")
         assert c.metrics["http_requests"] == 0
     finally:
         c.close()

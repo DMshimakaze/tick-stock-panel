@@ -270,7 +270,7 @@ def test_verified_session_target_boundaries(now, expected):
     assert latest_point(["2026-11-12", "2026-11-13"], now) == expected
 
 
-def test_worker_completed_five_to_frozen_analysis_to_official_projection(
+def test_worker_native15_to_candidates_to_separate_official_projection(
     tmp_path, monkeypatch
 ):
     import json
@@ -345,13 +345,15 @@ def test_worker_completed_five_to_frozen_analysis_to_official_projection(
             )
         if "ex-factors" in request.url.path:
             return httpx.Response(200, json={"data": {"600000.SH": []}})
-        assert period == "5m"
+        assert period == "15m"
         codes = (
             json.loads(request.content)["symbols"]
             if request.content
             else request.url.params["symbols"].split(",")
         )
-        stamps = points(["2026-11-13"], "2026-11-13 09:35:00", target)
+        from addons.lan_ma55.backend.market_grid import BEIJING
+        start = str(datetime.fromtimestamp(int(request.url.params["start_time"])/1000, BEIJING).replace(tzinfo=None))
+        stamps = points([*sessions, "2026-11-13"], start, target, step=15)
         n = len(stamps)
         bars = dict(
             timestamp=[as_ms(t) for t in stamps],
@@ -374,7 +376,7 @@ def test_worker_completed_five_to_frozen_analysis_to_official_projection(
         )
         table = request.url.path.split("/")[-2]
         published[table] = json.loads(request.content)["rows"]
-        if table == "lan_ma55_summary":
+        if table == "lan_ma55_native15_summary_v1":
             state = json.loads(published[table][0]["payload_json"])
             if (
                 state.get("latest_saved_15m") == target
@@ -385,7 +387,7 @@ def test_worker_completed_five_to_frozen_analysis_to_official_projection(
         return httpx.Response(200, json={"ok": True})
 
     worker.publisher = Publisher(
-        "http://localhost", transport=httpx.MockTransport(official)
+        "http://localhost", transport=httpx.MockTransport(official), native=True
     )
     worker.start()
     arrived = done.wait(6)
@@ -398,29 +400,29 @@ def test_worker_completed_five_to_frozen_analysis_to_official_projection(
     assert all(
         op in operations
         for op in [
-            "COLLECTING_5M",
-            "AGGREGATING_15M",
-            "CALCULATING_MA55",
+            "COLLECTING_NATIVE15",
+            "CALCULATING_NATIVE15_CANDIDATES",
             "PUBLISHING",
             "IDLE",
         ]
     )
     assert operations[-1] == "IDLE"
-    assert all(r.url.params.get("period") != "1m" for r in requests)
-    state = json.loads(published["lan_ma55_summary"][0]["payload_json"])
+    assert all(r.url.params.get("period") not in ("1m", "5m") for r in requests)
+    state = json.loads(published["lan_ma55_native15_summary_v1"][0]["payload_json"])
     assert state["today_session_verified"] is True
     assert state["data_target_15m"] == state["latest_analyzed_15m"] == target
     assert state["analysis"]["calculated"] == state["refresh"]["refreshed"] == 1
-    assert published["lan_ma55_day"][0]["market_date"] == "2026-11-13"
-    with UnifiedStore(path) as owner:
-        assert owner.market.raw_rows("600000.SH")[-1]["source_count"] == 3
+    assert published["lan_ma55_native15_day_v1"][0]["market_date"] == "2026-11-13"
+    from addons.lan_ma55.backend.native15_owner import NativeOwner
+    with NativeOwner(path) as owner:
+        assert owner.market.raw_rows("600000.SH")[-1]["source_count"] == 1
         assert (
             owner.market.meta("calendar_check")["verification_source"]
-            == "TICKFLOW_COMPLETED_INDEX_5M"
+            == "TICKFLOW_COMPLETED_INDEX_NATIVE15"
         )
         assert (
             owner.conn.execute(
-                "SELECT analysis_asof FROM processing_receipt"
+                "SELECT analysis_asof FROM native15_signal_state"
             ).fetchone()[0]
             == target
         )

@@ -63,9 +63,9 @@ test('publication failure retains previous rows, ETF precision, keyboard link an
   const calls=[];
   const api={extPagesList:async()=>[{enabled:true,path:'/lan-kline'}],extDataRows:async id=>{
     calls.push(id);
-    if(id==='lan_ma55_summary')return{rows:[{payload_json:JSON.stringify(s)}]};
+    if(id==='lan_ma55_native15_summary_v1')return{rows:[{payload_json:JSON.stringify(s)}]};
     if(id==='lan_ma55_day')return{rows:[old]};
-    if(id==='lan_ma55_prices_v1')return{rows:[{payload_json:JSON.stringify({day:'2026-11-12',rows:[{symbol:old.symbol,asset_type:'etf',price:.454,bar_end:'2026-11-12 15:00:00'}]})}]};
+    if(id==='lan_ma55_native15_prices_v1')return{rows:[{payload_json:JSON.stringify({day:'2026-11-12',rows:[{symbol:old.symbol,asset_type:'etf',price:.454,bar_end:'2026-11-12 15:00:00'}]})}]};
     throw Error('Unexpected non-projection call');
   }};
   const dom=new JSDOM('<main/>',{url:'http://localhost',pretendToBeVisual:true});
@@ -81,7 +81,7 @@ test('publication failure retains previous rows, ETF precision, keyboard link an
   d.querySelector('[data-action=refresh]').click(); await pause();
   assert.equal(d.activeElement.dataset.control,'query');assert.equal(d.activeElement.selectionStart,1);
   assert.match(d.querySelector('tbody').textContent,/合成ETF/);
-  assert.match(d.querySelector('h2').textContent,/上次有效交易日 2026-11-12 · 1 BUY · 新结果正在发布/);
+  assert.match(d.querySelector('h2').textContent,/上次有效交易日 2026-11-12 · 1 人工复核候选 · 新结果正在发布/);
   assert.equal(d.querySelectorAll('thead th').length,3);
   assert.ok(calls.every(id=>id.startsWith('lan_ma55_')));
   d.querySelector('[data-action=clear]').click();assert.equal(d.querySelector('[data-control=query]').value,'');

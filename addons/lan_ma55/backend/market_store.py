@@ -126,6 +126,17 @@ def unpack(row):
 
 
 class Store:
+
+    source = SOURCE
+    source_count = 3
+    schema = DDL
+    instrument_table = "instrument_state"
+    bar_table = "bar15"
+    factor_table = "factor_event"
+    progress_table = "ma_history_progress"
+    cache_table = "chart_cache"
+    meta_prefix = ""
+
     def __init__(self, path, *, connection=None):
         self.path = Path(path).resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -145,8 +156,8 @@ class Store:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=NORMAL")
             self.conn.execute("PRAGMA busy_timeout=5000")
-            self.conn.executescript(DDL)
-            self.conn.executescript(indicator_cache.DDL)
+            self.conn.executescript(self.schema)
+            self.conn.executescript(indicator_cache.DDL.replace("chart_cache", self.cache_table))
             self.conn.commit()
         except Exception:
             if self.lease:
@@ -162,7 +173,7 @@ class Store:
     def meta(self, key, default=None, *, conn=None):
         row = (
             (conn or self.conn)
-            .execute("SELECT payload FROM meta WHERE key=?", (key,))
+            .execute("SELECT payload FROM meta WHERE key=?", (self.meta_prefix + key,))
             .fetchone()
         )
         return json.loads(row[0]) if row else default
@@ -170,13 +181,13 @@ class Store:
     def set_meta(self, key, value):
         self.conn.execute(
             "INSERT INTO meta VALUES(?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload",
-            (key, encoded(value)),
+            (self.meta_prefix + key, encoded(value)),
         )
 
     def instrument(self, symbol, *, conn=None):
         return unpack(
             (conn or self.conn)
-            .execute("SELECT * FROM instrument_state WHERE symbol=?", (symbol,))
+            .execute(f"SELECT * FROM {self.instrument_table} WHERE symbol=?", (symbol,))
             .fetchone()
         )
 
@@ -184,7 +195,7 @@ class Store:
         values = [encoded(info[k]) if k == "gaps" else info[k] for k in COLUMNS]
         update = ",".join(f"{k}=excluded.{k}" for k in COLUMNS[1:])
         self.conn.execute(
-            f"INSERT INTO instrument_state VALUES({','.join('?' for _ in COLUMNS)}) "
+            f"INSERT INTO {self.instrument_table} VALUES({','.join('?' for _ in COLUMNS)}) "
             f"ON CONFLICT(symbol) DO UPDATE SET {update}",
             values,
         )
@@ -194,11 +205,11 @@ class Store:
             old_members = {
                 r[0]
                 for r in self.conn.execute(
-                    "SELECT symbol FROM instrument_state WHERE eligible=1"
+                    f"SELECT symbol FROM {self.instrument_table} WHERE eligible=1"
                 )
             }
             members = {r["symbol"] for r in rows if r.get("eligible")}
-            self.conn.execute("UPDATE instrument_state SET eligible=0")
+            self.conn.execute(f"UPDATE {self.instrument_table} SET eligible=0")
             for row in rows:
                 previous = self.instrument(row["symbol"]) or dict(DEFAULTS)
                 self._put(
@@ -232,17 +243,17 @@ class Store:
     def universe(self):
         return {
             r["symbol"]: unpack(r)
-            for r in self.conn.execute("SELECT * FROM instrument_state ORDER BY symbol")
+            for r in self.conn.execute(f"SELECT * FROM {self.instrument_table} ORDER BY symbol")
         }
 
     def universe_page(self, offset, limit):
         with closing(reader(self.path)) as conn:
             conn.execute("BEGIN")
-            total = conn.execute("SELECT count(*) FROM instrument_state").fetchone()[0]
+            total = conn.execute(f"SELECT count(*) FROM {self.instrument_table}").fetchone()[0]
             rows = [
                 unpack(r)
                 for r in conn.execute(
-                    "SELECT * FROM instrument_state ORDER BY symbol LIMIT ? OFFSET ?",
+                    f"SELECT * FROM {self.instrument_table} ORDER BY symbol LIMIT ? OFFSET ?",
                     (limit, offset),
                 )
             ]
@@ -263,16 +274,16 @@ class Store:
         return [
             dict(r)
             for r in db.execute(
-                "SELECT day,ex_factor FROM factor_event WHERE symbol=? ORDER BY ordinal",
+                f"SELECT day,ex_factor FROM {self.factor_table} WHERE symbol=? ORDER BY ordinal",
                 (symbol,),
             )
         ]
 
     def _factors(self, symbol, events):
-        self.conn.execute("DELETE FROM factor_event WHERE symbol=?", (symbol,))
+        self.conn.execute(f"DELETE FROM {self.factor_table} WHERE symbol=?", (symbol,))
         if events is not None:
             self.conn.executemany(
-                "INSERT INTO factor_event VALUES(?,?,?,?)",
+                f"INSERT INTO {self.factor_table} VALUES(?,?,?,?)",
                 [(symbol, i, e["day"], e["ex_factor"]) for i, e in enumerate(events)],
             )
 
@@ -280,7 +291,7 @@ class Store:
         rows = (
             (conn or self.conn)
             .execute(
-                "SELECT * FROM bar15 WHERE symbol=? AND bar_end<=? ORDER BY bar_end DESC LIMIT ?",
+                f"SELECT * FROM {self.bar_table} WHERE symbol=? AND bar_end<=? ORDER BY bar_end DESC LIMIT ?",
                 (symbol, asof, limit),
             )
             .fetchall()
@@ -299,7 +310,7 @@ class Store:
 
     def _write(self, symbol, bars):
         self.conn.executemany(
-            "INSERT INTO bar15 VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(symbol,bar_end) DO UPDATE SET "
+            f"INSERT INTO {self.bar_table} VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(symbol,bar_end) DO UPDATE SET "
             "open=excluded.open,high=excluded.high,low=excluded.low,close=excluded.close,"
             "volume=excluded.volume,amount=excluded.amount,source_id=excluded.source_id,source_count=excluded.source_count",
             [
@@ -314,13 +325,13 @@ class Store:
             ],
         )
         self.conn.execute(
-            "DELETE FROM bar15 WHERE symbol=? AND bar_end < "
-            "(SELECT bar_end FROM bar15 WHERE symbol=? ORDER BY bar_end DESC LIMIT 1 OFFSET ?)",
+            f"DELETE FROM {self.bar_table} WHERE symbol=? AND bar_end < "
+            f"(SELECT bar_end FROM {self.bar_table} WHERE symbol=? ORDER BY bar_end DESC LIMIT 1 OFFSET ?)",
             (symbol, symbol, history_capacity() - 1),
         )
         self.conn.execute(
-            "INSERT INTO ma_history_progress(symbol,raw_count,earliest) "
-            "SELECT ?,count(*),min(bar_end) FROM bar15 WHERE symbol=? "
+            f"INSERT INTO {self.progress_table}(symbol,raw_count,earliest) "
+            f"SELECT ?,count(*),min(bar_end) FROM {self.bar_table} WHERE symbol=? "
             "ON CONFLICT(symbol) DO UPDATE SET raw_count=excluded.raw_count,earliest=excluded.earliest",
             (symbol, symbol),
         )
@@ -342,7 +353,7 @@ class Store:
         if info is None:
             raise ValueError("Metadata must precede bars")
         old = self.raw_rows(symbol, limit=history_capacity())
-        switching = info["source_id"] != SOURCE
+        switching = info["source_id"] != self.source
         # Same-source repairs merge into history. Only an actual source switch
         # replaces incompatible raw input; historical backfill has its own path.
         replace = switching
@@ -446,7 +457,7 @@ class Store:
         )
         with self.transaction():
             if replace:
-                self.conn.execute("DELETE FROM bar15 WHERE symbol=?", (symbol,))
+                self.conn.execute(f"DELETE FROM {self.bar_table} WHERE symbol=?", (symbol,))
             self._write(symbol, incoming)
             self.conn.execute("DELETE FROM tail5 WHERE symbol=?", (symbol,))
             self.conn.executemany(
@@ -460,7 +471,7 @@ class Store:
                     factors_day=now[:10],
                 )
             info.update(
-                source_id=SOURCE,
+                source_id=self.source,
                 transition=transition,
                 state=state,
                 gaps=gaps[-250:],
@@ -491,14 +502,14 @@ class Store:
 
     def history_progress(self, symbol, *, conn=None):
         row = (conn or self.conn).execute(
-            "SELECT * FROM ma_history_progress WHERE symbol=?", (symbol,)
+            f"SELECT * FROM {self.progress_table} WHERE symbol=?", (symbol,)
         ).fetchone()
         return dict(row) if row else dict(scanned_before=None, stop_reason=None, next_retry=0)
 
     def backfill(self, symbol, received, *, sessions, start, end, now, stop_reason=None):
         """Older raw UPSERT only: no tail replacement, strategy replay or BUY write."""
         info = self.instrument(symbol)
-        if not info or info["source_id"] != SOURCE:
+        if not info or info["source_id"] != self.source:
             raise ValueError("Historical backfill requires the established TickFlow source")
         incoming = aggregate(received, sessions, end)["15m"]
         if any(t > (info["latest_completed15"] or "") for t in received):
@@ -522,7 +533,7 @@ class Store:
             self._put(info)
             self.update_cache(symbol, info, raw, self.events(symbol), sessions, rebuild=True, append_only=True)
             self.conn.execute(
-                "INSERT INTO ma_history_progress(symbol,scanned_before,stop_reason,next_retry) VALUES(?,?,?,?) ON CONFLICT(symbol) DO UPDATE SET "
+                f"INSERT INTO {self.progress_table}(symbol,scanned_before,stop_reason,next_retry) VALUES(?,?,?,?) ON CONFLICT(symbol) DO UPDATE SET "
                 "scanned_before=excluded.scanned_before,stop_reason=excluded.stop_reason,next_retry=excluded.next_retry",
                 (symbol, start, stop_reason, time() + (300 if stop_reason == "GAP" else 86400) if stop_reason else 0),
             )
@@ -533,11 +544,11 @@ class Store:
     def history_candidates(self, target):
         return [dict(r) for r in self.conn.execute(
             "SELECT i.symbol,p.scanned_before,p.stop_reason,coalesce(p.next_retry,0) next_retry,"
-            "coalesce(p.raw_count,0) raw_count,p.earliest FROM instrument_state i "
-            "LEFT JOIN ma_history_progress p USING(symbol) "
+            f"coalesce(p.raw_count,0) raw_count,p.earliest FROM {self.instrument_table} i "
+            f"LEFT JOIN {self.progress_table} p USING(symbol) "
             "WHERE i.eligible=1 AND i.source_id=? AND i.latest_completed15>=? "
             "AND (coalesce(p.raw_count,0)<? OR p.stop_reason='GAP') ORDER BY i.symbol",
-            (SOURCE, target, history_capacity()),
+            (self.source, target, history_capacity()),
         )]
 
     def import_legacy(self, info, bars, events, now):
@@ -565,14 +576,14 @@ class Store:
 
     def update_cache(self, symbol, info, raw, events, sessions, *, rebuild=False, append_only=False):
         return indicator_cache.update(self.conn, symbol, info, raw, events, sessions,
-                                      self.meta("calendar_revision", 0), rebuild=rebuild, append_only=append_only)
+                                      self.meta("calendar_revision", 0), rebuild=rebuild, append_only=append_only, table=self.cache_table)
 
     def warm_cache(self, symbols=(), limit=8):
         """Writer-only rebuild of saved facts; never calls a supplier or strategy."""
         candidates = list(dict.fromkeys(symbols))[:limit]
         if not candidates:
             candidates = [r[0] for r in self.conn.execute(
-                "SELECT i.symbol FROM instrument_state i LEFT JOIN chart_cache c "
+                f"SELECT i.symbol FROM {self.instrument_table} i LEFT JOIN {self.cache_table} c "
                 "ON c.symbol=i.symbol AND c.timeframe='15m' WHERE i.latest_completed15 IS NOT NULL "
                 "AND (c.symbol IS NULL OR c.version!=? OR c.calendar_revision!=? "
                 "OR c.basis_revision!=i.basis_revision OR c.factor_revision!=i.factor_revision "
@@ -618,13 +629,13 @@ class Store:
                     state="METADATA_PENDING",
                     row_count=0,
                     capacity=CAPACITY[tf],
-                    source_id=SOURCE,
+                    source_id=self.source,
                 )
             sessions = self.meta("sessions", [], conn=conn)
             visible = min(limit, CAPACITY[tf])
             events = self.events(symbol, conn=conn)
             cached = None if strategy else indicator_cache.read(conn, symbol, tf, asof, visible, info,
-                self.meta("calendar_revision", 0, conn=conn), events)
+                self.meta("calendar_revision", 0, conn=conn), events, table=self.cache_table)
             if cached:
                 visible_bars = cached["bars"]
                 available, raw_count, history_gaps = cached["available"], cached["raw15_count"], cached["history_gaps"]
@@ -637,7 +648,7 @@ class Store:
                 history_gaps = len(points(sessions, raw15[0]["timestamp"], raw15[-1]["timestamp"], step=15)) - len(raw15) if raw15 else 0
             complete_ma = bool(visible_bars) and all(b.get(f"ma{n}") is not None for b in visible_bars for n in MAS)
             progress = self.history_progress(symbol, conn=conn)
-            ma_state = "FACTOR_PENDING" if info["factor_coverage"] != "EXPLICIT" else "REBUILD_PENDING" if info["source_id"] != SOURCE else "GAP" if history_gaps else "READY" if complete_ma and len(visible_bars) == visible else progress["stop_reason"] or "PENDING"
+            ma_state = "FACTOR_PENDING" if info["factor_coverage"] != "EXPLICIT" else "REBUILD_PENDING" if info["source_id"] != self.source else "GAP" if history_gaps else "READY" if complete_ma and len(visible_bars) == visible else progress["stop_reason"] or "PENDING"
             return dict(
                 symbol=symbol,
                 name=info["name"],
@@ -680,7 +691,7 @@ class Store:
                 source_asof=info["updated_at"],
                 source_id=info["source_id"],
                 transition=info["transition"],
-                analysis_allowed=info["source_id"] == SOURCE
+                analysis_allowed=info["source_id"] == self.source
                 and info["state"] in ("READY", "WARMUP"),
                 price_basis="QFQ" if info["factor_coverage"] == "EXPLICIT" else "RAW",
                 basis_id=f"{info['source_id']}:{asof[:10]}:{info['basis_revision']}",
@@ -713,20 +724,20 @@ class Store:
                 where += " AND i.symbol IN (SELECT value FROM json_each(?))"
                 params = (encoded(scope),)
             refreshed = conn.execute(
-                f"SELECT count(*) FROM instrument_state i WHERE {where} AND i.source_id=? "
-                "AND EXISTS(SELECT 1 FROM bar15 b WHERE b.symbol=i.symbol AND b.bar_end=? "
-                "AND b.source_id=? AND b.source_count=3)",
-                (*params, SOURCE, target, SOURCE),
+                f"SELECT count(*) FROM {self.instrument_table} i WHERE {where} AND i.source_id=? "
+                f"AND EXISTS(SELECT 1 FROM {self.bar_table} b WHERE b.symbol=i.symbol AND b.bar_end=? "
+                f"AND b.source_id=? AND b.source_count={self.source_count})",
+                (*params, self.source, target, self.source),
             ).fetchone()[0]
-            expected = conn.execute(f"SELECT count(*) FROM instrument_state i WHERE {where}", params).fetchone()[0]
-            saved = conn.execute(f"SELECT max(latest_completed15) FROM instrument_state i WHERE {where} AND source_id=?", (*params, SOURCE)).fetchone()[0]
+            expected = conn.execute(f"SELECT count(*) FROM {self.instrument_table} i WHERE {where}", params).fetchone()[0]
+            saved = conn.execute(f"SELECT max(latest_completed15) FROM {self.instrument_table} i WHERE {where} AND source_id=?", (*params, self.source)).fetchone()[0]
             states = dict(
                 conn.execute(
-                    f"SELECT state,count(*) FROM instrument_state i WHERE {where} GROUP BY state", params
+                    f"SELECT state,count(*) FROM {self.instrument_table} i WHERE {where} GROUP BY state", params
                 )
             )
             oldest, newest, count = conn.execute(
-                "SELECT min(latest_completed15),max(latest_completed15),count(*) FROM instrument_state"
+                f"SELECT min(latest_completed15),max(latest_completed15),count(*) FROM {self.instrument_table}"
             ).fetchone()
             return dict(
                 data_revision=self.meta("data_revision", 0, conn=conn),
@@ -734,7 +745,7 @@ class Store:
                 states=states,
                 source_counts=dict(
                     conn.execute(
-                        f"SELECT source_id,count(*) FROM instrument_state i WHERE {where} GROUP BY source_id", params
+                        f"SELECT source_id,count(*) FROM {self.instrument_table} i WHERE {where} GROUP BY source_id", params
                     )
                 ),
                 pending_symbols=sum(v for k, v in states.items() if k != "READY"),
@@ -749,11 +760,11 @@ class Store:
                              latest_completed15=saved, refreshed=refreshed, expected=expected,
                              updated_at=self.meta("last_commit", conn=conn),
                              updating=expected == 0 or refreshed < expected),
-                asset_counts=dict(conn.execute(f"SELECT source_type,count(*) FROM instrument_state i WHERE {where} GROUP BY source_type", params)),
+                asset_counts=dict(conn.execute(f"SELECT source_type,count(*) FROM {self.instrument_table} i WHERE {where} GROUP BY source_type", params)),
                 history_queue_count=conn.execute(
-                    f"SELECT count(*) FROM instrument_state i LEFT JOIN ma_history_progress p USING(symbol) "
+                    f"SELECT count(*) FROM {self.instrument_table} i LEFT JOIN {self.progress_table} p USING(symbol) "
                     f"WHERE {where} AND i.source_id=? AND (coalesce(p.raw_count,0)<? OR p.stop_reason='GAP')",
-                    (*params, SOURCE, history_capacity()),
+                    (*params, self.source, history_capacity()),
                 ).fetchone()[0],
             )
 
@@ -763,10 +774,10 @@ class Store:
             conn.execute("BEGIN")
             return [dict(r, price_basis="RAW", volume_unit="shares") for r in conn.execute(
                 "SELECT b.symbol,i.name,i.source_type asset_type,i.raw_tick,b.close price,b.bar_end,"
-                "b.source_id,i.factor_revision FROM instrument_state i CROSS JOIN bar15 b ON b.symbol=i.symbol "
-                "AND b.bar_end=(SELECT max(x.bar_end) FROM bar15 x WHERE x.symbol=i.symbol AND x.bar_end<=?) "
+                f"b.source_id,i.factor_revision FROM {self.instrument_table} i CROSS JOIN {self.bar_table} b ON b.symbol=i.symbol "
+                f"AND b.bar_end=(SELECT max(x.bar_end) FROM {self.bar_table} x WHERE x.symbol=i.symbol AND x.bar_end<=?) "
                 "WHERE "
-                "substr(b.bar_end,1,10)=? AND b.source_count=3",
+                f"substr(b.bar_end,1,10)=? AND b.source_count={self.source_count}",
                 (day + " 15:00:00", day),
             )]
 

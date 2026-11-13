@@ -46,7 +46,7 @@ def run(data, output, symbols):
                   target=target, suspension="NOT_VERIFIED", shared_account_pool="UNKNOWN", samples={})
     try:
         native = collector.native15_shadow(symbols, start, target)
-        five, errors = collector.fetch(symbols, recent, target, cold=True)
+        five, errors = collector.fetch_five(symbols, recent, target, cold=True)
         factors = collector.factors(symbols)
         (output / "market-private.json").write_text(json.dumps(dict(native=native, five=five, factors=factors)), "utf-8")
         for symbol in symbols:

@@ -76,7 +76,7 @@ def run(data, output, symbols):
                 start = selected[0] + " 09:35:00"
                 end = target if window == 0 else selected[-1] + " 15:00:00"
                 cold.acquire(collector.stop)
-                received, errors = collector.fetch(symbols, start, end, cold=True)
+                received, errors = collector.fetch_five(symbols, start, end, cold=True)
                 for symbol in symbols:
                     truth[symbol].update(received.get(symbol, {}))
                     info = owner.market.instrument(symbol)

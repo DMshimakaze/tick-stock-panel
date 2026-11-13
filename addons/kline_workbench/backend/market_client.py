@@ -32,19 +32,20 @@ class Client:
     def universe(self, offset=0):
         return self.get("/universe", offset=offset, limit=100)
 
-    def bars(self, symbols, *, timeframes="15m", asof=None):
+    def bars(self, symbols, *, timeframes="15m", asof=None, source="native"):
         return self.get(
             "/bars",
             symbols=",".join(symbols),
             timeframes=timeframes,
+            source=source,
             **({"asof": asof} if asof else {}),
         )
 
-    def events(self, symbol, start, end):
+    def events(self, symbol, start, end, *, native=False):
         rows, total, offset, symbol_total = [], 0, 0, 0
         # A visible 250-bar window has a bounded paginated event response.
         for _ in range(16):
-            page = self.get("/events",symbol=symbol,start=start,end=end,offset=offset,limit=200)
+            page = self.get("/candidates" if native else "/events",symbol=symbol,start=start,end=end,offset=offset,limit=200)
             rows.extend(page["rows"])
             total = page["total"]
             symbol_total = page.get("symbol_total", total)

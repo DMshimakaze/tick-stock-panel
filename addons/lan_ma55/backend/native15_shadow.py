@@ -1,8 +1,11 @@
-"""Native 15m evidence only. A native candle never claims three received 5m bars."""
+"""TickFlow completed native input; shared by production and bounded comparisons."""
+
+from math import isfinite
 
 from .market_grid import FIELDS, normalize_five, as_ms, combined, wall
 
 SOURCE = "TICKFLOW_NATIVE_15M"
+PROOF = "NATIVE_15M_COMPLETED"
 
 
 def normalize_native(data, start, end):
@@ -10,14 +13,23 @@ def normalize_native(data, start, end):
     stamps = data["timestamp"]
     if any(len(data[k]) != len(stamps) for k in (*FIELDS[:5], "timestamp")):
         raise ValueError("TRUNCATED_OR_MISALIGNED_NATIVE15")
+    if any(type(t) not in (int, float) or not isfinite(t) for t in stamps):
+        raise ValueError("INVALID_NATIVE15_TIMESTAMP")
     keep = [i for i, stamp in enumerate(stamps) if stamp <= as_ms(end)]
     selected = {k: [values[i] for i in keep] for k, values in data.items() if k in ("timestamp", *FIELDS)}
-    rows, invalid = normalize_five(selected, start, end)
-    if any(wall(t).minute % 15 for t in rows):
+    # Reject malformed rows before compact lots are multiplied by 100.
+    for key in FIELDS:
+        if key in selected and any(v is not None and (type(v) not in (int, float) or not isfinite(v)) for v in selected[key]):
+            raise ValueError("INVALID_NATIVE15_OHLCV_TYPE")
+    try:
+        rows, invalid = normalize_five(selected, start, end)
+    except ValueError as exc:
+        raise ValueError(str(exc).replace("5M", "NATIVE15")) from None
+    if any(wall(t).minute % 15 for t in (*rows, *invalid)):
         raise ValueError("NATIVE15_NOT_CLOSE_LABELLED")
-    return [combined([r], t, SOURCE, 1) for t, r in sorted(rows.items())], dict(
+    return [dict(combined([r], t, SOURCE, 1), source_proof=PROOF) for t, r in sorted(rows.items())], dict(
         invalid=invalid, unfinished=len(stamps) - len(keep), source_count=1,
-        completeness="NATIVE_15M_COMPLETED", production_admitted=False,
+        completeness=PROOF, production_admitted=True,
     )
 
 

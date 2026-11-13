@@ -5,7 +5,7 @@ from .market_grid import SOURCE, wall
 
 ERROR_TEXT = {
     "CALENDAR_LAG": "今日交易日尚未由源端完成行情核实，保留上次有效交易日",
-    "SOURCE_LAG": "部分证券尚未取得目标15m的完整5m，保留上次有效结果",
+    "SOURCE_LAG": "部分证券尚未取得完整目标15m，保留上次有效结果",
     "FACTOR_PENDING": "部分证券复权因子未核实，暂停这些证券的新买点计算",
     "HOST_BUSY": "宿主正在执行数据任务，插件让出采集额度",
     "QUOTA_WAIT": "等待插件滚动请求额度，后台将按计划继续",
@@ -50,9 +50,9 @@ def business_status(state, snapshot, now):
                    and analysis.get("calculated") == expected)
     if not target or not expected or (not verified and market_session in ("OPEN", "LUNCH")):
         mode = "UNKNOWN"
-    elif not snapshot.get("source_counts", {}).get(SOURCE):
+    elif not snapshot.get("source_counts", {}).get(state.get("source_id", SOURCE)):
         mode = "INITIAL_HISTORY"
-    elif state.get("work_stage") == "HISTORY" and not state.get("queue_size"):
+    elif state.get("work_stage") in ("C", "HISTORY") and not state.get("queue_size"):
         mode = "HISTORY_BACKFILL"
     elif not current:
         mode = "LIVE_CATCHUP"

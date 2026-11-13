@@ -12,6 +12,7 @@ from .market_grid import CAPACITY, latest_point, now_cn, wall
 
 from .runtime import Worker
 from .store import read_page
+from .native15_owner import candidates_page
 
 EXTENSION_ID = "lan.ma55"
 EXTENSION_API_VERSION = 1
@@ -97,6 +98,25 @@ def setup(registrar):
         )
         return dict(api_version=1, **result)
 
+    @public.get("/candidates")
+    def candidates(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+                   symbol: str | None = None, start: str | None = None, end: str | None = None):
+        if symbol and not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", symbol):
+            raise HTTPException(422, "canonical symbol required")
+        try:
+            start = str(wall(start)) if start else None
+            end = str(wall(end)) if end else None
+        except ValueError:
+            raise HTTPException(422, "start/end must be Beijing time") from None
+        if start and end and start > end:
+            raise HTTPException(422, "start exceeds end")
+        if data_path is None or not data_path.exists():
+            raise HTTPException(503, "Native15 starting")
+        try:
+            return candidates_page(data_path, limit=limit, offset=offset, symbol=symbol, start=start, end=end)
+        except sqlite3.Error:
+            raise HTTPException(503, "Native15 candidate partition not initialized") from None
+
     @router.get("/symbols")
     def symbols(
         limit: int = Query(50, ge=1, le=200),
@@ -142,6 +162,7 @@ def setup(registrar):
         timeframes: str = "15m",
         asof: str | None = None,
         limit: int = Query(250, ge=1, le=250),
+        source: str = "native",
     ):
         codes, tfs = (
             list(dict.fromkeys(symbols.split(","))),
@@ -158,6 +179,10 @@ def setup(registrar):
         ):
             raise HTTPException(422, "15m/30m/60m only; response limited to 8000 bars")
         with ready() as store:
+            if source not in ("native", "archive"):
+                raise HTTPException(422, "source must be native or archive")
+            if source == "archive":
+                store = getattr(worker.owner, "archive_market", store)
             page = store.universe_page(0, 1)
             current = latest_point(page["sessions"], str(now_cn()))
             try:

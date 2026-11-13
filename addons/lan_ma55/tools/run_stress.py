@@ -15,8 +15,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", required=True)
     parser.add_argument("--symbols", type=int, default=5600)
+    parser.add_argument("--native", action="store_true")
     args = parser.parse_args()
     folder = Path(args.output)
+    if args.native:
+        from addons.lan_ma55.tools.stress_native15 import run as database_load
     database = database_load(folder, args.symbols)
     print(
         json.dumps(

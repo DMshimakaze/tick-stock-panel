@@ -1,63 +1,62 @@
-# 兰 MA55 R1｜lan.ma55 0.8.2
+# 兰 MA55 原生15m候选｜lan.ma55 0.9.3
 
-生产链：一个 TickFlow raw 5m 适配器 → 三根完整 5m 聚合 15m → 原 SQLite 内的冻结 R1 → 官方 Ext Data 发布。唯一在线个人行情/策略库为 `data/user_data/lan_ma55/state.sqlite3`。K 线工作台通过本机 HTTP v1 只读，题材页继续消费 `lan_ma55_summary/day/history`。宿主固定 v0.3.36。
+生产链路为 TickFlow `klines.batch(period="15m", adjust="none")` → 同一 SQLite 的原生来源分区 → `NATIVE15_REVIEW_V1` 人工复核候选 → 官方 Ext Data → MA55 页面 / K线工作台。宿主保持官方 v0.3.36，兼容范围 `>=0.3.36,<0.3.37`。
 
-`engine.py`、`pipeline.py` 保持原样：MA55_15M_MINIMAL_V5_R1、state revision 4、56 根连续预热、source_count=3、有效因子和结构锁。图表计算历史淘汰仅作用于行情，持久结构记忆、历史确认及风险继续保留。相同风险 payload 不重写原 updated_at。
+原生柱保存真实 `TICKFLOW_NATIVE_15M / source_count=1 / NATIVE_15M_COMPLETED`。旧 `bar15` 的三根5m约束、`signal_event`、`event_risk` 和旧结构状态保留。生产 worker 不调用5m；`fetch_five()` 仅供明确执行的离线归档对照工具使用。
 
-## 所有权、容量与额度
+## 候选与冻结历史
 
-`runtime.py` 负责单 worker，`collector.py` 唯一拥有个人行情 SDK，`market_grid.py` 聚合/投影，`market_store.py` 管理 raw 窗口，`unified_store.py` 用同一连接提交行情、策略、风险和收据。HTTP 使用独立只读连接，关闭页面后继续维护。
+`native15_signal_adapter.py` 直接调用原样保留的 `engine.minimal_features / engine.advance`，引用研究提交 `5d1d0f6e8913f528110c93e054429f050b9851f6`。状态保留55根特征历史、每槽5份量和完整结构锁，按证券增量持久化。冻结 `pipeline.py` 的 `source_count=3` 合同保持原样。
 
-SQLite WAL、短事务、writer lease、每股默认保留 1,280 根完成 raw 15m 和 2 根未完成 5m；容量由 `max(1280, (visible+232)×周期比例+聚合边界)` 计算。`indicator_cache.py` 在同库维护15/30/60m有界图表快照和六SMA滚动状态，可见窗口250/125/62根。冻结策略单独读取最近250根的价格/因子输入，按原冻结逻辑计算特征。
+新候选单独存入 `native15_candidate` 与 `native15_candidate_risk`；来源、输入合同、规则引用、因子/基准修订、支撑/确认/首次看到时间均可追溯。首次预热及历史回补为 REPLAY；之后的新完成桶按真实首次看到时间区分 LIVE / DELAYED。候选供人工看图，不宣称与旧冻结 BUY 等价。
 
-同股同目标桶最多尝试一次；优先最新桶，再低速冷预热。minute 总预算默认 8 RPM、配置上限 12，冷预算默认 2 RPM，冷调用包含在总预算内。任务集合受证券元数据及最多 64 个短期查看需求约束。429 按响应冷却。请求收据记录 endpoint、能力、状态、延迟、标的数和重试数，滚动保留约一万行。
+真实缺口、无效OHLC、未知因子或tick会阻止对应证券的候选。输入修订后已有结构锁须从真实原生历史复现；证据不足时保留锁，显示 `INPUT_REVISION_LOCK_HISTORY_REQUIRED`。现有确认不改写。
 
-官方活跃 pipeline job 会让插件让出请求；它只覆盖 pipeline，账号跨端点总配额仍需实测。官方全量 1m 保持官方所有权。v0.3.36 的 minute-range 是单股最多 20 个已保存交易日的展示投影，缺完整原价及逐股来源契约；minute-batch 可触发商业补拉。因此保留一个 5m 适配器，并记录无法稳定复用的原因。
+首页默认原生候选，旧冻结 BUY 使用独立投影入口。Theme 的旧 BUY 数据集保持原含义。
 
-## 本机 HTTP v1
+## 所有权、调度与缓存
 
-前缀 `/api/extensions/lan.ma55/v1`，仅 GET。沿用宿主认证：无密码本机访问；有密码时用已有面板 tf_session。开放 API Token 不能访问自定义路由；Ext Data 发布继续使用已有 read:ext/write:ext Token。凭证留在本机配置。
+`runtime.py` 维护唯一后台 SDK owner 和 writer lease，`native15_owner.py` 使用原数据库同一连接原子提交行情、候选与收据。关闭页面后继续运行。新表位于既有 `state.sqlite3` 内；原生行情保留，计算和图表读取有界。
 
-| 接口 | 限额与内容 |
+- A：已有输入的最新完成目标追赶，最高优先级。
+- B：全池主动取得约64根原生15m，尽快满足56根连续合法输入。
+- C：低优先级补足约1,280根图表历史，并修复真实历史缺口；相同窗口最多100股一批。
+
+A/B共享原有8 RPM分钟总预算；C另受2 RPM冷预算约束，仍计入总预算。总配置上限12。持久 `last_attempt / next_eligible` 保证公平；同目标冷却到期可再排队，三次连续失败后延长冷却。429服从源端 Retry-After，401/403停止供应商调用，等待配置/重启。账户跨端点共享池尚未核实。
+
+交易日从已核实历史日历及完成原生15m核对，首根完成前显示等待；不请求5m探测交易日。午休、完成延迟余量、交易日、OHLCV、去重冲突、手→股/份和金额元均在输入边界验证。
+
+`market_store.py` 与 `indicator_cache.py` 复用原读写/投影逻辑，按来源使用独立表及缓存命名空间。30/60m只聚合连续的2/4根原生15m；六SMA按来源、基准、因子、日历与元数据修订隔离。可见上限250/125/62根，策略普通增量只读取最近250根。MA233不足时显示空值及原因，最新图表/候选先发布。
+
+## 公开只读接口
+
+前缀 `/api/extensions/lan.ma55/v1`，沿用宿主面板会话认证。
+
+| 接口 | 内容 |
 | --- | --- |
-| /status | owner、来源、水位、覆盖及实际请求计数 |
-| /universe | 分页最多100行、日历及 generation |
-| /bars | 15/30/60m，最多32证券、8000根；来源、基准、因子及有效性 |
-| /events | symbol/start/end/rule_version 筛选，分页最多200行，原确认及风险；symbol_total 显示窗口外数量 |
-| /inventory | 15m、5m短尾数量及首尾 |
+| `/status` | 原生目标、保存/实际分析覆盖、A/B/C、重试、因子、历史和请求收据 |
+| `/universe` | 真实股票/ETF范围，最多100行/页 |
+| `/bars` | 默认原生15/30/60m，最多32证券/8000根；`source=archive` 明确读取旧行情 |
+| `/candidates` | 独立原生候选，symbol/start/end筛选，最多200行/页 |
+| `/events` | 原冻结 BUY 与风险，原有分页/筛选合同 |
+| `/inventory` | 所选原生证券实际库存 |
 
-原 status/events/symbols/cycles 路由保留。GAP、FACTOR_PENDING、SOURCE_DISCREPANCY、SOURCE_UNAVAILABLE 暂停新 BUY，历史仍可查看。
+原有 symbols/cycles/events/status 路由保留。原生投影为 `lan_ma55_native15_{summary,day,history,prices}_v1`；旧 `lan_ma55_summary/day/history/prices_v1` 不混入候选。页面每10秒只读发布结果，“刷新展示”不采集行情。
 
-## 迁移、构建和回退
+## 构建、验证与回退
 
-停机后备份 SQLite/WAL、旧缓存及配置。`python -m addons.lan_ma55.migrate_unified --state <状态快照> --market <行情快照> --output <新候选>` 以原 MA55 库为底，幂等迁入行情，逐条核验 signal_event/event_risk 全字段哈希和 quick_check。原 collector 的三张旧缓存表保存在快照归档，候选移除未被当前代码读取的旧表。
+在现有 nga 环境执行后端命令；前端使用现有 pnpm 依赖，不升级宿主或SDK。
 
-验过后停机替换原状态路径，原 SQLite、DuckDB、workbench 移入受限归档。官方管理器停用 lan.marketdata；退役包不启动 writer 或 SDK。回退先停机另存新状态，再按 previous_version 和一致性快照恢复。
+```text
+pnpm --dir addons/lan_ma55 test
+pnpm --dir addons/lan_ma55 build
+python addons/lan_ma55/build_backend.py
+python -m pytest -q -p no:cacheprovider addons/lan_ma55/tests_backend addons/lan_ma55/tests_market
+python -m ruff check addons/lan_ma55
+python addons/lan_ma55/tools/run_stress.py --native --output <新私人目录> --symbols 5600
+python addons/lan_ma55/tools/native15_production_benchmark.py --output <新私人目录>
+```
 
-`pnpm --dir addons/lan_ma55 build` 后由现有 nga Python 执行 build_backend.py，通过官方管理器安装、重启。本轮只更新MA55；K线3.2.1、题材1.0.7保持已安装版本。定向测试在tests_backend、tests_market和Node tests。冻结oracle使用指定提交的只读副本和私人行情包。`tools/run_stress.py --output <新私人目录> --symbols 5600` 重放隔离库和注入transport的官方1s/3s调用链。DB、商业返回、日志、截图、ZIP/dist和私人参考包均不提交。
+通过官方扩展管理器预检、浏览器候选加载、安装，再正常重启。迁移仅新增来源分区；上线前使用 SQLite backup API 一致性备份及旧确认/风险逐行比对。回退前另存新行情和候选，再由官方管理器人工选择版本；旧版忽略原生分区，保留当前数据库。旧版恢复其旧生产口径，不能作为新版本的自动fallback。
 
-## 0.8.2 增量图表与原生15m判定
-
-生产继续使用真实三根5m聚合15m。原生`15m`已用同一授权账号进行七证券、三HTTP的同窗对照，出现真实OHLCV/amount差异，且冻结pipeline要求`source_count=3`。`native15_shadow.py`保留真实`source_count=1`及独立来源，不进入生产调度或BUY表。明细见[本轮验收](../../docs/diagnostics/TSP_MA55_Native15_Incremental_UI_20261113.md)。
-
-缓存每证券三个快照，包含来源、价格/因子/日历修订、元数据、完成时间、连续性和最多233个滚动收盘。连续新K在原行情事务内追加六SMA；每233步以`math.fsum`重定基准。首次、补缺、修订或换源先使旧快照失效，空闲writer再从有界raw15重建，最新行情和冻结计算优先。当前图表命中时只读快照；历史窗口或缓存待建时从保存raw有界投影，`cache.hit=false`明确标识。GET只登记缓存重建需求，不触发商业历史取数或BUY重算。
-
-结果页五张卡分别显示监控总量、真实目标、目标K到达、实际计算和已发布BUY；两条小进度位于卡内。运行状态带保留动作、成功时间和单行阻塞，详情默认折叠。正文继承宿主Inter字体栈，数字采用官方JetBrains Mono / IBM Plex Mono字体栈；暗亮主题、桌面五卡/中屏三卡/手机两卡及260px搜索已实图核验。
-
-零商业流量工具：`python -m addons.lan_ma55.tools.cache_benchmark --source <只读快照> --output <新私人目录>`；`python -m addons.lan_ma55.tools.native15_transport_benchmark --output <新私人目录>`。真实shadow工具必须在生产owner停机维护时运行，明确提供至多8个证券及私人输出路径，最多3次HTTP、零重试；不用于确认账户共享配额。
-
-## 0.7.3 盘中目标与运行面板
-
-交易日核实独立于一天一次的证券元信息刷新。日K只用于提供历史交易日；当天日K尚无记录时，同一 SDK owner 使用一只指数的有效完成5m核实当天，未核实不加入日历。日历检查失败或尚无完成5m时，五分钟后再查；不凭工作日生成交易日，不重拉证券 master。已核实日期和待确认日期、来源水位、下一次检查时间保存在原库 meta，未新增表或修改 BUY schema。
-
-只有 `/api/pipeline/jobs` 的真实 `active_id` 表示宿主忙碌。401/403/404、429/500、超时、连接和 JSON 错误分别上报；核实失败期间暂停商业请求，短暂故障30秒再查，连续三次失败或鉴权/路由错误改为300秒。页面显示原因，不将其伪装成运行中的宿主任务。插件8 RPM分钟与2 RPM冷请求预算保持不变。
-
-状态投影分别提供 `data_target_15m`、`latest_saved_15m`、`latest_analyzed_15m`、`last_publish_at`、`active_operation`、`sync_mode`、`history_queue_count` 与有效监控股票/ETF数量。覆盖数由目标 raw15 主键查找证明；计算数联合实际 processing_receipt、当前 generation 的 cycle 和 valid/insufficient 输出核对，排除仅处理过的受阻尝试。限定 `collection_symbols` 同时限定这些计数。交易日、数据和分析水位不使用页面刷新时间替代。
-
-原生风格页面显示六项 KPI、当前操作和数据模式、两条进度、独立历史队列；桌面搜索框260px，手机两列。发布失败保留上次有效结果；状态超过两分钟未发布时显示过期提示。页面每10秒只读官方 Ext Data，“刷新展示”不采集行情。日期、三个 Tab、分页、原 BUY 深链和 ETF 价格精度保留。
-
-## 0.6.3 历史与展示
-
-同一 SDK owner 优先新完成 15m，历史队列按最多18个真实交易日分窗，共享2 RPM冷预算和8 RPM总预算。`ma_history_progress` 只保存库存数量、最早时间和回补游标；图表每次按 source/basis/factor revision 和真实可见首末重新判定 READY，三秒读取不发商业请求。回补只 UPSERT raw 历史，保留最新K、原事件与风险；同源 rebuild 不清库。真实缺格点和未确认因子保留空 MA。
-
-股票及沪深 ETF 根据 TickFlow 元信息入同一 Universe，tick_size、上市日和事件链均取原响应。三列结果为名称、原价完成15m收盘、confirmed_at。价格以 `lan_ma55_prices_v1` 小体量只读投影发布，所选日无价格显示—，不改旧 day 表 schema。详情与原始诊断可展开。
+实际安装、覆盖、性能、数据保全与剩余范围见[本轮验收](../../docs/diagnostics/TSP_MA55_Native15_Production_20261113.md)。此前shadow和缓存验收见[0.8.2历史报告](../../docs/diagnostics/TSP_MA55_Native15_Incremental_UI_20261113.md)。商业行情、数据库、日志、截图、ZIP/dist、凭据和私人参考包只保存在本机。

@@ -50,7 +50,7 @@ export function createReader(api, { clientId = globalThis.crypto.randomUUID(), c
       const occupied = new Set(rows.filter(r => clock()-r.request_ms<LEASE_MS).map(r=>r.scope));
       scope = own?.scope ?? Array.from({length:SLOTS},(_,i)=>String(i)).find(s=>!occupied.has(s));
       if (scope === undefined) throw Error('16个图表会话正在使用，请关闭闲置图表后重试');
-      const demand = {scope, client_id:clientId, requested_symbol:current.symbol, request_ms:clock(), request_id:current.id, period:current.period, pinned:current.pinned};
+      const demand = {scope, client_id:clientId, requested_symbol:current.symbol, request_ms:clock(), request_id:current.id, period:current.period, pinned:current.pinned, source:current.source};
       await api.extDataIngest(DEMAND,{rows:[demand]});
       const receipt = (await api.extDataRows(DEMAND,{limit:SLOTS})).rows.find(r=>r.scope===scope);
       if (disposed || id !== generation) return;
@@ -78,10 +78,10 @@ export function createReader(api, { clientId = globalThis.crypto.randomUUID(), c
     return decodePayload(payload, status);
   }
   return {
-    async read(symbol, {period='15m',pinned=null}={}) {
+    async read(symbol, {period='15m',pinned=null,source='native'}={}) {
       if (!fullSymbol(symbol)) throw Error('需要完整股票代码');
       const id=++generation;
-      current={symbol,period,pinned:pinned===null?-1:Number(pinned),id:clientId+':'+id}; lastRevision=null;
+      current={symbol,period,source,pinned:pinned===null?-1:Number(pinned),id:clientId+':'+id}; lastRevision=null;
       await send(id);
       return id===generation ? poll() : null;
     }, poll,

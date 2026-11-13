@@ -5,7 +5,7 @@ import zipfile
 
 def build():
     root = Path(__file__).resolve().parent
-    target = root/'dist'/'lan-kline-3.2.1.zip'
+    target = root/'dist'/'lan-kline-3.3.0.zip'
     target.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(target, 'w', zipfile.ZIP_DEFLATED) as archive:
         archive.write(root/'extension.yaml', 'extension.yaml')

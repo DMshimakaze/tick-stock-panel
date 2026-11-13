@@ -8,6 +8,10 @@ SUMMARY_ID = "lan_ma55_summary"
 DAY_ID = "lan_ma55_day"
 HISTORY_ID = "lan_ma55_history"
 PRICES_ID = "lan_ma55_prices_v1"
+NATIVE_SUMMARY_ID = "lan_ma55_native15_summary_v1"
+NATIVE_DAY_ID = "lan_ma55_native15_day_v1"
+NATIVE_HISTORY_ID = "lan_ma55_native15_history_v1"
+NATIVE_PRICES_ID = "lan_ma55_native15_prices_v1"
 DAY_FIELDS = [
     ("symbol", "string"),
     ("name", "string"),
@@ -24,7 +28,7 @@ DAY_FIELDS = [
 
 
 def view_configs():
-    return [
+    legacy = [
         dict(id=PRICES_ID, label="MA55 完成15m价格", mode="snapshot", market_level=True,
              description="单库已保存原价收盘，按交易日读取；不代表实时快照。",
              fields=[dict(name=n, dtype="string", label=n) for n in ("scope", "payload_json")]),
@@ -58,10 +62,16 @@ def view_configs():
             ],
         ),
     ]
+    native_ids = {SUMMARY_ID: NATIVE_SUMMARY_ID, DAY_ID: NATIVE_DAY_ID,
+                  HISTORY_ID: NATIVE_HISTORY_ID, PRICES_ID: NATIVE_PRICES_ID}
+    return legacy + [dict(config, id=native_ids[config["id"]],
+                          label="原生15m人工复核候选 · "+config["label"],
+                          description="NATIVE15_REVIEW_V1，独立候选投影，不写入历史冻结BUY契约。") for config in legacy]
 
 
 class Publisher:
-    def __init__(self, base_url, token=None, *, session=None, transport=None):
+    def __init__(self, base_url, token=None, *, session=None, transport=None, native=False):
+        self.native = native
         headers = {"Authorization": "Bearer " + token} if token else {}
         self.http = httpx.Client(
             base_url=base_url,
@@ -90,7 +100,7 @@ class Publisher:
 
     def summary(self, payload):
         return self.ingest(
-            SUMMARY_ID,
+            NATIVE_SUMMARY_ID if self.native else SUMMARY_ID,
             [
                 dict(
                     scope="lan.ma55",
@@ -103,11 +113,11 @@ class Publisher:
 
     def day(self, day, rows):
         if rows:
-            return self.ingest(DAY_ID, rows, day)
+            return self.ingest(NATIVE_DAY_ID if self.native else DAY_ID, rows, day)
 
     def history(self, days):
         return self.ingest(
-            HISTORY_ID,
+            NATIVE_HISTORY_ID if self.native else HISTORY_ID,
             [
                 dict(
                     scope="lan.ma55",
@@ -119,7 +129,7 @@ class Publisher:
         )
 
     def prices(self, day, rows):
-        return self.ingest(PRICES_ID, [dict(scope="lan.ma55", payload_json=json.dumps(
+        return self.ingest(NATIVE_PRICES_ID if self.native else PRICES_ID, [dict(scope="lan.ma55", payload_json=json.dumps(
             dict(day=day, rows=rows), ensure_ascii=False, allow_nan=False))])
 
     def ingest(self, table, rows, day=None):

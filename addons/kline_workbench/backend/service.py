@@ -18,7 +18,7 @@ class Worker:
         self.settings = settings
         self.stop, self.lock = Event(), Lock()
         self.state = dict(
-            version="3.2.1",
+            version="3.3.0",
             phase="STARTING",
             source="lan.ma55 HTTP v1",
             minute_request_limit=0,
@@ -106,7 +106,9 @@ class Worker:
             basis_note=(
                 "QuantDash迁移历史，只读展示，等待TickFlow重建"
                 if primary.get("source_id") == "QUANTDASH_LEGACY"
-                else "TickFlow真实5m聚合 / 事件链前复权"
+                else "TickFlow原生15m · 人工复核候选 / 事件链前复权"
+                if primary.get("source_id") == "TICKFLOW_NATIVE_15M"
+                else "历史冻结BUY · 真实5m聚合 / 事件链前复权"
             )
             if primary.get("price_basis") == "QFQ"
             else "因子待补，显示原始价格",
@@ -146,21 +148,21 @@ class Worker:
             self.publisher.publish(stale)
             self.published = {}
             return
-        symbols = sorted({d["requested_symbol"] for d in demands})
         # 16 session slots x 3 periods x 250 bars is split below the v2 limit.
         datasets = {}
-        for offset in range(0, len(symbols), 10):
-            data = self.source.bars(
-                symbols[offset : offset + 10], timeframes="15m,30m,60m"
-            )
-            data["events"] = {}
-            for code in symbols[offset:offset+10]:
-                bars = next(r["bars"] for r in data["rows"] if r["symbol"]==code and r["timeframe"]=="15m")
-                data["events"][code] = self.source.events(code,bars[0]["timestamp"],bars[-1]["timestamp"]) if bars else dict(rows=[],total=0,truncated=False)
-            datasets.update({s: data for s in symbols[offset : offset + 10]})
+        for source in ("native", "archive"):
+            symbols = sorted({d["requested_symbol"] for d in demands if d.get("source", "native") == source})
+            for offset in range(0, len(symbols), 10):
+                data = self.source.bars(symbols[offset:offset+10], timeframes="15m,30m,60m", source=source)
+                data["events"] = {}
+                for code in symbols[offset:offset+10]:
+                    frame = next(r for r in data["rows"] if r["symbol"] == code and r["timeframe"] == "15m")
+                    bars = frame["bars"]
+                    data["events"][code] = self.source.events(code, bars[0]["timestamp"], bars[-1]["timestamp"], native=frame.get("source_id") == "TICKFLOW_NATIVE_15M") if bars else dict(rows=[],total=0,truncated=False)
+                datasets.update({(s, source): data for s in symbols[offset:offset+10]})
         rows, receipts = [], {}
         for demand in demands:
-            row = self.view(demand, datasets[demand["requested_symbol"]])
+            row = self.view(demand, datasets[(demand["requested_symbol"], demand.get("source", "native"))])
             receipt = (row["client_id"], row["request_id"], row["revision"])
             receipts[row["scope"]] = receipt
             if self.published.get(row["scope"]) != receipt:

@@ -120,8 +120,9 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
     if(model.displayPeriod==='15m' && model.event && current.validCount && !matchingBasis) notices.push('选中BUY复权基准未核实');
     if(data?.events?.truncated) notices.push('历史事件分页达到上限');
     $('.kw-source-status').hidden=!model.sourceError;
-    $('.kw-buy-count').textContent=model.displayPeriod==='15m'?`历史BUY ${buys.length}${data?.events?.outside_window?' · '+data.events.outside_window+'条窗口外':''}`:'';
-    $('.kw-anchor').innerHTML=model.event?`<span>15m BUY · ${esc(model.event.slice(0,16))}${anchor.index<0?' · '+esc(anchor.message):''}</span><button data-action="focus" ${anchor.index<0?'disabled':''}>定位信号</button>`:'';
+    const native=data?.source_id==='TICKFLOW_NATIVE_15M';
+    $('.kw-buy-count').textContent=model.displayPeriod==='15m'?`${native?'人工复核候选':'历史冻结BUY'} ${buys.length}${data?.events?.outside_window?' · '+data.events.outside_window+'条窗口外':''}`:'';
+    $('.kw-anchor').innerHTML=model.event?`<span>15m ${model.eventSource==='TICKFLOW_NATIVE_15M'?'人工复核候选':'BUY'} · ${esc(model.event.slice(0,16))}${anchor.index<0?' · '+esc(anchor.message):''}</span><button data-action="focus" ${anchor.index<0?'disabled':''}>定位信号</button>`:'';
     controls();
   }
   function accept(data) {
@@ -135,7 +136,7 @@ export function mountWorkbench(el,ctx,{chartFactory=createWorkbenchChart,now=()=
     if (!same) { model.data=null;model.sourceError=null;model.displayPeriod=model.period;model.pinned=false;needsReset=true; }
     if (model.event && item.symbol!==model.eventSymbol) { model.event=null;model.setup=null;model.defense=null;model.factor=null;model.eventRule=null;model.eventId=null;model.eventSource=null;model.eventBasis=null;model.eventFactorRevision=null;model.eventBasisRevision=null;model.risk=null; }
     model.selected=item;model.loading=true;model.error='';model.matches=[];$('.kw-results').textContent='';writeUrl();update(!same);
-    try { const data=await reader.read(item.symbol,{period:model.period,pinned:pinChange});if (!disposed && id===revision) accept(data); }
+    try { const data=await reader.read(item.symbol,{period:model.period,pinned:pinChange,source:model.eventSource && model.eventSource!=='TICKFLOW_NATIVE_15M'?'archive':'native'});if (!disposed && id===revision) accept(data); }
     catch(e) { if (id===revision) model.error='数据桥请求失败：'+e.message; }
     finally { if (!disposed && id===revision) { model.loading=false;update(); } }
   }
