@@ -2,7 +2,7 @@ format: tick-extension-package
 format_version: 1
 id: lan.ma55
 display_name: 兰 MA55 R1
-version: 0.6.3
+version: 0.7.3
 extension_api_version: 1
 author: DMshimakaze
 description: 单后端维护统一行情与冻结V5_R1，保留原SQLite确认历史。

@@ -27,6 +27,7 @@ from .result_publisher import Publisher
 from .worker_lease import ProcessLease
 from .engine import RULE_VERSION
 from .history import history_task, history_outcome
+from .runtime_status import business_status
 
 
 def classify(items, day):
@@ -130,9 +131,10 @@ class Worker:
             int(settings.get("cold_requests_per_minute", 2))
         )
         self.state = dict(
-            version="0.6.3",
+            version="0.7.3",
             api_version=1,
             phase="STARTING",
+            active_operation="IDLE",
             backend_scanning=True,
             rule_version=RULE_VERSION,
             state_revision=4,
@@ -168,6 +170,9 @@ class Worker:
             target=self.run, name="lan-ma55-unified-writer", daemon=True
         )
         self.last_publication = self.last_history = 0
+        self.host_retry_at = 0
+        self.host_failures = 0
+        self.host_failure_reason = None
 
     def start(self):
         self.lease = ProcessLease(self.folder / "worker.lock")
@@ -185,6 +190,11 @@ class Worker:
 
     def report(self, **values):
         with self.lock:
+            if values.get("error") or values.get("publisher_error"):
+                values["last_error_at"] = str(now_cn())
+            if values.get("phase") and values["phase"] not in ("QUOTA_WAIT", "RATE_LIMITED", "HOST_BUSY"):
+                values.setdefault("wait_seconds", 0)
+                values.setdefault("waiting_for", None)
             self.state.update(values)
 
     def status(self):
@@ -197,8 +207,10 @@ class Worker:
             )
         if self.store:
             try:
-                result.update(self.store.snapshot())
-                result["source_asof"] = result.get("latest_15m")
+                snapshot = self.owner.status_snapshot(scope=self.settings.get("collection_symbols"))
+                result.update(snapshot)
+                result.update(business_status(result, snapshot, str(now_cn())))
+                result["source_asof"] = result["latest_saved_15m"]
             except sqlite3.Error:
                 result.update(
                     database_connected=False, database_error="SQLITE_READ_ERROR"
@@ -206,18 +218,98 @@ class Worker:
         return result
 
     def host_busy(self):
+        if monotonic() < self.host_retry_at:
+            raise RequestDeferred(self.host_retry_at, reason=self.host_failure_reason)
+        reason, status = None, None
         try:
             response = self.http.get("/api/pipeline/jobs", params={"limit": 1})
-            response.raise_for_status()
-            return bool(response.json().get("active_id"))
-        except (httpx.HTTPError, ValueError):
-            return True
+            status = response.status_code
+            if status != 200:
+                reason = f"HOST_HTTP_{status}"
+            else:
+                data = response.json()
+                if not isinstance(data, dict) or "active_id" not in data:
+                    reason = "HOST_INVALID_JSON"
+                else:
+                    self.host_failures = 0
+                    self.host_failure_reason = None
+                    self.report(host_job_status=dict(state="BUSY" if data["active_id"] else "IDLE",
+                                active_id=data["active_id"], checked_at=str(now_cn()), http_status=200))
+                    return bool(data["active_id"])
+        except httpx.TimeoutException:
+            reason = "HOST_TIMEOUT"
+        except httpx.ConnectError:
+            reason = "HOST_CONNECTION_ERROR"
+        except httpx.HTTPError:
+            reason = "HOST_NETWORK_ERROR"
+        except ValueError:
+            reason = "HOST_INVALID_JSON"
+        self.host_failures += 1
+        # No supplier requests while priority cannot be checked. Authentication
+        # failures need configuration; transient checks back off after 3 attempts.
+        delay = 300 if status in (401, 403, 404) or self.host_failures >= 3 else 30
+        self.host_retry_at = monotonic() + delay
+        self.host_failure_reason = reason
+        self.report(host_job_status=dict(state="UNAVAILABLE", active_id=None,
+                    reason=reason, http_status=status, checked_at=str(now_cn()),
+                    retry_seconds=delay, consecutive_failures=self.host_failures))
+        raise RequestDeferred(self.host_retry_at, status=status, reason=reason)
+
+    def refresh_calendar(self, now):
+        """Daily bars seed history; an independent bounded 5m check admits today."""
+        day = now[:10]
+        sessions = self.store.meta("sessions", [])
+        check = self.store.meta("calendar_check", {})
+        if day in sessions:
+            check = dict(check, confirmed_day=day, pending_day=None,
+                         state="CONFIRMED", next_retry_at=None)
+            if self.store.meta("calendar_check", {}) != check:
+                with self.owner.conn:
+                    self.store.set_meta("calendar_check", check)
+            self.report(calendar=check)
+            return sessions
+        if check.get("next_retry_at") and now < check["next_retry_at"]:
+            self.report(calendar=check)
+            return sessions
+        weekend = wall(now).weekday() >= 5
+        check.update(checked_at=now, pending_day=None if weekend else day,
+                     state="CLOSED" if weekend else "UNCONFIRMED",
+                     next_retry_at=str(wall(now) + timedelta(seconds=300)))
+        # Persist the retry boundary before I/O, including failed source requests.
+        with self.owner.conn:
+            self.store.set_meta("calendar_check", check)
+        self.report(calendar=check, phase="VERIFYING_CALENDAR", active_operation="IDLE")
+        if check.get("daily_checked_day") != day:
+            daily = self.collector.calendar()
+            sessions = sorted(set(sessions) | {d for d in daily if d <= day})
+            check.update(daily_last=max(daily, default=None), daily_checked_day=day)
+            with self.owner.conn:
+                self.store.set_meta("calendar_check", check)
+        if day not in sessions and not weekend:
+            evidence = self.collector.session_evidence(now)
+            check["source_5m_asof"] = evidence["source_asof"]
+            if evidence["confirmed_day"]:
+                sessions = sorted(set(sessions) | {evidence["confirmed_day"]})
+                check["verification_source"] = "TICKFLOW_COMPLETED_INDEX_5M"
+        if day in sessions:
+            check.update(confirmed_day=day, pending_day=None, state="CONFIRMED",
+                         last_verified_at=now, next_retry_at=None)
+            check.setdefault("verification_source", "TICKFLOW_DAILY_BAR")
+        with self.owner.conn:
+            self.store.set_sessions(sessions)
+            self.owner.set_meta("sessions", self.store.meta("sessions", []))
+            self.store.set_meta("calendar_check", check)
+        self.report(calendar=check, active_operation="IDLE")
+        return sessions
 
     def publish(self, target, *, force=False):
         now = monotonic()
         if not force and now - self.last_publication < 5:
             return
         pending = self.owner.meta("pending_publish")
+        prior_operation = self.state.get("active_operation", "IDLE")
+        self.report(active_operation="PUBLISHING")
+        self.report(**self.owner.summary(target))
         try:
             if pending:
                 self.publisher.day(
@@ -226,27 +318,52 @@ class Worker:
                 )
                 with self.owner.conn:
                     self.owner.set_meta("pending_publish", None)
+                    self.owner.set_meta("published_market_date", pending["day"])
+                    self.owner.set_meta("day_published_revision", self.owner.meta("revision", 0))
+                self.report(published_market_date=pending["day"],
+                            day_published_revision=self.owner.meta("revision", 0),
+                            day_published_at=str(now_cn()))
             if now - self.last_history >= 60:
                 self.publisher.history(self.owner.history())
                 self.last_history = now
                 self.owner.checkpoint()
-            self.report(**self.owner.summary(target), publisher_error=None)
+                self.report(history_published_at=str(now_cn()))
+            self.report(publisher_error=None)
             if target:
                 self.publisher.prices(target[:10], self.store.prices(target[:10]))
-            self.publisher.summary(self.status())
-            self.last_publication = now
         except (httpx.HTTPError, ValueError):
             self.report(
-                publisher_error="Official Ext Data unavailable; committed SQLite retained"
+                publisher_error="官方结果发布失败；SQLite已提交，保留上次有效投影"
             )
+        try:
+            payload = self.status()
+            # Publishing itself is visible on /status. A completed projection
+            # resumes the actual operation instead of sticking at PUBLISHING.
+            if payload["active_operation"] != "BLOCKED":
+                payload["active_operation"] = prior_operation
+            payload["pending_publish"] = self.owner.meta("pending_publish") is not None
+            self.publisher.summary(payload)
+            self.report(last_publish_at=str(now_cn()))
+            self.last_publication = now
+        except (httpx.HTTPError, ValueError):
+            self.report(publisher_error="官方状态投影发布失败；保留上次有效投影")
+        finally:
+            self.report(active_operation=prior_operation)
 
     def analyze_pending(self, target, now):
         symbols = self.owner.catch_up(target, now, self.state["started_at"])
+        master = self.store.universe()
+        symbols = [s for s in symbols if master[s]["source_id"] == SOURCE
+                   and (master[s]["latest_completed15"] or "") >= target]
+        scope = self.settings.get("collection_symbols")
+        if scope is not None:
+            symbols = [s for s in symbols if s in scope]
         for offset in range(0, len(symbols), 24):
             if self.stop.is_set():
                 break
             with self.owner.conn:
                 self.owner.conn.execute("BEGIN IMMEDIATE")
+                self.report(active_operation="CALCULATING_MA55", pending_analysis=len(symbols)-offset)
                 self.owner.analyze(
                     symbols[offset : offset + 24],
                     self.store.meta("sessions", []),
@@ -254,6 +371,7 @@ class Worker:
                     now,
                     self.state["started_at"],
                 )
+            self.report(active_operation="IDLE")
             self.publish(target)
         self.report(
             pending_analysis=max(0, len(symbols) - offset - 24) if symbols else 0
@@ -263,7 +381,9 @@ class Worker:
         try:
             self.owner = UnifiedStore(self.folder / "state.sqlite3")
             self.store = self.owner.market
-            self.report(database_connected=True)
+            self.report(database_connected=True, calendar=self.store.meta("calendar_check", {}),
+                        published_market_date=self.owner.meta("published_market_date") or self.owner.summary(None)["market_date"],
+                        day_published_revision=self.owner.meta("day_published_revision", 0))
             key = self.settings.get("tickflow_api_key") or os.environ.get(
                 "TICKFLOW_API_KEY"
             )
@@ -272,6 +392,7 @@ class Worker:
                     phase="CREDENTIAL_REQUIRED",
                     error="Configure TickFlow key for the MA55 owner",
                 )
+                self.publish(latest_point(self.store.meta("sessions", []), str(now_cn())), force=True)
                 return
             self.collector = Collector(
                 key,
@@ -289,28 +410,31 @@ class Worker:
                     now = str(now_cn())
                     sessions = self.store.meta("sessions", [])
                     target = latest_point(sessions, now)
-                    # Restart catch-up consumes only persisted input; no vendor request.
-                    if target and target != last_target:
-                        self.analyze_pending(target, now)
-                        self.publish(target, force=True)
-                        last_target = target
                     if self.host_busy():
-                        self.report(phase="HOST_BUSY", wait_seconds=10)
+                        self.report(phase="HOST_BUSY", active_operation="IDLE", wait_seconds=10)
+                        self.publish(target)
                         self.stop.wait(10)
                         continue
+                    sessions = self.refresh_calendar(now)
+                    target = latest_point(sessions, now)
                     if last_master_day != now[:10]:
-                        sessions = self.collector.calendar()
                         rows, overview = classify(self.collector.master(), now[:10])
                         self.owner.refresh_master(rows, overview, sessions)
                         with self.owner.conn:
                             self.store.set_meta("metadata_day", now[:10])
                         last_master_day = now[:10]
                         target = latest_point(sessions, now)
+                    # Verify the session first. Only actually arrived target
+                    # bars enter restart analysis; stale input is not a new scan.
+                    if target and target != last_target:
+                        self.analyze_pending(target, now)
+                        self.publish(target, force=True)
+                        last_target = target
                     if not target:
                         self.report(phase="CALENDAR_PENDING")
                         self.stop.wait(10)
                         continue
-                    self.report(target_15m=target, source_asof=target)
+                    self.report(target_15m=target)
                     master = self.store.universe()
                     with self.lock:
                         demanded = {
@@ -348,13 +472,16 @@ class Worker:
                         queue_bound=len(master),
                     )
                     if not work:
-                        self.report(phase="WAITING_NEXT_15M", error=None)
+                        self.report(phase="WAITING_NEXT_15M", active_operation="IDLE", active_symbols=0, work_stage=None, error=None)
                         self.publish(target)
                         self.stop.wait(5)
                         continue
                     start, end, stage, symbols = work
+                    self.report(work_stage=stage)
                     cold = stage in ("COLD", "REBUILD", "HISTORY")
                     if cold and self.cold_budget.delay() > 0:
+                        self.report(phase="QUOTA_WAIT", active_operation="IDLE",
+                                    wait_seconds=round(self.cold_budget.delay(), 2), waiting_for="HISTORY_BUDGET")
                         self.publish(target)
                         self.stop.wait(min(5, self.cold_budget.delay()))
                         continue
@@ -366,6 +493,7 @@ class Worker:
                         active_symbols=len(symbols),
                         range_start=start,
                         range_end=end,
+                        active_operation="IDLE",
                     )
                     needed = [
                         s
@@ -375,9 +503,13 @@ class Worker:
                         )
                     ]
                     factors = self.collector.factors(needed)
+                    self.report(active_operation="COLLECTING_5M")
+                    self.publish(target, force=True)
                     received, errors = self.collector.fetch(
                         symbols, start, end, cold=cold
                     )
+                    self.report(active_operation="AGGREGATING_15M" if stage == "HISTORY" else "CALCULATING_MA55")
+                    self.publish(target, force=True)
                     for symbol in symbols:
                         error = errors.get(symbol)
                         code = (
@@ -417,13 +549,15 @@ class Worker:
                             error=code,
                             live_after=self.state["started_at"],
                             request_counts=dict(self.collector.metrics),
+                            operation=lambda value: self.report(active_operation=value),
                         )
                     self.flush_requests(stage)
-                    self.report(phase="RUNNING", error=None, last_commit=now)
-                    self.publish(target)
+                    self.report(phase="RUNNING", active_operation="IDLE", error=None,
+                                last_commit=str(now_cn()), last_success_at=str(now_cn()))
+                    self.publish(target, force=True)
                 except RequestDeferred as exc:
                     self.flush_requests("DEFERRED")
-                    if exc.status_code == 429 and work and work[2] != "HISTORY":
+                    if exc.status_code == 429 and not (exc.reason or "").startswith("HOST_") and work and work[2] != "HISTORY":
                         for symbol in work[3]:
                             self.owner.accept_market(
                                 symbol,
@@ -436,13 +570,16 @@ class Worker:
                                 live_after=self.state["started_at"],
                             )
                     self.report(
-                        phase="RATE_LIMITED" if exc.status_code == 429 else "QUOTA_WAIT"
+                        phase="HOST_STATUS_UNAVAILABLE" if (exc.reason or "").startswith("HOST_") else "RATE_LIMITED" if exc.status_code == 429 else "QUOTA_WAIT",
+                        active_operation="IDLE", wait_seconds=round(max(0, exc.until-monotonic()), 2),
+                        waiting_for=exc.reason,
                     )
                     self.publish(target)
                     self.stop.wait(min(30, max(1, exc.until - monotonic())))
                 except (SourceError, ValueError) as exc:
                     self.flush_requests("FAILED")
-                    self.report(phase="SOURCE_UNAVAILABLE", error=str(exc))
+                    self.report(phase="CREDENTIAL_REQUIRED" if getattr(exc, "status_code", None) in (401, 403) else "SOURCE_UNAVAILABLE",
+                                active_operation="BLOCKED", error=str(exc))
                     if work and work[2] != "HISTORY":
                         for symbol in work[3]:
                             self.owner.accept_market(
@@ -460,7 +597,7 @@ class Worker:
         except CollectionStopped:
             pass
         except Exception as exc:
-            self.report(phase="ERROR", error=f"{type(exc).__name__}: {exc}")
+            self.report(phase="ERROR", active_operation="BLOCKED", error=f"{type(exc).__name__}: {exc}")
         finally:
             if self.collector:
                 self.collector.close()

@@ -156,7 +156,9 @@ class SharedStore(StateWriter):
             symbol = source["symbol"]
             prior = previous.get(symbol)
             receipt = source_receipt(source, target)
-            if source_marks.get(symbol) == receipt:
+            if source_marks.get(symbol) == receipt and self.conn.execute(
+                "SELECT 1 FROM cycle_member WHERE cycle_id=? AND symbol=?", (self.identity(target), symbol)
+            ).fetchone():
                 continue
             incompatible = bool(
                 prior

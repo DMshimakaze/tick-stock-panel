@@ -1,8 +1,12 @@
 """One connection commits raw market input, frozen analysis and receipts together."""
 
-from .market_store import Store
+from .market_store import Store, encoded, reader
+from .market_grid import SOURCE
+from .engine import RULE_VERSION
 from .shared_store import SharedStore, source_receipt
 from .worker_lease import ProcessLease
+from contextlib import closing
+import json
 from pathlib import Path
 from time import perf_counter
 
@@ -53,11 +57,14 @@ class UnifiedStore(SharedStore):
         error=None,
         live_after,
         request_counts=None,
+        operation=None,
     ):
         began = perf_counter()
         self.conn.execute("BEGIN IMMEDIATE")
         self.last_lock_wait_ms = (perf_counter() - began) * 1000
         try:
+            if operation:
+                operation("AGGREGATING_15M")
             self.market.accept(
                 symbol,
                 received,
@@ -71,6 +78,8 @@ class UnifiedStore(SharedStore):
             )
             if error:
                 self.market.failed([symbol], end, now, error)
+            if operation:
+                operation("CALCULATING_MA55")
             changed = self.analyze([symbol], sessions, end, now, live_after)
             if request_counts is not None:
                 self.market.set_meta("request_counts", request_counts)
@@ -79,6 +88,52 @@ class UnifiedStore(SharedStore):
         except Exception:
             self.conn.rollback()
             raise
+        finally:
+            if operation:
+                operation("IDLE")
+
+    def status_snapshot(self, *, scope=None, target=None):
+        """One RO transaction: saved bars and actual successful analysis differ."""
+        with closing(reader(self.market.path)) as conn:
+            conn.execute("BEGIN")
+            result = self.market.snapshot(scope=scope, target=target, connection=conn)
+            target = result["refresh"]["target_15m"]
+            where, params = "i.eligible=1 AND i.source_id=?", (SOURCE,)
+            if scope is not None:
+                where += " AND i.symbol IN (SELECT value FROM json_each(?))"
+                params += (encoded(scope),)
+            # A processing receipt also exists for blocked attempts. Only a
+            # current-generation cycle with valid/insufficient causal output and
+            # corroborated saved input proves that the frozen algorithm ran.
+            counts = conn.execute(
+                "SELECT count(*),max(p.analysis_asof),max(p.updated_at) "
+                "FROM instrument_state i JOIN processing_receipt p USING(symbol) "
+                "JOIN symbol_state s USING(symbol) "
+                f"WHERE {where} AND s.category IN ('valid','insufficient') "
+                "AND p.analysis_asof=s.data_asof AND p.analysis_asof=? AND s.last_cycle=? "
+                "AND EXISTS(SELECT 1 FROM bar15 b WHERE b.symbol=i.symbol AND b.bar_end=? "
+                "AND b.source_id=? AND b.source_count=3)",
+                (*params, target, f"PRO:{RULE_VERSION}:{result['generation']}:{target}", target, SOURCE),
+            ).fetchone()
+            latest = conn.execute(
+                "SELECT max(p.analysis_asof) FROM instrument_state i "
+                "JOIN processing_receipt p USING(symbol) JOIN symbol_state s USING(symbol) "
+                f"WHERE {where} AND p.analysis_asof=s.data_asof",
+                params,
+            ).fetchone()[0]
+            result["analysis"] = dict(target_15m=target, generation=result['generation'],
+                                      calculated=counts[0], expected=result['refresh']['expected'],
+                                      latest_completed15=latest, updated_at=counts[2])
+            saved = result['refresh']['latest_completed15']
+            day = saved[:10] if saved else None
+            result.update(market_date=day, latest_buy_date=day,
+                          latest_day_buy_count=conn.execute(
+                              "SELECT count(*) FROM signal_event WHERE confirmed_at>=? AND confirmed_at<=?",
+                              (day + " 00:00:00", day + " 23:59:59"),
+                          ).fetchone()[0] if day else None)
+            pending = conn.execute("SELECT payload FROM runtime_meta WHERE key='pending_publish'").fetchone()
+            result['pending_publish'] = bool(pending and json.loads(pending[0]))
+            return result
 
     def analyze(self, symbols, sessions, target, now, live_after):
         """May run inside accept_market, or in bounded restart catch-up batches."""
@@ -116,10 +171,11 @@ class UnifiedStore(SharedStore):
 
     def catch_up(self, target, now, live_after):
         receipts = self.receipts()
+        members = {r[0] for r in self.conn.execute("SELECT symbol FROM cycle_member WHERE cycle_id=?", (self.identity(target),))}
         pending = [
             s
             for s, r in self.market.universe().items()
-            if r["eligible"] and receipts.get(s) != source_receipt(r, target)
+            if r["eligible"] and (receipts.get(s) != source_receipt(r, target) or s not in members)
         ]
         return pending
 

@@ -669,21 +669,27 @@ class Store:
                 listing_status=info["listing_status"],
             )
 
-    def snapshot(self):
-        with closing(reader(self.path)) as conn:
-            conn.execute("BEGIN")
-            target = latest_point(self.meta("sessions", [], conn=conn), str(now_cn()))
+    def snapshot(self, *, scope=None, connection=None, target=None):
+        with nullcontext(connection) if connection is not None else closing(reader(self.path)) as conn:
+            if connection is None:
+                conn.execute("BEGIN")
+            target = target or latest_point(self.meta("sessions", [], conn=conn), str(now_cn()))
+            where = "i.eligible=1"
+            params = ()
+            if scope is not None:
+                where += " AND i.symbol IN (SELECT value FROM json_each(?))"
+                params = (encoded(scope),)
             refreshed = conn.execute(
-                "SELECT count(*) FROM instrument_state i WHERE i.eligible=1 AND i.source_id=? "
+                f"SELECT count(*) FROM instrument_state i WHERE {where} AND i.source_id=? "
                 "AND EXISTS(SELECT 1 FROM bar15 b WHERE b.symbol=i.symbol AND b.bar_end=? "
                 "AND b.source_id=? AND b.source_count=3)",
-                (SOURCE, target, SOURCE),
+                (*params, SOURCE, target, SOURCE),
             ).fetchone()[0]
-            expected = conn.execute("SELECT count(*) FROM instrument_state WHERE eligible=1").fetchone()[0]
-            saved = conn.execute("SELECT max(latest_completed15) FROM instrument_state WHERE eligible=1").fetchone()[0]
+            expected = conn.execute(f"SELECT count(*) FROM instrument_state i WHERE {where}", params).fetchone()[0]
+            saved = conn.execute(f"SELECT max(latest_completed15) FROM instrument_state i WHERE {where} AND source_id=?", (*params, SOURCE)).fetchone()[0]
             states = dict(
                 conn.execute(
-                    "SELECT state,count(*) FROM instrument_state WHERE eligible=1 GROUP BY state"
+                    f"SELECT state,count(*) FROM instrument_state i WHERE {where} GROUP BY state", params
                 )
             )
             oldest, newest, count = conn.execute(
@@ -695,7 +701,7 @@ class Store:
                 states=states,
                 source_counts=dict(
                     conn.execute(
-                        "SELECT source_id,count(*) FROM instrument_state WHERE eligible=1 GROUP BY source_id"
+                        f"SELECT source_id,count(*) FROM instrument_state i WHERE {where} GROUP BY source_id", params
                     )
                 ),
                 pending_symbols=sum(v for k, v in states.items() if k != "READY"),
@@ -705,11 +711,17 @@ class Store:
                 last_commit=self.meta("last_commit", conn=conn),
                 calendar_last=max(self.meta("sessions", [], conn=conn), default=None),
                 universe=self.meta("universe", {}, conn=conn),
+                calendar=self.meta("calendar_check", {}, conn=conn),
                 refresh=dict(generation=self.meta("generation", 0, conn=conn), target_15m=target,
                              latest_completed15=saved, refreshed=refreshed, expected=expected,
                              updated_at=self.meta("last_commit", conn=conn),
                              updating=expected == 0 or refreshed < expected),
-                asset_counts=dict(conn.execute("SELECT source_type,count(*) FROM instrument_state WHERE eligible=1 GROUP BY source_type")),
+                asset_counts=dict(conn.execute(f"SELECT source_type,count(*) FROM instrument_state i WHERE {where} GROUP BY source_type", params)),
+                history_queue_count=conn.execute(
+                    f"SELECT count(*) FROM instrument_state i LEFT JOIN ma_history_progress p USING(symbol) "
+                    f"WHERE {where} AND i.source_id=? AND (coalesce(p.raw_count,0)<? OR p.stop_reason='GAP')",
+                    (*params, SOURCE, history_capacity()),
+                ).fetchone()[0],
             )
 
     def prices(self, day):

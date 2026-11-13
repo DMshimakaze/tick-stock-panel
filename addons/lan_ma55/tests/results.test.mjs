@@ -30,7 +30,7 @@ test('Sunday defaults to backend Friday, reports zero BUY and reads no watchlist
   assert.match(text, /2026-11-06 15:00/);
   assert.match(text, /等待下一交易日/);
   assert.match(text, /1 \/ 2/);
-  assert.equal(dom.window.document.querySelectorAll('.mr-facts strong').length,2);
+  assert.equal(dom.window.document.querySelectorAll('.mr-kpi strong').length,6);
   assert.deepEqual([...dom.window.document.querySelectorAll('thead th')].map(e=>e.textContent),['名称','价格','确认时间']);
   assert.match(text, /5m请求 9 \/ HTTP 15/);
   assert.match(text, /待预热 1/);
@@ -97,7 +97,7 @@ test('workbench link uses public enabled-page list, original symbol/time, and ke
 test('only the published-results page is registered in the installable manifest',async()=>{
  const extension=(await import('../src/extension.mjs')).default;
  const built=(await import('../dist/extension.js')).default;
- assert.equal(extension.version,'0.6.3');assert.equal(extension.id,'lan.ma55');
+ assert.equal(extension.version,'0.7.3');assert.equal(extension.id,'lan.ma55');
  assert.equal(extension.apiVersion,1);assert.equal(extension.routes[0].path,'/lan-ma55');
  assert.equal(typeof built.routes[0].mount,'function');assert.equal(built.version,extension.version);
  const url=new URL(workbenchUrl('600000.SH',{event_id:'saved-id',rule_version:'saved-rule',confirmed_at:'2026-11-06 10:00:00'}),'http://local');

@@ -10,7 +10,7 @@ from time import monotonic
 import httpx
 from tickflow import TickFlow, TickFlowError
 
-from .market_grid import BEIJING, as_ms, normalize_five
+from .market_grid import BEIJING, as_ms, latest_point, normalize_five, wall
 from .request_budget import (
     CollectionStopped,
     RequestDeferred,
@@ -69,6 +69,10 @@ class Collector:
             and request.url.params.get("period") == "5m"
         )
         budget = self.budgets["minute" if minute else "metadata"]
+        delay = budget.delay()
+        if delay > 0:
+            self.report(phase="QUOTA_WAIT", wait_seconds=round(delay, 2))
+            raise RequestDeferred(monotonic() + delay, reason="QUOTA_WAIT")
         began = monotonic()
         budget.acquire(
             self.stop,
@@ -187,6 +191,20 @@ class Collector:
                 for t in data["timestamp"]
             }
         )
+
+    def session_evidence(self, now):
+        """Confirm a day from real completed index 5m, never from its weekday."""
+        day = now[:10]
+        end = latest_point([day], now, step=5)
+        if wall(now).weekday() >= 5 or not end:
+            return dict(confirmed_day=None, source_asof=None)
+        self.report(active_operation="COLLECTING_5M")
+        rows, errors = self.fetch(["000001.SH"], day + " 09:35:00", end)
+        if errors and not rows.get("000001.SH"):
+            raise SourceError()
+        actual = {t: r for t, r in rows["000001.SH"].items() if r["volume"] > 0}
+        return dict(confirmed_day=day if actual else None,
+                    source_asof=max(actual, default=None))
 
     def factors(self, symbols):
         if not symbols:

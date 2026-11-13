@@ -1,9 +1,11 @@
 /** Read-only Page Pack. SQLite/backend is the only producer of MA55 events. */
 const SUMMARY = 'lan_ma55_summary', DAY = 'lan_ma55_day', HISTORY = 'lan_ma55_history';
-const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+import { CSS } from './styles.mjs';
+import { escapeHtml as esc, renderStatus } from './status-view.mjs';
 const num = (v, digits = 0) => Number.isFinite(v) ? v.toLocaleString('zh-CN', { maximumFractionDigits: digits }) : '未知';
 const mode = value => ({ REPLAY: '历史重放', LIVE: '实时确认', DELAYED: '延迟确认' }[value] || value || '—');
 const phase = value => ({ RUNNING: '后台持续更新', WAITING: '等待新的完成15m', DATA_SOURCE_UNAVAILABLE: '公共行情不可用，保留已保存结果', STARTING: '后台启动中', VERIFYING_UNIVERSE: '核实完整股票候选与元信息',
+  LIVE:'盘中增量', COLD:'初次历史预热', REBUILD:'历史重建', HISTORY:'历史补齐', HOST_BUSY:'礼让宿主数据任务', HOST_STATUS_UNAVAILABLE:'宿主任务状态不可核实', WAITING_NEXT_15M:'等待下一根完成15m',
   COLLECTING: '后台采集完成5m', ANALYZING: '后台计算与提交', QUOTA_WAIT: '等待滚动请求额度',
   RATE_LIMITED: '供应商429冷却', NETWORK_WAIT: '网络重试等待', WAITING_NEXT_SESSION: '等待下一交易日，缺口按计划重试',
   WAITING_NEXT_5M: '等待下一个完成5m', ERROR: '后台受阻', CALENDAR_PENDING: '等待真实交易日历' }[value] || value || '尚未收到后台状态');
@@ -36,21 +38,17 @@ export async function readSummary(api) {
   return result.rows.length ? JSON.parse(result.rows[0].payload_json) : null;
 }
 export async function readDay(api, day, summary) {
-  if (day === summary.market_date) {
+  if (day === (summary.published_market_date || summary.market_date)) {
     const data = await api.extDataRows(DAY, { limit: 20000 });
     // Saved confirmations survive a universe-generation change. Only the two
     // refresh metrics use the current generation/target snapshot.
-    return { ready: true, cycle: summary.cycle, rows: data.rows.filter(r => r.market_date === day) };
+    const rows = data.rows.filter(r => r.market_date === day);
+    return { ready: rows.length > 0, cycle: summary.cycle, rows };
   }
   const data = await api.extDataRows(HISTORY, { limit: 1 });
   const entry = data.rows.length ? JSON.parse(data.rows[0].payload_json).days[day] : null;
   return entry ? { ready: true, historical: true, ...entry } : { ready: false, rows: [] };
 }
-
-const CSS = `
-.mr{padding:20px 24px;max-width:1560px;margin:auto;color:hsl(var(--fg-primary));font:13px/1.5 system-ui;--line:hsl(var(--border));--soft:hsl(var(--elevated));--muted:hsl(var(--fg-secondary));--accent:hsl(var(--accent))}.mr *{box-sizing:border-box}.mr h1{font-size:22px;font-weight:600;margin:0}.mr h2{font-size:14px;font-weight:550;margin:0}.mr p{margin:6px 0}.mr button,.mr input,.mr select{font:inherit;color:inherit;background:hsl(var(--surface));border:1px solid var(--line);border-radius:6px;min-height:30px;padding:5px 8px;max-width:100%}.mr button{cursor:pointer}.mr button:hover{background:var(--soft)}.mr button:disabled{opacity:.4;cursor:default}.mr :is(button,input,select,a):focus-visible{outline:2px solid var(--accent);outline-offset:2px}.mr-header,.mr-tools,.mr-tabs{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.mr-header{justify-content:space-between;margin-bottom:16px}.mr-meta{font-size:11px;color:var(--muted);overflow-wrap:anywhere}.mr-panel{border:1px solid var(--line);border-radius:8px;background:hsl(var(--surface));padding:12px;margin:12px 0}.mr-facts{display:grid;grid-template-columns:1fr 1fr;gap:24px;padding:12px 0 16px;border-bottom:1px solid var(--line)}.mr-facts span{display:block;color:var(--muted);font-size:11px;margin-bottom:4px}.mr-facts strong{font-size:17px;font-weight:550;font-variant-numeric:tabular-nums}.mr-facts small{font-size:11px;color:var(--muted);margin-left:8px}.mr-error{color:hsl(var(--danger));padding:8px 0;overflow-wrap:anywhere}.mr-tabs{border-bottom:1px solid var(--line);margin-top:14px;gap:20px}.mr-tabs button{border:0;border-radius:0;white-space:nowrap;padding:9px 0;color:var(--muted);background:transparent}.mr-tabs .active{color:var(--accent);border-bottom:2px solid var(--accent)}.mr-tools{margin:12px 0;font-size:12px}.mr-tools input{min-width:140px;flex:1}.mr-table{overflow-x:auto;border:1px solid var(--line);border-radius:8px;margin-top:10px}.mr table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}.mr th{font-size:11px;font-weight:500;color:var(--muted);text-align:left;padding:8px 16px;background:var(--soft)}.mr td{padding:8px 16px;border-top:1px solid var(--line)}.mr :is(th,td):nth-child(2),.mr :is(th,td):nth-child(3){text-align:right;white-space:nowrap}.mr tr[data-row]{cursor:pointer}.mr tr[data-row]:hover{background:hsl(var(--elevated)/.5)}.mr-kline{color:inherit;text-decoration:none;font-weight:500}.mr-kline:hover{color:var(--accent)}.mr-code{display:block;font:10px/1.5 ui-monospace,monospace;color:var(--muted)}.mr-type{display:inline-block;font-size:9px;font-weight:400;color:var(--muted);border:1px solid var(--line);border-radius:3px;padding:0 3px;margin-left:6px}.mr-price{font-family:ui-monospace,monospace}.mr-empty{text-align:center;padding:24px 12px;color:var(--muted)}.mr-pager{display:flex;gap:8px;align-items:center;justify-content:flex-end;margin:12px 0;font-size:11px}.mr-diagnostics{margin-top:14px;color:var(--muted);font-size:11px}.mr-diagnostics summary{cursor:pointer}.mr-diagnostics pre{white-space:pre-wrap;overflow-wrap:anywhere}.mr-selected{font-size:12px}.mr-selected a{color:var(--accent)}
-@media(max-width:650px){.mr{padding:14px 10px}.mr h1{font-size:19px;padding-left:38px}.mr-facts{gap:8px}.mr-facts strong{font-size:14px}.mr-facts small{display:block;margin:2px 0}.mr-tools input{min-width:110px}.mr th,.mr td{padding:8px}.mr :is(th,td):nth-child(3){font-size:11px;white-space:normal;width:110px}.mr-tabs{gap:15px}}
-`;
 
 export function mountResults(el, ctx) {
   const root = el.ownerDocument.createElement('section'); root.className = 'mr'; el.append(root);
@@ -70,24 +68,22 @@ export function mountResults(el, ctx) {
   }
   function render() {
     if (disposed) return;
+    const focus = root.contains(root.ownerDocument.activeElement) && root.ownerDocument.activeElement.dataset.control === 'query'
+      ? { start: root.ownerDocument.activeElement.selectionStart, end: root.ownerDocument.activeElement.selectionEnd } : null;
     const s = model.summary || {}, cycle = s.cycle || {}, universe = s.universe || {};
     const all = visibleRows(), pages = Math.max(1, Math.ceil(all.length / 50));
     model.page = Math.min(model.page, pages - 1); shown = all.slice(model.page * 50, model.page * 50 + 50);
     const buyCount = model.rows.reduce((n, r) => n + JSON.parse(r.events_json || '[]').length, 0);
-    const dates = [...new Set([s.market_date, ...(s.available_dates || [])].filter(Boolean))].sort().reverse();
+    const dates = [...new Set([s.published_market_date, s.market_date, ...(s.available_dates || [])].filter(Boolean))].sort().reverse();
     const active = model.selected, selected = active?.row, event = active?.event, d = active?.decision;
-    const fact = (label, value, updating = '') => `<div><span>${label}</span><strong>${esc(value)}</strong>${updating ? '<small>更新中</small>' : ''}</div>`;
-    const refresh = s.refresh || {};
     const quote = row => model.prices.get(row.symbol);
     const price = row => {
       const q=quote(row);
       return q && q.bar_end?.slice(0,10)===model.date && Number.isFinite(q.price) && q.price>0 ? q.price.toLocaleString('zh-CN',{minimumFractionDigits:q.asset_type==='etf'?3:2,maximumFractionDigits:q.asset_type==='etf'?3:2}) : '—';
     };
-    root.innerHTML = `<style>${CSS}</style><header class="mr-header"><h1>MA55 选股</h1><button data-action="refresh" ${busy ? 'disabled' : ''}>${busy ? '读取中…' : '刷新'}</button></header>
-      <section class="mr-facts" aria-label="MA55扫描状态">${fact('最新完成K线',refresh.latest_completed15?.slice(0,16) || '等待完成K线')}${fact('本轮已刷新',`${num(refresh.refreshed)} / ${num(refresh.expected)}`,refresh.updating || !refresh.expected)}</section>
-      ${model.error || s.error || s.publisher_error ? `<div class="mr-error" role="alert">${esc([model.error,s.error,s.publisher_error].filter(Boolean).join('；'))}</div>` : ''}
-      <div class="mr-tools"><label>交易日 <select aria-label="结果交易日" data-control="date">${dates.map(day => `<option ${model.date===day?'selected':''}>${esc(day)}</option>`).join('') || '<option>等待历史</option>'}</select></label><button data-action="latest">最新</button><input aria-label="证券搜索" data-control="query" value="${esc(model.query)}" placeholder="名称 / 代码"><button data-action="search">搜索</button></div>
-      <h2>${model.date===s.market_date?'最新交易日':'历史交易日'} ${esc(model.date||'待确认')} · ${model.dayInfo?.ready?`${buyCount} BUY`:'发布中'}</h2>
+    root.innerHTML = `<style>${CSS}</style>${renderStatus(s,busy,model.error)}
+      <div class="mr-tools"><label>交易日 <select aria-label="结果交易日" data-control="date">${dates.map(day => `<option ${model.date===day?'selected':''}>${esc(day)}</option>`).join('') || '<option>等待历史</option>'}</select></label><button data-action="latest">最新</button><input aria-label="证券搜索" data-control="query" value="${esc(model.query)}" placeholder="名称 / 代码"><button data-action="search">搜索</button>${model.query?'<button data-action="clear">清除</button>':''}</div>
+      <h2>${model.date===s.market_date?'最新交易日':!model.pinned && s.pending_publish?'上次有效交易日':'历史交易日'} ${esc(model.date||'待确认')} · ${model.dayInfo?.ready?`${buyCount} BUY`:'发布中'}${s.pending_publish && !model.pinned?' · 新结果正在发布':''}</h2>
       <div class="mr-tabs">${[['buy','BUY'],['watch','观察中'],['history','历史确认']].map(([key,label])=>`<button data-action="tab" data-tab="${key}" class="${model.tab===key?'active':''}">${label}</button>`).join('')}</div>
       <div class="mr-table"><table><thead><tr><th>名称</th><th title="所选交易日最近完成15m原价收盘；逐项悬停查看时间；无当日有效值显示—">价格</th><th title="冻结BUY的 confirmed_at，北京时间">确认时间</th></tr></thead><tbody>${shown.map(({row,event:e},i)=>{
         const q=quote(row);
@@ -96,6 +92,10 @@ export function mountResults(el, ctx) {
       <div class="mr-pager"><button data-action="previous" ${model.page===0?'disabled':''}>上一页</button><span>${model.page+1} / ${pages} · ${all.length}条</span><button data-action="next" ${model.page+1>=pages?'disabled':''}>下一页</button></div>
       <details class="mr-diagnostics" ${model.diagnostics?'open':''}><summary>数据状态 / 详情</summary><p>${esc(phase(s.phase))} · ${esc(cycle.bar_end||'')} · 股票 ${num(universe.stock)} / ETF ${num(universe.etf)}</p><p>有效 ${num(cycle.valid_symbols)} · 不足 ${num(cycle.insufficient_symbols)} · 缺口 ${num(cycle.gap_symbols)} · 失败 ${num(cycle.failed_symbols)} · 缺tick ${num(universe.unpriced)}</p><p>5m请求 ${num(s.requests?.minute_requests)} / HTTP ${num(s.requests?.http_requests)} · 待预热 ${num(s.pending_symbols)}</p><button data-action="tab" data-tab="data">查看证券状态</button><details><summary>后台状态</summary><pre>${esc(JSON.stringify(s,null,2))}</pre></details><div>${shown.map(({row,event:e},i)=>`<button data-detail="${i}">${esc(row.name)} · ${esc(reason(row.reason))}${e?' · '+esc(mode(e.mode)):''}</button>`).join('')}</div>
       ${selected?`<section class="mr-panel mr-selected"><h2>${esc(selected.name)} ${esc(selected.symbol)}</h2><p>${esc(reason(selected.reason))}</p><p>支撑测试 ${esc(event?.setup_at||d?.support_test_time||'—')} · 确认 ${esc(event?.confirmed_at||'尚未确认')} · ${esc(mode(event?.mode))}</p><p>首次看到 ${esc(event?.first_seen_at||'—')} · ${esc(event?.risk_text||'')}</p><pre>${esc(JSON.stringify({event,decision:d},null,2))}</pre><button data-action="preview" ${ctx.ui?.openStockPreview?'':'disabled'}>官方个股详情 ↗</button> ${model.workbench==='enabled'?`<a href="${esc(workbenchUrl(selected.symbol,event))}" class="mr-kline">15 分钟 K ↗</a>`:'<span>安装并启用独立分钟K工作台后可打开K线。</span>'}</section>`:''}</details>`;
+    if (focus) {
+      const input = root.querySelector('[data-control="query"]');
+      input.focus({preventScroll:true}); input.setSelectionRange(focus.start,focus.end);
+    }
   }
 
   async function refresh(force = false) {
@@ -110,12 +110,15 @@ export function mountResults(el, ctx) {
       const projection = prices.rows[0]?.payload_json ? JSON.parse(prices.rows[0].payload_json) : {};
       model.prices = new Map((projection.rows || []).map(q=>[q.symbol,q]));
       if (summary) {
-        if (!model.pinned || !model.date) model.date = summary.market_date || '';
-        const key = `${model.date}:${summary.generation}:${summary.revision}:${summary.history_published_at || ''}`;
-        if (model.date && (force || key !== signature)) {
-          const info = await readDay(ctx.api, model.date, summary);
+        const date = !model.pinned || !model.date ? summary.published_market_date || summary.market_date || '' : model.date;
+        const key = `${date}:${summary.generation}:${summary.revision}:${summary.day_published_revision || ''}:${summary.history_published_at || ''}`;
+        if (date && (force || key !== signature)) {
+          const info = await readDay(ctx.api, date, summary);
           if (disposed) return;
-          model.dayInfo = info; model.rows = info.rows; signature = key;
+          if (info.ready || model.pinned || !model.rows.length) {
+            model.date = date; model.dayInfo = info; model.rows = info.rows;
+            if (info.ready) signature = key;
+          }
         }
       }
       model.error = '';
@@ -134,6 +137,7 @@ export function mountResults(el, ctx) {
     if (action === 'refresh') { await refresh(true); return; }
     if (action === 'tab') { model.tab = button.dataset.tab; model.page = 0; if(model.tab==='data') model.diagnostics=true; }
     else if (action === 'search') model.page = 0;
+    else if (action === 'clear') { model.query=''; model.page=0; }
     else if (action === 'previous' || action === 'next') model.page += action === 'next' ? 1 : -1;
     else if (action === 'latest') { model.pinned = false; model.page = 0; await refresh(true); return; }
     else if (action === 'preview' && model.selected) {

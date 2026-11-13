@@ -18,9 +18,10 @@ class CollectionStopped(Exception):
 class RequestDeferred(Exception):
     """Return control to the scheduler while a failed batch cools down."""
 
-    def __init__(self, until, *, status=None):
+    def __init__(self, until, *, status=None, reason=None):
         self.until = until
         self.status_code = status
+        self.reason = reason
 
 
 class RollingBudget:

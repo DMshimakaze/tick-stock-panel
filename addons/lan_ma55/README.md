@@ -1,4 +1,4 @@
-# 兰 MA55 R1｜lan.ma55 0.6.3
+# 兰 MA55 R1｜lan.ma55 0.7.3
 
 生产链：一个 TickFlow raw 5m 适配器 → 三根完整 5m 聚合 15m → 原 SQLite 内的冻结 R1 → 官方 Ext Data 发布。唯一在线个人行情/策略库为 `data/user_data/lan_ma55/state.sqlite3`。K 线工作台通过本机 HTTP v1 只读，题材页继续消费 `lan_ma55_summary/day/history`。宿主固定 v0.3.36。
 
@@ -34,10 +34,20 @@ SQLite WAL、短事务、writer lease、每股默认保留 1,280 根完成 raw 1
 
 验过后停机替换原状态路径，原 SQLite、DuckDB、workbench 移入受限归档。官方管理器停用 lan.marketdata；退役包不启动 writer 或 SDK。回退先停机另存新状态，再按 previous_version 和一致性快照恢复。
 
-`pnpm --dir addons/lan_ma55 build` 后由现有 nga Python 执行 build_backend.py，与 K线3.2.1、题材1.0.7、旧源退役包一起安装、重启。定向测试在 tests_backend、tests_market 和 Node tests。冻结 oracle 使用指定提交的只读副本和私人行情包。`tools/run_stress.py --output <新私人目录> --symbols 5600` 运行统一库规模、1/4/8/16读者、64 SSE、16槽及官方真实请求路径的注入 transport 联合重放，零商业流量。DB、商业返回、日志、截图、ZIP/dist 和私人参考包均不提交。
+`pnpm --dir addons/lan_ma55 build` 后由现有 nga Python 执行 build_backend.py，通过官方管理器安装、重启。本轮只更新 MA55；K线3.2.1、题材1.0.7保持已安装版本。定向测试在 tests_backend、tests_market 和 Node tests。冻结 oracle 使用指定提交的只读副本和私人行情包。`tools/run_stress.py --output <新私人目录> --symbols 5600` 是已有离线压力工具，本轮未重跑。DB、商业返回、日志、截图、ZIP/dist 和私人参考包均不提交。
+
+## 0.7.3 盘中目标与运行面板
+
+交易日核实独立于一天一次的证券元信息刷新。日K只用于提供历史交易日；当天日K尚无记录时，同一 SDK owner 使用一只指数的有效完成5m核实当天，未核实不加入日历。日历检查失败或尚无完成5m时，五分钟后再查；不凭工作日生成交易日，不重拉证券 master。已核实日期和待确认日期、来源水位、下一次检查时间保存在原库 meta，未新增表或修改 BUY schema。
+
+只有 `/api/pipeline/jobs` 的真实 `active_id` 表示宿主忙碌。401/403/404、429/500、超时、连接和 JSON 错误分别上报；核实失败期间暂停商业请求，短暂故障30秒再查，连续三次失败或鉴权/路由错误改为300秒。页面显示原因，不将其伪装成运行中的宿主任务。插件8 RPM分钟与2 RPM冷请求预算保持不变。
+
+状态投影分别提供 `data_target_15m`、`latest_saved_15m`、`latest_analyzed_15m`、`last_publish_at`、`active_operation`、`sync_mode`、`history_queue_count` 与有效监控股票/ETF数量。覆盖数由目标 raw15 主键查找证明；计算数联合实际 processing_receipt、当前 generation 的 cycle 和 valid/insufficient 输出核对，排除仅处理过的受阻尝试。限定 `collection_symbols` 同时限定这些计数。交易日、数据和分析水位不使用页面刷新时间替代。
+
+原生风格页面显示六项 KPI、当前操作和数据模式、两条进度、独立历史队列；桌面搜索框260px，手机两列。发布失败保留上次有效结果；状态超过两分钟未发布时显示过期提示。页面每10秒只读官方 Ext Data，“刷新展示”不采集行情。日期、三个 Tab、分页、原 BUY 深链和 ETF 价格精度保留。
 
 ## 0.6.3 历史与展示
 
 同一 SDK owner 优先新完成 15m，历史队列按最多18个真实交易日分窗，共享2 RPM冷预算和8 RPM总预算。`ma_history_progress` 只保存库存数量、最早时间和回补游标；图表每次按 source/basis/factor revision 和真实可见首末重新判定 READY，三秒读取不发商业请求。回补只 UPSERT raw 历史，保留最新K、原事件与风险；同源 rebuild 不清库。真实缺格点和未确认因子保留空 MA。
 
-股票及沪深 ETF 根据 TickFlow 元信息入同一 Universe，tick_size、上市日和事件链均取原响应。默认页面只有最新完成K和同 generation/目标15m的真实数据到达数/证券分母；三列结果为名称、原价完成15m收盘、confirmed_at。价格以 `lan_ma55_prices_v1` 小体量只读投影发布，所选日无价格显示—，不改旧 day 表 schema。详情与原始诊断可展开。
+股票及沪深 ETF 根据 TickFlow 元信息入同一 Universe，tick_size、上市日和事件链均取原响应。三列结果为名称、原价完成15m收盘、confirmed_at。价格以 `lan_ma55_prices_v1` 小体量只读投影发布，所选日无价格显示—，不改旧 day 表 schema。详情与原始诊断可展开。
