@@ -1,0 +1,13 @@
+format: tick-extension-package
+format_version: 1
+id: lan.marketdata
+display_name: 兰 公共滚动行情
+version: 2.1.0
+extension_api_version: 1
+author: DMshimakaze
+description: 退役包：采集和在线数据库已迁入lan.ma55；本包不启动writer或SDK。
+backend: backend.extension
+requires_app: '>=0.3.36,<0.3.37'
+requires_python: '>=3.11'
+platforms: [any]
+requires: []

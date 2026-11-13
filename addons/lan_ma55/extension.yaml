@@ -1,0 +1,14 @@
+format: tick-extension-package
+format_version: 1
+id: lan.ma55
+display_name: 兰 MA55 原生15m候选
+version: 0.9.8
+extension_api_version: 1
+author: DMshimakaze
+description: TickFlow原生15m生产与人工复核候选，旧冻结BUY独立保留。
+backend: backend.extension
+frontend: frontend/extension.mjs
+requires_app: '>=0.3.36,<0.3.37'
+requires_python: '>=3.11'
+platforms: [any]
+requires: ['httpx>=0.28,<0.29', 'tickflow>=0.1.25,<0.2']
