@@ -39,12 +39,15 @@ class Collector:
         client=None,
         limit=8,
         host_busy=None,
+        cold_budget=None,
     ):
         if not 1 <= limit <= 12:
             raise ValueError("Plugin minute budget must be 1..12 requests/minute")
         self.stop = stop or Event()
         self.report = report or (lambda **values: None)
         self.host_busy = host_busy or (lambda: False)
+        self.cold_budget = cold_budget
+        self.request_cold = False
         self.tf = client or TickFlow(
             api_key=key, max_retries=0, timeout=20, cache_dir=str(cache_dir)
         )
@@ -69,16 +72,17 @@ class Collector:
             request.url.path.endswith("/klines/batch")
             and request.url.params.get("period") in ("1m", "5m", "10m", "15m", "30m", "60m")
         )
-        budget = self.budgets["minute" if minute else "metadata"]
-        delay = budget.delay()
+        factor = request.url.path.endswith("/klines/ex-factors")
+        budgets = [self.budgets["minute" if minute or factor else "metadata"]]
+        if minute and self.request_cold and self.cold_budget is not None:
+            budgets.append(self.cold_budget)
+        delay = max(b.delay() for b in budgets)
         if delay > 0:
             self.report(phase="QUOTA_WAIT", wait_seconds=round(delay, 2))
             raise RequestDeferred(monotonic() + delay, reason="QUOTA_WAIT")
         began = monotonic()
-        budget.acquire(
-            self.stop,
-            lambda delay: self.report(phase="QUOTA_WAIT", wait_seconds=round(delay, 2)),
-        )
+        for budget in budgets:
+            budget.acquire(self.stop, lambda delay: self.report(phase="QUOTA_WAIT", wait_seconds=round(delay, 2)))
         try:
             body = json.loads(request.content) if request.content else {}
         except ValueError:
@@ -101,6 +105,7 @@ class Collector:
         with self.lock:
             self.metrics["http_requests"] += 1
             self.metrics["minute_requests"] += int(minute)
+            self.metrics["collection_requests"] += int(minute or factor)
             self.metrics[
                 "period_" + (request.url.params.get("period") or "metadata")
             ] += 1
@@ -140,7 +145,9 @@ class Collector:
                 except ValueError:
                     self.retry_body = None
 
-    def request(self, action):
+    def request(self, action, *, cold=False):
+        # The single SDK owner passes request context to its actual HTTP hook.
+        self.request_cold = cold
         self.observed = self.retry_header = self.retry_body = None
         if self.stop.is_set():
             raise CollectionStopped()
@@ -163,6 +170,8 @@ class Collector:
                 self.report(phase="RATE_LIMITED", wait_seconds=delay, http_status=429)
                 raise RequestDeferred(monotonic() + delay, status=429) from None
             raise SourceError(status) from None
+        finally:
+            self.request_cold = False
 
     def metadata(self, symbols):
         return self.request(lambda: self.tf.instruments.batch(symbols))
@@ -288,7 +297,7 @@ class Collector:
             symbols, period="15m", adjust="none", start_time=as_ms(start),
             end_time=as_ms(end), count=count, as_dataframe=False,
             batch_size=100, max_workers=1, show_progress=False,
-        ))
+        ), cold=cold)
         if set(data) - set(symbols):
             raise ValueError("UNREQUESTED_SYMBOL")
         valid, errors = {}, {}

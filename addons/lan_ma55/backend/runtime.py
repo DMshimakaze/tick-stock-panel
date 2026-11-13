@@ -13,11 +13,8 @@ import httpx
 from .collector import Collector, SourceError
 from .market_grid import (
     CAPACITY,
-    LEGACY,
-    SOURCE,
     latest_point,
     now_cn,
-    points,
     wall,
 )
 from .request_budget import CollectionStopped, RequestDeferred, RollingBudget
@@ -69,55 +66,6 @@ def classify(items, day):
     )
 
 
-def task(master, sessions, target, now, demanded=()):
-    active = {s: r for s, r in master.items() if r["eligible"] or s in demanded}
-    days = [d for d in sessions if d <= target[:10]][-18:]
-    if not days:
-        return None
-    first = days[0] + " 09:35:00"
-    groups = {}
-    for symbol, info in active.items():
-        if info["next_retry"] > time():
-            continue
-        if info["source_id"] != SOURCE or not info["latest_completed15"]:
-            continue
-        if info["attempted"] == target:
-            continue
-        if info["latest_completed15"] >= target and not info["rebuild_from"]:
-            continue
-        start = (
-            str(wall(info["rebuild_from"]) - timedelta(minutes=10))
-            if info["rebuild_from"]
-            else next(
-                iter(points(sessions, info["latest_completed15"], target)[1:]), None
-            )
-        )
-        if start:
-            cold = start < first
-            groups.setdefault(
-                (first if cold else start, target, "REBUILD" if cold else "LIVE"), []
-            ).append(symbol)
-    if groups:
-        live = [key for key in groups if key[2] == "LIVE"]
-        key = max(live or list(groups), key=lambda key: key[0])
-        return (*key, sorted(groups[key])[: 8 if key[2] == "REBUILD" else 100])
-    cold = [
-        s
-        for s, r in active.items()
-        if r["next_retry"] <= time()
-        and r["attempted"] != target
-        and (r["source_id"] == LEGACY or not r["latest_completed15"])
-    ]
-    if cold:
-        return (
-            first,
-            target,
-            "COLD",
-            sorted(cold, key=lambda s: (s not in demanded, s))[:8],
-        )
-    return None
-
-
 class Worker:
     def __init__(self, context, settings):
         self.settings = settings
@@ -132,7 +80,7 @@ class Worker:
             int(settings.get("cold_requests_per_minute", 2))
         )
         self.state = dict(
-            version="0.9.3",
+            version="0.9.8",
             api_version=1,
             phase="STARTING",
             active_operation="IDLE",
@@ -412,7 +360,9 @@ class Worker:
                 report=self.report,
                 limit=self.minute_limit,
                 host_busy=self.host_busy,
+                cold_budget=self.cold_budget,
             )
+            self.restore_budgets(str(now_cn()))
             last_master_day = self.store.meta("metadata_day")
             last_target = None
             while not self.stop.is_set():
@@ -482,6 +432,19 @@ class Worker:
                         continue
                     start, end, stage, symbols = work
                     self.report(work_stage=stage)
+                    delay = self.collector.budgets["minute"].delay()
+                    if delay > 0:
+                        raise RequestDeferred(monotonic()+delay, reason="QUOTA_WAIT")
+                    if stage == "F":
+                        self.report(phase="F", active_operation="CHECKING_FACTORS", active_symbols=len(symbols))
+                        self.store.factor_attempt(symbols, now)
+                        factors = self.collector.factors(symbols)
+                        self.owner.accept_factors(symbols, factors, sessions=sessions, target=target,
+                                                  now=str(now_cn()), live_after=self.state["started_at"])
+                        self.flush_requests(stage)
+                        self.report(phase="RUNNING", active_operation="IDLE", error=None)
+                        self.publish(target, force=True)
+                        continue
                     if stage == "C" and self.cold_budget.delay() > 0:
                         self.report(phase="QUOTA_WAIT", active_operation="IDLE", wait_seconds=round(self.cold_budget.delay(), 2), waiting_for="HISTORY_BUDGET")
                         self.publish(target)
@@ -489,39 +452,44 @@ class Worker:
                         continue
                     # B is essential strategy input and uses the main 8 RPM pool;
                     # only optional C deep history is restricted to the cold pool.
-                    if stage == "C":
-                        self.cold_budget.acquire(self.stop)
                     self.report(phase=stage, error=None, active_symbols=len(symbols), range_start=start, range_end=end,
                                 active_operation="COLLECTING_NATIVE15")
                     self.store.attempt(symbols, end, now, stage)
-                    needed = [s for s in symbols if stage != "C" and master[s]["factors_day"] != now[:10]]
-                    factors = self.collector.factors(needed)
                     self.publish(target, force=True)
-                    received, errors = self.collector.fetch(symbols, start, end)
+                    received, errors = self.collector.fetch(symbols, start, end, cold=stage == "C")
                     self.report(active_operation="CALCULATING_NATIVE15_CANDIDATES")
                     self.owner.accept_batch(symbols, received, errors, sessions=sessions, start=start, end=end, now=str(now_cn()),
-                                            factors=factors, stage=stage, live_after=self.state["started_at"])
+                                            factors={}, stage=stage, live_after=self.state["started_at"])
                     self.flush_requests(stage)
                     self.report(phase="RUNNING", active_operation="IDLE", error=None, last_commit=str(now_cn()))
                     if any(received.get(s) for s in symbols):
                         self.report(last_success_at=str(now_cn()), last_success_stage=stage)
                     self.publish(target, force=True)
                 except RequestDeferred as exc:
-                    self.flush_requests("DEFERRED")
+                    self.flush_requests(work[2] if work else "DEFERRED")
+                    if exc.status_code == 429 and not (exc.reason or "").startswith("HOST_"):
+                        with self.owner.conn:
+                            self.owner.set_meta("quota_until", time()+max(0, exc.until-monotonic()))
                     if exc.status_code == 429 and not (exc.reason or "").startswith("HOST_") and work:
-                        self.store.failed(work[3], work[1], str(now_cn()), "RATE_LIMITED", stage=work[2],
-                                          delay=max(1, exc.until-monotonic()))
+                        if work[2] == "F":
+                            self.store.factor_failed(work[3], str(now_cn()), "RATE_LIMITED", delay=max(1, exc.until-monotonic()))
+                        else:
+                            self.store.failed(work[3], work[1], str(now_cn()), "RATE_LIMITED", stage=work[2],
+                                              delay=max(1, exc.until-monotonic()))
                     self.report(phase="HOST_STATUS_UNAVAILABLE" if (exc.reason or "").startswith("HOST_") else "RATE_LIMITED" if exc.status_code == 429 else "QUOTA_WAIT",
                                 active_operation="IDLE", wait_seconds=round(max(0, exc.until-monotonic()), 2), waiting_for=exc.reason)
                     self.publish(target)
                     self.stop.wait(min(5, max(1, exc.until-monotonic())))
                 except (SourceError, ValueError) as exc:
-                    self.flush_requests("FAILED")
+                    self.flush_requests(work[2] if work else "FAILED")
                     credential = getattr(exc, "status_code", None) in (401, 403)
                     self.report(phase="CREDENTIAL_REQUIRED" if credential else "SOURCE_UNAVAILABLE",
                                 active_operation="BLOCKED", error=str(exc))
                     if work:
-                        self.store.failed(work[3], work[1], str(now_cn()), "CREDENTIAL_REQUIRED" if credential else "SOURCE_UNAVAILABLE", stage=work[2])
+                        if work[2] == "F":
+                            self.store.factor_failed(work[3], str(now_cn()), f"HTTP_{exc.status_code}" if credential else "SOURCE_UNAVAILABLE")
+                        else:
+                            self.store.failed(work[3], work[1], str(now_cn()), "CREDENTIAL_REQUIRED" if credential else "SOURCE_UNAVAILABLE", stage=work[2])
                     self.publish(target, force=True)
                     if credential:
                         # Explicit account refusal requires a settings/restart action.
@@ -552,6 +520,20 @@ class Worker:
                 self.owner.save_requests(rows, stage)
             for _ in rows:
                 self.collector.observations.popleft()
+
+    def restore_budgets(self, now):
+        boundary = str(wall(now)-timedelta(seconds=60))
+        clock = monotonic()
+        for row in self.owner.conn.execute("SELECT at,capability,period,stage FROM native15_request_receipt WHERE at>? ORDER BY id", (boundary,)):
+            age = max(0, (wall(now)-wall(row['at'])).total_seconds())
+            if row['capability'] == 'adj_factor' or row['period'] == '15m':
+                self.collector.budgets['minute'].sent.append(clock-age)
+            if row['stage'] == 'C' and row['period'] == '15m':
+                self.cold_budget.sent.append(clock-age)
+        delay = self.owner.meta('quota_until',0)-time()
+        if delay > 0:
+            for budget in self.collector.budgets.values():
+                budget.defer(delay)
 
     def close(self):
         self.stop.set()

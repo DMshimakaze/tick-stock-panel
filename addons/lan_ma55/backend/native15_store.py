@@ -4,15 +4,28 @@ import json
 from math import isclose
 from time import time
 
-from .market_store import Store, DDL, BAR_COLUMNS
+from .market_store import Store, BAR_COLUMNS
 from .market_grid import FIELDS, points, history_capacity, STRATEGY_CAPACITY
 from .native15_shadow import SOURCE, PROOF
 
 
-NATIVE_DDL = DDL.replace("instrument_state", "native15_instrument_progress").replace(
-    "bar15", "native15_bar").replace("factor_event", "native15_factor_event").replace(
-    "ma_history_progress", "native15_history_progress").replace("source_count=3", "source_count=1").replace(
-    "raw_count INTEGER NOT NULL DEFAULT 0,earliest TEXT);", "raw_count INTEGER NOT NULL DEFAULT 0,earliest TEXT,first_gap TEXT);")
+NATIVE_DDL = """
+CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS native15_instrument_progress(
+ symbol TEXT PRIMARY KEY,name TEXT,eligible INTEGER,source_type TEXT,raw_tick REAL,listing_date TEXT,
+ listing_status TEXT,source_id TEXT,latest_completed15 TEXT,latest_source5 TEXT,
+ revision INTEGER,basis_revision INTEGER,factor_revision INTEGER,factor_coverage TEXT,factors_day TEXT,
+ state TEXT,gaps TEXT,transition TEXT,correction INTEGER,rebuild_from TEXT,attempted TEXT,
+ next_retry REAL,updated_at TEXT,metadata_source TEXT);
+CREATE TABLE IF NOT EXISTS native15_bar(
+ symbol TEXT,bar_end TEXT,open REAL,high REAL,low REAL,close REAL,volume REAL,amount REAL,
+ source_id TEXT,source_count INTEGER CHECK(source_count=1),PRIMARY KEY(symbol,bar_end));
+CREATE TABLE IF NOT EXISTS native15_factor_event(
+ symbol TEXT,ordinal INTEGER,day TEXT,ex_factor REAL CHECK(ex_factor>0),PRIMARY KEY(symbol,ordinal));
+CREATE TABLE IF NOT EXISTS native15_history_progress(
+ symbol TEXT PRIMARY KEY,scanned_before TEXT,stop_reason TEXT,next_retry REAL NOT NULL DEFAULT 0,
+ raw_count INTEGER NOT NULL DEFAULT 0,earliest TEXT,first_gap TEXT);
+"""
 
 
 class NativeStore(Store):
@@ -33,6 +46,9 @@ class NativeStore(Store):
               symbol TEXT PRIMARY KEY,target TEXT,stage TEXT,error_type TEXT,attempts INTEGER DEFAULT 0,
               retry_after REAL,last_attempt TEXT,last_success TEXT,next_eligible REAL DEFAULT 0,
               enqueue_reason TEXT);
+            CREATE TABLE IF NOT EXISTS native15_factor_retry(
+              symbol TEXT PRIMARY KEY,attempts INTEGER NOT NULL DEFAULT 0,last_attempt TEXT,
+              next_eligible REAL NOT NULL DEFAULT 0,error_type TEXT,verified_at TEXT);
         """)
         # Metadata/calendar are reusable evidence, never a claim of native bars.
         with self.transaction():
@@ -52,6 +68,60 @@ class NativeStore(Store):
                 self.conn.execute("UPDATE native15_instrument_progress SET factor_coverage='MISSING',factors_day=NULL "
                                   "WHERE symbol IN (SELECT symbol FROM instrument_state WHERE source_id!='TICKFLOW_RAW_5M')")
                 self.set_meta("initialized", True)
+            if self.meta("factor_retry_separated") != 2:
+                # 0.9.3 wrote a success day and 24h market cooldown for None.
+                self.conn.execute("UPDATE native15_instrument_progress SET factors_day=NULL "
+                                  "WHERE factor_coverage!='EXPLICIT' AND NOT EXISTS(SELECT 1 FROM native15_factor_retry f "
+                                  "WHERE f.symbol=native15_instrument_progress.symbol AND f.verified_at IS NOT NULL)")
+                repair = "error_type='FACTOR_PENDING' OR (stage!='C' AND retry_after>=86400 AND symbol IN " \
+                         "(SELECT symbol FROM native15_instrument_progress WHERE factor_coverage!='EXPLICIT'))"
+                self.conn.execute("UPDATE native15_instrument_progress SET next_retry=0 "
+                                  f"WHERE symbol IN (SELECT symbol FROM native15_retry WHERE {repair})")
+                self.conn.execute("UPDATE native15_retry SET error_type=NULL,attempts=0,next_eligible=0,retry_after=0 "
+                                  f"WHERE {repair}")
+                self.set_meta("factor_retry_separated", 2)
+
+    def factor_attempt(self, symbols, now):
+        with self.transaction():
+            self.conn.executemany("INSERT INTO native15_factor_retry(symbol,last_attempt,next_eligible) VALUES(?,?,?) "
+                                  "ON CONFLICT(symbol) DO UPDATE SET last_attempt=excluded.last_attempt,"
+                                  "next_eligible=excluded.next_eligible", [(s, now, time()+300) for s in symbols])
+
+    def factor_failed(self, symbols, now, error, *, delay=0):
+        with self.transaction():
+            for symbol in symbols:
+                row = self.conn.execute("SELECT attempts FROM native15_factor_retry WHERE symbol=?", (symbol,)).fetchone()
+                attempts = (row[0] if row else 0)+1
+                wait = max(delay, (300, 900, 1800, 3600, 7200, 21600)[min(attempts-1, 5)])
+                self.conn.execute("INSERT INTO native15_factor_retry(symbol,attempts,last_attempt,next_eligible,error_type) "
+                                  "VALUES(?,?,?,?,?) ON CONFLICT(symbol) DO UPDATE SET attempts=excluded.attempts,"
+                                  "last_attempt=excluded.last_attempt,next_eligible=excluded.next_eligible,error_type=excluded.error_type",
+                                  (symbol, attempts, now, time()+wait, error))
+
+    def factor_response(self, symbol, events, now, sessions):
+        info = self.instrument(symbol)
+        if events is None:
+            self.factor_failed([symbol], now, "MISSING_RESPONSE")
+            changed = info["factor_coverage"] != "MISSING"
+            info.update(factor_coverage="MISSING", revision=info["revision"]+int(changed))
+        else:
+            basis_changed = self.events(symbol) != events or info["factor_coverage"] != "EXPLICIT"
+            changed = basis_changed or info["factors_day"] != now[:10]
+            self._factors(symbol, events)
+            info.update(factor_coverage="EXPLICIT", factors_day=now[:10],
+                        factor_revision=info["factor_revision"]+int(basis_changed),
+                        basis_revision=info["basis_revision"]+int(basis_changed), revision=info["revision"]+int(changed))
+            self.conn.execute("INSERT INTO native15_factor_retry(symbol,verified_at) VALUES(?,?) "
+                              "ON CONFLICT(symbol) DO UPDATE SET verified_at=excluded.verified_at,attempts=0,"
+                              "error_type=NULL,next_eligible=0", (symbol, now))
+        info["updated_at"] = now
+        self._put(info)
+        if changed:
+            raw = self.raw_rows(symbol, limit=history_capacity())
+            if raw:
+                self.update_cache(symbol, info, raw, self.events(symbol), sessions, rebuild=True)
+            self.set_meta("data_revision", self.meta("data_revision", 0)+1)
+        return changed
 
     def _write(self, symbol, bars):
         # Native history is retained; computational reads remain bounded.
@@ -88,6 +158,8 @@ class NativeStore(Store):
 
     def accept(self, symbol, received, *, sessions, start, end, now, events=None,
                factor_response=False, rebuild=False, stage="A"):
+        if factor_response:
+            self.factor_response(symbol, events, now, sessions)
         info = self.instrument(symbol)
         incoming = [b for t, b in sorted(received.items()) if start <= t <= end]
         if any(b.get("source_id") != SOURCE or b.get("source_count") != 1 or b.get("source_proof") != PROOF for b in incoming):
@@ -104,13 +176,7 @@ class NativeStore(Store):
                              if b.get(k) is not None and prior[b["timestamp"]].get(k) is not None
                              else b.get(k) != prior[b["timestamp"]].get(k) for k in FIELDS)
                          for b in incoming if b["timestamp"] in prior)
-        old_events = self.events(symbol)
-        changed_factors = factor_response and old_events != events
-        if factor_response:
-            self._factors(symbol, events)
-            info.update(factor_coverage="EXPLICIT" if events is not None else "MISSING", factors_day=now[:10])
-        info["factor_revision"] += int(changed_factors)
-        info["basis_revision"] += int(changed_factors or correction or repaired)
+        info["basis_revision"] += int(correction or repaired)
         self._write(symbol, incoming)
         raw = self.raw_rows(symbol, limit=history_capacity())
         actual = {b["timestamp"] for b in raw}
@@ -124,8 +190,8 @@ class NativeStore(Store):
             if t not in actual:
                 break
             contiguous += 1
-        state = "FACTOR_PENDING" if info["factor_coverage"] != "EXPLICIT" else "READY" if contiguous >= 56 else "GAP" if gaps else "WARMUP"
-        modified = correction or changed_factors or any(t not in prior for t in received) or info["state"] != state
+        state = "READY" if contiguous >= 56 else "GAP" if gaps else "WARMUP"
+        modified = correction or any(t not in prior for t in received) or info["state"] != state
         info.update(state=state, source_id=SOURCE, latest_completed15=raw[-1]["timestamp"],
                     latest_source5=None, correction=correction, gaps=gaps[-250:],
                     rebuild_from=gaps[-1] if gaps and contiguous < 56 else None,
@@ -136,7 +202,7 @@ class NativeStore(Store):
                           "WHEN stop_reason='GAP' THEN NULL ELSE stop_reason END WHERE symbol=?",
                           (history_gaps[-1] if history_gaps else None, history_gaps[-1] if history_gaps else None, symbol))
         self.update_cache(symbol, info, raw, self.events(symbol), sessions,
-                          rebuild=correction or changed_factors or stage == "C", append_only=True)
+                          rebuild=correction or stage == "C", append_only=True)
         self.set_meta("data_revision", self.meta("data_revision", 0)+int(modified))
         self.set_meta("last_commit", now)
         self.set_meta("last_success_"+("history" if stage == "C" else "live"), dict(at=now, stage=stage, symbol=symbol))
@@ -144,8 +210,7 @@ class NativeStore(Store):
             self.conn.execute("UPDATE native15_retry SET error_type=NULL,attempts=0,retry_after=0,last_success=?,next_eligible=0 WHERE symbol=?", (now, symbol))
         else:
             self.conn.execute("UPDATE native15_retry SET last_success=? WHERE symbol=?", (now, symbol))
-            self.failed([symbol], end, now, "SOURCE_LAG" if raw[-1]["timestamp"] < end else state, stage=stage,
-                        delay=86400 if state == "FACTOR_PENDING" else 300)
+            self.failed([symbol], end, now, "SOURCE_LAG" if raw[-1]["timestamp"] < end else state, stage=stage)
         return info
 
     def read(self, *args, **kwargs):

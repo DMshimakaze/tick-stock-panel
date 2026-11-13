@@ -44,7 +44,7 @@ def business_status(state, snapshot, now):
         reason = "CALENDAR_LAG"
     elif target and not state.get("queue_size") and refresh.get("refreshed", 0) < expected:
         reason = "SOURCE_LAG"
-    elif target and not state.get("pending_analysis") and analysis.get("calculated", 0) < expected and snapshot.get("states", {}).get("FACTOR_PENDING"):
+    elif target and not state.get("pending_analysis") and analysis.get("calculated", 0) < expected and snapshot.get("factor_pending", snapshot.get("states", {}).get("FACTOR_PENDING", 0)):
         reason = "FACTOR_PENDING"
     current = bool(expected and target and refresh.get("refreshed") == expected
                    and analysis.get("calculated") == expected)

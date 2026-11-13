@@ -1,4 +1,4 @@
-"""A target catch-up > B causal warmup > C chart history, one persistent fair queue."""
+"""A market targets > fair B warmup / F factors > optional C chart history."""
 
 from datetime import timedelta
 from time import time
@@ -12,16 +12,20 @@ def task(store, master, sessions, target, now, demanded=()):
         return None
     warm_start = grid[max(0, len(grid)-64)]
     retries = {r["symbol"]: dict(r) for r in store.conn.execute("SELECT * FROM native15_retry")}
+    factors = {r["symbol"]: dict(r) for r in store.conn.execute("SELECT * FROM native15_factor_retry")}
     groups = {}
     for symbol, info in master.items():
         if not info["eligible"] and symbol not in demanded:
             continue
         retry = retries.get(symbol, {})
+        factor = factors.get(symbol, {})
+        if (info["factor_coverage"] != "EXPLICIT" or info["factors_day"] != now[:10]) and factor.get("next_eligible", 0) <= time():
+            groups.setdefault(("F", target, target), []).append((factor.get("last_attempt") or "", symbol not in demanded, symbol))
         latest = info["latest_completed15"]
         progress = store.history_progress(symbol)
-        ready = latest and info["state"] not in ("WARMUP", "GAP")
-        stage = "A" if ready and latest < target else "B" if not latest or info["state"] in ("WARMUP", "GAP", "FACTOR_PENDING") else "C"
-        new_target_input = stage == "A" and retry.get("target", "") < target and retry.get("error_type") in ("FACTOR_PENDING", "WARMUP")
+        ready = latest and progress.get("raw_count", 0) >= 56 and not info["rebuild_from"]
+        stage = "A" if ready and latest < target else "B" if not ready else "C"
+        new_target_input = stage in ("A", "B") and (retry.get("target") or "") < target
         if retry.get("next_eligible", 0) > time() and not new_target_input and (retry.get("stage") != "C" or stage == "C"):
             continue
         if stage == "A":
@@ -55,6 +59,6 @@ def task(store, master, sessions, target, now, demanded=()):
     if not groups:
         return None
     # Oldest persisted last_attempt wins within each priority; no code-prefix starvation.
-    key = min(groups, key=lambda k: (k[0], min(groups[k])))
+    key = min(groups, key=lambda k: ({"A": 0, "B": 1, "F": 1, "C": 2}[k[0]], min(groups[k]), k[0]))
     stage, start, end = key
     return start, end, stage, [r[2] for r in sorted(groups[key])[:100]]

@@ -1,9 +1,8 @@
 from copy import deepcopy
 
 
-from addons.lan_ma55.backend.history import history_task
 from addons.lan_ma55.backend.runtime import classify
-from addons.lan_ma55.backend.market_grid import wall, points, required_history, history_capacity
+from addons.lan_ma55.backend.market_grid import wall, required_history, history_capacity
 from addons.lan_ma55.backend.unified_store import UnifiedStore
 from .test_rolling import sample
 
@@ -42,10 +41,6 @@ def test_etf_single_transaction_frozen_250_and_non_destructive_history(tmp_path,
         previous=[tuple(r) for r in owner.conn.execute("SELECT * FROM signal_event")]
         risk=[tuple(r) for r in owner.conn.execute("SELECT * FROM event_risk")]
         before=owner.market.instrument(symbols[0])["latest_completed15"]
-        job=history_task(owner.market,owner.market.universe(),sessions,before,{symbols[0]})
-        assert job[2:] == ("HISTORY",[symbols[0]])
-        requested=points(sessions,job[0],job[1])
-        assert len(requested)<=1200
         older={t:r for t,r in five.items() if t<last[0]}
         for symbol in symbols:
             owner.market.backfill(symbol,older,sessions=sessions,start=min(older),end=max(older),now=last[-1])
@@ -89,6 +84,6 @@ def test_missing_historical_bucket_cools_down_without_rewinding_live_watermark(t
         store.backfill("600000.SH",{},sessions=sessions,start=missing[0],end=missing[-1],now=max(five))
         assert store.instrument("600000.SH")["latest_completed15"]==before
         assert store.history_progress("600000.SH")["stop_reason"]=="GAP"
-        assert history_task(store,store.universe(),sessions,before,{"600000.SH"}) is None
+        assert store.history_progress("600000.SH")["next_retry"] > 0
     finally:
         store.close()

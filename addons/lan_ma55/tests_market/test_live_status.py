@@ -540,3 +540,69 @@ def test_history_budget_wait_does_not_masquerade_as_live_catchup_or_hide_source_
     assert result['sync_mode']=='HISTORY_BACKFILL'
     assert result['blocking_reason']=='SOURCE_LAG'
     assert not result['all_current']
+
+
+def test_native_market_ready_does_not_hide_independent_missing_factors():
+    snapshot=dict(refresh=dict(target_15m='2026-11-13 10:45:00',refreshed=2,expected=2),
+                  analysis=dict(calculated=1,expected=2),universe={'expected':2},
+                  states={'READY':2},factor_pending=1,source_counts={'TICKFLOW_NATIVE_15M':2})
+    state=dict(phase='RUNNING',work_stage='C',source_id='TICKFLOW_NATIVE_15M',active_operation='IDLE',queue_size=0,
+               calendar={'confirmed_day':'2026-11-13'})
+    result=business_status(state,snapshot,'2026-11-13 10:52:00')
+    assert result['blocking_reason']=='FACTOR_PENDING'
+    assert not result['all_current']
+
+
+@pytest.mark.parametrize('factor_requests',[0,6])
+def test_restart_restores_actual_total_and_cold_http_budgets(tmp_path,factor_requests):
+    from addons.lan_ma55.backend.native15_owner import NativeOwner
+    from addons.lan_ma55.backend.market_grid import now_cn
+    now=str(now_cn())
+    path=tmp_path/'state.sqlite3'
+    with NativeOwner(path) as owner:
+        with owner.conn:
+            for stage,period,capability,n in [('C','15m','kline.minute.batch',2),('F',None,'adj_factor',factor_requests)]:
+                owner.save_requests([dict(at=now,endpoint='/synthetic',capability=capability,status=200,
+                                         latency_ms=1,symbol_count=100,retries=0,period=period) for _ in range(n)],stage)
+    worker=worker_at(tmp_path,lambda r:httpx.Response(200,json={'active_id':None}))
+    c=source(tmp_path,lambda r:pytest.fail('Restart must retain the active quota window'),cold_budget=worker.cold_budget)
+    try:
+        with NativeOwner(path) as owner:
+            worker.owner,worker.collector=owner,c
+            worker.restore_budgets(now)
+            assert len(c.budgets['minute'].sent)==2+factor_requests
+            assert worker.cold_budget.delay()>58
+            with pytest.raises(RequestDeferred):
+                c.fetch(['600000.SH'],'2026-11-11 09:45:00','2026-11-11 09:45:00',cold=True)
+            if factor_requests:
+                with pytest.raises(RequestDeferred):
+                    c.factors(['600000.SH'])
+            assert c.metrics['http_requests']==0
+    finally:
+        c.close()
+        worker.http.close()
+        worker.publisher.close()
+
+
+def test_restart_preserves_supplier_retry_after_for_the_shared_pool(tmp_path):
+    from time import time
+    from addons.lan_ma55.backend.native15_owner import NativeOwner
+    from addons.lan_ma55.backend.market_grid import now_cn
+    path=tmp_path/'state.sqlite3'
+    with NativeOwner(path) as owner:
+        with owner.conn:
+            owner.set_meta('quota_until',time()+120)
+    worker=worker_at(tmp_path,lambda r:httpx.Response(200,json={'active_id':None}))
+    c=source(tmp_path,lambda r:pytest.fail('Retry-After is still active'))
+    try:
+        with NativeOwner(path) as owner:
+            worker.owner,worker.collector=owner,c
+            worker.restore_budgets(str(now_cn()))
+            assert c.budgets['minute'].delay()>118
+            with pytest.raises(RequestDeferred):
+                c.factors(['600000.SH'])
+            assert c.metrics['http_requests']==0
+    finally:
+        c.close()
+        worker.http.close()
+        worker.publisher.close()

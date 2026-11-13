@@ -367,30 +367,6 @@ def test_event_api_window_pagination_keeps_outside_count(
             )
 
 
-def test_latest_warm_bucket_precedes_old_backfill_and_cold_requests():
-    from addons.lan_ma55.backend.runtime import task
-    from addons.lan_ma55.backend.market_store import DEFAULTS
-    from addons.lan_ma55.backend.market_grid import SOURCE, LEGACY
-
-    sessions, rows = sample(250)
-    target = max(rows)
-    fresh = dict(
-        DEFAULTS,
-        symbol="600000.SH",
-        eligible=True,
-        source_id=SOURCE,
-        latest_completed15=str(wall(target) - timedelta(minutes=15)),
-    )
-    backlog = dict(
-        fresh, symbol="600001.SH", latest_completed15=sessions[0] + " 15:00:00"
-    )
-    cold = dict(DEFAULTS, symbol="600002.SH", eligible=True, source_id=LEGACY)
-    selected = task(
-        {r["symbol"]: r for r in (backlog, cold, fresh)}, sessions, target, target
-    )
-    assert selected[2] == "LIVE" and selected[3] == ["600000.SH"]
-
-
 def test_history_only_buy_date_survives_summary(tmp_path):
     with prepared(tmp_path/"state.sqlite3",["2026-11-12"]) as owner:
         with owner.conn:

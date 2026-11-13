@@ -111,3 +111,64 @@ def test_master_calls_real_sdk_stock_and_etf_exchange_filters(tmp_path):
         assert all(path.endswith('/instruments') for path,_ in calls)
     finally:
         c.close()
+
+
+def test_factor_and_native_market_share_eight_request_budget(tmp_path):
+    c=source(tmp_path,lambda r:httpx.Response(200,json={'data':{'600000.SH':[]}}),limit=1)
+    try:
+        assert c.factors(['600000.SH'])=={'600000.SH':[]}
+        with pytest.raises(RequestDeferred):
+            c.fetch(['600000.SH'],'2026-11-11 09:45:00','2026-11-11 09:45:00')
+        assert c.metrics['http_requests']==c.metrics['collection_requests']==1
+    finally:
+        c.close()
+
+
+@pytest.mark.parametrize('status',[401,403,429])
+def test_factor_http_failure_is_explicit_without_sdk_retry(tmp_path,status):
+    from addons.lan_ma55.backend.collector import SourceError
+    c=source(tmp_path,lambda r:httpx.Response(status,headers={'Retry-After':'600'},json={'error':{'message':'synthetic'}}))
+    try:
+        with pytest.raises(RequestDeferred if status==429 else SourceError) as caught:
+            c.factors(['600000.SH'])
+        assert caught.value.status_code==status
+        assert c.metrics['http_requests']==1
+        if status==429:
+            assert c.budgets['minute'].delay()>599
+    finally:
+        c.close()
+
+
+def test_native_partial_batch_distinguishes_omitted_and_explicit_empty(tmp_path):
+    at='2026-11-11 09:45:00'
+    c=source(tmp_path,lambda r:httpx.Response(200,json={'data':{'600000.SH':dict(timestamp=[],open=[],high=[],low=[],close=[],volume=[])}}))
+    try:
+        valid,errors=c.fetch(['600000.SH','000001.SZ'],at,at)
+        assert valid=={'600000.SH':{}}
+        assert errors=={'000001.SZ':dict(code='SOURCE_UNAVAILABLE',timestamps=None)}
+        # Omission/empty alone carries no suspension or delisting identity.
+        assert 'suspend' not in str(errors).lower()
+    finally:
+        c.close()
+
+
+def test_cold_budget_is_charged_at_actual_native_http(tmp_path):
+    from addons.lan_ma55.backend.request_budget import RollingBudget
+    clock=[0.0]
+    cold=RollingBudget(2,clock=lambda:clock[0])
+    c=source(tmp_path,lambda r:httpx.Response(200,json={'data':{}}),cold_budget=cold)
+    c.budgets['minute'].clock=lambda:clock[0]
+    try:
+        for at in (4.0,34.0):
+            clock[0]=at
+            c.fetch(['600000.SH'],'2026-11-11 09:45:00','2026-11-11 09:45:00',cold=True)
+        # Preparation/publication time cannot shift a third actual HTTP into this minute.
+        clock[0]=62.0
+        with pytest.raises(RequestDeferred):
+            c.fetch(['600000.SH'],'2026-11-11 09:45:00','2026-11-11 09:45:00',cold=True)
+        assert c.metrics['http_requests']==2
+        clock[0]=65.0
+        c.fetch(['600000.SH'],'2026-11-11 09:45:00','2026-11-11 09:45:00',cold=True)
+        assert c.metrics['http_requests']==3
+    finally:
+        c.close()

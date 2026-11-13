@@ -32,8 +32,8 @@ test('Sunday defaults to backend Friday, reports zero BUY and reads no watchlist
   assert.match(text, /1 \/ 2/);
   assert.equal(dom.window.document.querySelectorAll('.mr-kpi strong').length,5);
   assert.deepEqual([...dom.window.document.querySelectorAll('thead th')].map(e=>e.textContent),['名称','价格','确认时间']);
-  assert.match(text, /原生15m请求 9 \/ HTTP 15/);
-  assert.match(text, /待预热 1/);
+  assert.match(text, /工程原始状态/);
+  assert.match(text, /56根连续合法15m/);
   assert.deepEqual(calls.map(c => c[0]), ['lan_ma55_native15_summary_v1','lan_ma55_native15_prices_v1', 'lan_ma55_day']);
   dom.window.document.querySelector('[data-action="tab"][data-tab="data"]').click();
   assert.match(dom.window.document.body.textContent, /合成证券/);
@@ -97,7 +97,7 @@ test('workbench link uses public enabled-page list, original symbol/time, and ke
 test('only the published-results page is registered in the installable manifest',async()=>{
  const extension=(await import('../src/extension.mjs')).default;
  const built=(await import('../dist/extension.js')).default;
- assert.equal(extension.version,'0.9.3');assert.equal(extension.id,'lan.ma55');
+ assert.equal(extension.version,'0.9.8');assert.equal(extension.id,'lan.ma55');
  assert.equal(extension.apiVersion,1);assert.equal(extension.routes[0].path,'/lan-ma55');
  assert.equal(typeof built.routes[0].mount,'function');assert.equal(built.version,extension.version);
  const url=new URL(workbenchUrl('600000.SH',{event_id:'saved-id',rule_version:'saved-rule',confirmed_at:'2026-11-06 10:00:00'}),'http://local');
@@ -122,7 +122,8 @@ test('native candidates and frozen history use separate public projections and s
   const dispose=mountResults(dom.window.document.querySelector('main'),{api});
   t.after(()=>{dispose();dom.window.close();});await pause();
   const d=dom.window.document;
-  assert.match(d.querySelector('h1').textContent,/原生15m.*人工复核候选/);
+  assert.equal(d.querySelector('h1').textContent,'MA55 选股');
+  assert.match(d.querySelector('.mr-subtitle').textContent,/原生15m.*人工复核候选/);
   assert.match(d.querySelector('tbody').textContent,/历史候选/);
   assert.equal(new URL(d.querySelector('[data-stock-link]').href).searchParams.get('source'),'TICKFLOW_NATIVE_15M');
   assert.ok(!calls.includes('lan_ma55_day'));

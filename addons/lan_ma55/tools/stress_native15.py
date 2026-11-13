@@ -38,7 +38,8 @@ def seed(owner, count):
             for info in rows[offset:offset+100]:
                 symbol = info["symbol"]
                 info = dict(DEFAULTS, **info, source_id=SOURCE, state="READY", latest_completed15=end,
-                            factor_coverage="EXPLICIT", factors_day=end[:10], revision=1)
+                            # Steady-state fixture: [] was verified before today's first target.
+                            factor_coverage="EXPLICIT", factors_day=bars[1280]["timestamp"][:10], revision=1)
                 owner.market._put(info)
                 owner.market._write(symbol, base)
                 owner.conn.execute("INSERT INTO native15_signal_state VALUES(?,?,?,?,?,?,?,?,?,?,?)",
@@ -81,7 +82,8 @@ def run(folder, count=5600):
     monitor = Thread(target=memory, daemon=True)
     monitor.start()
     cpu, began = sum(process.cpu_times()[:2]), perf_counter()
-    report = dict(synthetic=True, commercial_http=0, symbols=count, raw15_per_symbol=1280)
+    report = dict(synthetic=True, commercial_http=0, symbols=count, raw15_per_symbol=1280,
+                  factor_fixture="EXPLICIT_EMPTY_VERIFIED_BEFORE_TARGETS; factor recovery tested separately")
     traces, logical, rounds = [], [0.0], []
     try:
         with NativeOwner(path) as owner:

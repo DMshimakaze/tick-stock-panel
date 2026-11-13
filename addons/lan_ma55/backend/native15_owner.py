@@ -57,6 +57,8 @@ class NativeOwner(UnifiedStore):
         self.last_lock_wait_ms = (perf_counter()-began)*1000
         try:
             for symbol in symbols:
+                if symbol in factors:
+                    self.market.factor_response(symbol, factors[symbol], now, sessions)
                 error = errors.get(symbol)
                 code = error["code"] if error and error["timestamps"] is None else None
                 if code:
@@ -64,7 +66,7 @@ class NativeOwner(UnifiedStore):
                     continue
                 try:
                     self.market.accept(symbol, received.get(symbol, {}), sessions=sessions, start=start, end=end, now=now,
-                                       events=factors.get(symbol), factor_response=symbol in factors, stage=stage)
+                                       stage=stage)
                 except ValueError as exc:
                     if str(exc) not in ("NATIVE15_PROVENANCE_REQUIRED", "NATIVE15_NON_TRADING_POINT"):
                         raise
@@ -92,11 +94,22 @@ class NativeOwner(UnifiedStore):
             self.conn.rollback()
             raise
 
+    def accept_factors(self, symbols, factors, *, sessions, target, now, live_after):
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            changed = [s for s in symbols if self.market.factor_response(s, factors.get(s), now, sessions)]
+            self.analyze(changed, sessions, target, now, live_after, replay=True)
+            self.market.set_meta("last_factor_check", now)
+            if any(factors.get(s) is not None for s in symbols):
+                self.market.set_meta("last_factor_success", now)
+
     def analyze(self, symbols, sessions, target, now, live_after, *, replay=False):
         changed = []
         for symbol in symbols:
             symbol_replay = replay
             source = self.market.read(symbol, "15m", target, connection=self.conn, strategy=True)
+            info = self.market.instrument(symbol)
+            factor_ready = info['factor_coverage'] == 'EXPLICIT' and (info['factors_day'] or '') >= target[:10]
             prior = self.conn.execute("SELECT * FROM native15_signal_state WHERE symbol=?", (symbol,)).fetchone()
             generation = self.market.meta("generation", 0)
             if prior and (prior["target"], prior["source_revision"], prior["generation"]) == (target, source.get("revision", 0), generation):
@@ -106,7 +119,7 @@ class NativeOwner(UnifiedStore):
             revision_blocked = False
             # Failed fetches hold the causal structure and watermarks. Valid later
             # rows handle actual gaps in the adapter, just as the frozen core expects.
-            allowed = source.get("price_basis") == "QFQ" and source.get("raw_tick") and source.get("bars")
+            allowed = factor_ready and source.get("price_basis") == "QFQ" and source.get("raw_tick") and source.get("bars")
             added = []
             structure = (state or {}).get("structure") or {}
             lock_at = (structure.get("last_buy") or {}).get("at") if structure.get("locked") else None
@@ -140,9 +153,9 @@ class NativeOwner(UnifiedStore):
                 from .pipeline import empty_record
                 state = state or empty_record(symbol)["state"]
                 if not revision_blocked:
-                    state["reason"] = "TICK_UNAVAILABLE" if not source.get("raw_tick") else source.get("state", "FACTOR_PENDING")
+                    state["reason"] = "TICK_UNAVAILABLE" if not source.get("raw_tick") else "FACTOR_PENDING" if not factor_ready else source.get("state", "WARMUP")
             analyzed = state.get("data_asof")
-            category = "gap" if revision_blocked else "valid" if analyzed == target and state["valid_run"] >= 56 else "insufficient" if state["reason"] in ("WARMUP", "INSUFFICIENT_WARMUP") else "gap"
+            category = "gap" if revision_blocked else "valid" if allowed and analyzed == target and state["valid_run"] >= 56 else "insufficient" if state["reason"] in ("WARMUP", "INSUFFICIENT_WARMUP") else "gap"
             self.conn.execute("INSERT INTO native15_signal_state VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(symbol) DO UPDATE SET "
                               "payload=excluded.payload,basis_revision=excluded.basis_revision,factor_revision=excluded.factor_revision,"
                               "target=excluded.target,analysis_asof=excluded.analysis_asof,category=excluded.category,reason=excluded.reason,"
@@ -231,6 +244,7 @@ class NativeOwner(UnifiedStore):
             counts = conn.execute("SELECT count(*),max(s.analysis_asof),max(s.updated_at) FROM native15_instrument_progress i "
                          "JOIN native15_signal_state s USING(symbol) "
                          f"WHERE {where} AND s.category='valid' AND s.analysis_asof=? AND s.generation=? "
+                         "AND i.factor_coverage='EXPLICIT' AND i.factors_day>=substr(s.target,1,10) AND s.source_revision=i.revision "
                          "AND EXISTS(SELECT 1 FROM native15_bar b WHERE b.symbol=i.symbol AND b.bar_end=? AND b.source_count=1)",
                          (*params, target, result["generation"], target)).fetchone()
             result["analysis"] = dict(target_15m=target, generation=result["generation"], calculated=counts[0],
@@ -244,6 +258,20 @@ class NativeOwner(UnifiedStore):
                                           f"WHERE {where} AND substr(e.confirmed_at,1,10)=?", (*params, day)).fetchone()[0]
             modes = dict(conn.execute("SELECT e.mode,count(*) FROM native15_candidate e JOIN native15_instrument_progress i USING(symbol) "
                                      f"WHERE {where} AND substr(e.confirmed_at,1,10)=? GROUP BY e.mode", (*params, day)))
+            exclusive = dict(conn.execute("SELECT CASE "
+                "WHEN NOT EXISTS(SELECT 1 FROM native15_bar b WHERE b.symbol=i.symbol AND b.bar_end=? AND b.source_count=1) THEN 'missing_target' "
+                "WHEN i.factor_coverage!='EXPLICIT' OR i.factors_day IS NULL OR i.factors_day<substr(?,1,10) THEN 'factor_missing' "
+                "WHEN s.category='valid' AND s.analysis_asof=? AND s.generation=? AND s.source_revision=i.revision THEN 'analyzed' "
+                "WHEN s.reason IN ('WARMUP','INSUFFICIENT_WARMUP','MISSING_COMPLETED_15M') OR i.state IN ('WARMUP','GAP') THEN 'warmup' "
+                "ELSE 'invalid_input' END AS input_group,count(*) FROM native15_instrument_progress i "
+                f"LEFT JOIN native15_signal_state s USING(symbol) WHERE {where} GROUP BY input_group",
+                (target,target,target,result['generation'],*params)))
+            factor_pending = "(i.factor_coverage!='EXPLICIT' OR i.factors_day IS NULL OR i.factors_day!=?)"
+            factor_stats = conn.execute("SELECT count(*),sum(COALESCE(f.next_eligible,0)<=?),sum(f.next_eligible>?),min(f.next_eligible),max(f.last_attempt),max(f.verified_at) "
+                "FROM native15_instrument_progress i LEFT JOIN native15_factor_retry f USING(symbol) "
+                f"WHERE {where} AND {factor_pending}", (*[time()]*2,*params,day)).fetchone()
+            next_market = conn.execute("SELECT min(r.next_eligible) FROM native15_retry r JOIN native15_instrument_progress i USING(symbol) "
+                f"WHERE {where} AND r.stage!='C' AND r.next_eligible>?", (*params,time())).fetchone()[0]
             pending = conn.execute("SELECT payload FROM runtime_meta WHERE key='native15.pending_publish'").fetchone()
             result.update(market_date=day, latest_buy_date=day, latest_day_buy_count=candidate_count,
                           today_candidate_modes=modes, signal_family=FAMILY, today_target=target,
@@ -257,12 +285,19 @@ class NativeOwner(UnifiedStore):
                                                         f"WHERE {where} AND p.raw_count>=1280 AND p.first_gap IS NULL AND i.factor_coverage='EXPLICIT'", params).fetchone()[0],
                           last_success_live=self.market.meta("last_success_live", conn=conn),
                           last_success_history=self.market.meta("last_success_history", conn=conn),
+                          exclusive={key:exclusive.get(key,0) for key in ('analyzed','factor_missing','warmup','invalid_input','missing_target')},
+                          factor_retry=dict(pending=factor_stats[0],due=factor_stats[1] or 0,cooling=factor_stats[2] or 0,
+                                            next_eligible=factor_stats[3],last_attempt=factor_stats[4],last_verified=self.market.meta("last_factor_success",conn=conn)),
+                          factors_verified_today=count("factor_coverage='EXPLICIT' AND factors_day=?",(day,)),
+                          next_market_retry=next_market,
                           legacy_frozen_buy_count=conn.execute("SELECT count(*) FROM signal_event").fetchone()[0],
                           legacy_bar_count=conn.execute("SELECT count(*) FROM bar15").fetchone()[0],
                           pending_publish=bool(pending and json.loads(pending[0])), status_at=str(now_cn()))
             result["history_backfill_pending"] = result["history_queue_count"]
-            result["queues"] = dict(A=dict(pending=count("latest_completed15<? AND state NOT IN ('WARMUP','GAP')", (target,)) if target else 0),
-                                    B=dict(pending=count("latest_completed15 IS NULL OR state IN ('WARMUP','GAP','FACTOR_PENDING')")),
+            ready = "EXISTS(SELECT 1 FROM native15_history_progress p WHERE p.symbol=i.symbol AND p.raw_count>=56) AND rebuild_from IS NULL"
+            result["queues"] = dict(A=dict(pending=count(f"latest_completed15<? AND {ready}", (target,)) if target else 0),
+                                    B=dict(pending=count(f"latest_completed15 IS NULL OR NOT ({ready})")),
+                                    F=dict(pending=factor_stats[0]),
                                     C=dict(pending=result["history_queue_count"]))
             return result
 

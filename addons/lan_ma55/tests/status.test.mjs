@@ -6,11 +6,11 @@ import { mountResults, readDay } from '../src/results.mjs';
 import { CSS } from '../src/styles.mjs';
 
 const pause=()=>new Promise(resolve=>setTimeout(resolve,20));
-const base={phase:'LIVE',active_operation:'COLLECTING_5M',sync_mode:'LIVE_CATCHUP',
+const base={phase:'A',work_stage:'A',active_operation:'COLLECTING_NATIVE15',sync_mode:'LIVE_CATCHUP',
   worker_alive:true, monitored_stock_count:17,monitored_etf_count:3,
   data_target_15m:'2026-11-13 10:45:00',latest_saved_15m:'2026-11-13 10:30:00',
   latest_analyzed_15m:'2026-11-13 10:15:00',last_publish_at:'2026-11-13 10:51:02',
-  today_session_verified:true,history_queue_count:12,
+  today_session_verified:true,history_queue_count:12,exclusive:{factor_missing:7,warmup:3,missing_target:11,invalid_input:2},factor_retry:{pending:8,due:3,cooling:5},last_success_live:{at:'2026-11-13 10:51:00'},
   refresh:{refreshed:9,expected:20},analysis:{calculated:6,expected:20},
   latest_day_buy_count:4,latest_buy_date:'2026-11-13'};
 
@@ -19,7 +19,7 @@ test('published independent facts produce five colored KPIs and two in-card prog
   const d=dom.window.document;
   assert.equal(d.querySelectorAll('.mr-kpi').length,5);
   assert.deepEqual([...d.querySelectorAll('[role=progressbar]')].map(e=>[e.getAttribute('aria-valuenow'),e.getAttribute('aria-valuemax')]),[['9','20'],['6','20']]);
-  for(const text of ['股票 17','ETF 3','20','10:45','盘中增量追赶','剩余待补历史12','正在采集 15m 输入','10:30','10:15','10:51']) assert.ok(d.body.textContent.includes(text),text);
+  for(const text of ['MA55 选股','监控范围','最新已完成15m','当日K覆盖','可分析候选','当日候选数','股票 17','ETF 3','20','10:45','今日增量追赶','K已到但因子缺失 7','预热不足 3','源缺目标K 11','最近A/B成功 10:51','10:30','10:15']) assert.ok(d.body.textContent.includes(text),text);
   assert.ok(!d.querySelector('.mr-runtime-detail').open);
   assert.equal(d.querySelectorAll('.mr-runtime [role=progressbar]').length,0);
   assert.ok(!d.body.textContent.includes('7,661'));
@@ -27,10 +27,10 @@ test('published independent facts produce five colored KPIs and two in-card prog
 });
 
 test('operation, history queue and sync mode remain independent',()=>{
-  for(const [op,text] of [['COLLECTING_5M','采集'],['AGGREGATING_15M','生成完整15m'],['CALCULATING_MA55','计算MA55'],['PUBLISHING','发布结果']]){
-    const dom=new JSDOM(renderStatus({...base,active_operation:op}));
+  for(const [stage,text] of [['A','今日增量追赶'],['B','最低预热'],['F','补因子'],['C','深历史补齐']]){
+    const dom=new JSDOM(renderStatus({...base,work_stage:stage}));
     assert.match(dom.window.document.body.textContent,new RegExp(text));
-    assert.match(dom.window.document.body.textContent,/剩余待补历史12/);
+    assert.match(dom.window.document.body.textContent,/剩余历史队列12/);
     dom.window.close();
   }
   assert.equal(statusModel({...base,active_operation:'IDLE',sync_mode:'WAIT_NEXT_BAR'}).label,'等待下一根');
@@ -101,10 +101,10 @@ test('an old published heartbeat cannot pretend the backend is still collecting'
 });
 
 test('historical quota wait keeps a live-source blockage visible',()=>{
-  const dom=new JSDOM(renderStatus({...base,phase:'QUOTA_WAIT',work_stage:'HISTORY',active_operation:'IDLE',
-    sync_mode:'HISTORY_BACKFILL',blocking_reason:'SOURCE_LAG',blocking_message:'部分证券未取得完整5m',wait_seconds:18}));
-  assert.match(dom.window.document.body.textContent,/等待历史回补额度/);
-  assert.match(dom.window.document.body.textContent,/历史补齐中/);
+  const dom=new JSDOM(renderStatus({...base,phase:'QUOTA_WAIT',work_stage:'C',active_operation:'IDLE',
+    sync_mode:'HISTORY_BACKFILL',blocking_reason:'SOURCE_LAG',blocking_message:'部分证券未取得目标15m',wait_seconds:18}));
+  assert.match(dom.window.document.body.textContent,/深历史补齐 · 等待额度/);
+  assert.match(dom.window.document.body.textContent,/深历史使用余量，不阻挡当日候选/);
   assert.match(dom.window.document.body.textContent,/数据滞后/);
   dom.window.close();
 });

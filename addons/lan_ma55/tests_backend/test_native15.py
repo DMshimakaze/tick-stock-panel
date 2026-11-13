@@ -84,6 +84,9 @@ def test_priority_retry_same_target_fairness_and_history_batch(tmp_path):
     with NativeOwner(tmp_path/"state.sqlite3") as owner:
         prepare(owner, sessions, 250)
         store = owner.market
+        with owner.conn:
+            for symbol in store.universe():
+                store.factor_response(symbol, [], max(bars), sessions)
         first = task(store, store.universe(), sessions, max(bars), max(bars))
         assert first[2] == "B" and len(first[3]) == 100
         store.attempt(first[3], first[1], max(bars), "B")
@@ -129,11 +132,14 @@ def test_missing_factor_tick_gap_and_bad_proof_do_not_publish_fake_candidate(tmp
     sessions, five = sample(64)
     bars = native(five, sessions)
     with NativeOwner(tmp_path/"state.sqlite3") as owner:
-        prepare(owner, sessions, 2)
+        prepare(owner, sessions, 3)
         accept(owner, bars, sessions, symbols=["000000.SZ", "000001.SZ"], factors={"000000.SZ": [], "000001.SZ": None})
+        owner.accept_batch(['000002.SZ'],{}, {'000002.SZ':dict(code='SOURCE_UNAVAILABLE',timestamps=None)},
+                           sessions=sessions,start=min(bars),end=max(bars),now=max(bars),factors={},stage='B',live_after=max(bars))
         status = owner.status_snapshot(target=max(bars))
         assert status["today_native15_saved"] == 2 and status["today_analyzed_candidates"] == 1
-        assert status["factor_pending"] == 1
+        assert status["factor_pending"] == 2
+        assert status['exclusive']==dict(analyzed=1,factor_missing=1,warmup=0,invalid_input=0,missing_target=1)
         corrupted = deepcopy(bars)
         corrupted[max(bars)]["source_count"] = 3
         accept(owner, corrupted, sessions)
@@ -200,3 +206,142 @@ def test_five_minute_same_target_retry_survives_restart_then_advances(tmp_path, 
         assert status["today_native15_saved"] == status["today_analyzed_candidates"] == 1
         retry = owner.conn.execute("SELECT attempts,next_eligible FROM native15_retry").fetchone()
         assert tuple(retry) == (0, 0)
+
+
+def test_same_day_unknown_factor_recovers_after_restart_without_refetching_bars(tmp_path, scenarios, monkeypatch):
+    from addons.lan_ma55.backend import native15_store, native15_scheduler
+    clock = [1000000.0]
+    monkeypatch.setattr(native15_store, "time", lambda: clock[0])
+    monkeypatch.setattr(native15_scheduler, "time", lambda: clock[0])
+    case = scenarios['single']
+    bars = {b['timestamp']:dict(b,source_id=SOURCE,source_count=1,source_proof=PROOF,amount=None) for b in case['bars']}
+    target, symbol, path = max(bars), '000000.SZ', tmp_path/'state.sqlite3'
+    with NativeOwner(path) as owner:
+        prepare(owner, case['sessions'])
+        accept(owner,bars,case['sessions'],factors={symbol:None})
+        info = owner.market.instrument(symbol)
+        assert info['factor_coverage']=='MISSING' and info['factors_day'] is None
+        assert owner.conn.execute('SELECT count(*) FROM native15_candidate').fetchone()[0]==0
+        assert owner.conn.execute('SELECT next_eligible FROM native15_factor_retry').fetchone()[0]==clock[0]+300
+        market_before = [tuple(r) for r in owner.conn.execute('SELECT * FROM native15_bar')]
+        legacy_before = {t:row_digests(owner.conn,t) for t in ('signal_event','event_risk')}
+    clock[0] += 301
+    with NativeOwner(path) as owner:
+        selected = task(owner.market,owner.market.universe(),case['sessions'],target,target)
+        assert selected[2:] == ('F',[symbol])
+        owner.market.factor_attempt([symbol],target)
+        owner.accept_factors([symbol],{symbol:[]},sessions=case['sessions'],target=target,now=target,live_after=target)
+        info = owner.market.instrument(symbol)
+        # factors_day means a successful explicit response, including [].
+        assert info['factor_coverage']=='EXPLICIT' and info['factors_day']==target[:10]
+        assert owner.status_snapshot(target=target)['today_analyzed_candidates']==1
+        events = [tuple(r) for r in owner.conn.execute('SELECT * FROM native15_candidate')]
+        assert events and all(r['mode']=='REPLAY' for r in owner.conn.execute('SELECT mode FROM native15_candidate'))
+        owner.accept_factors([symbol],{symbol:[]},sessions=case['sessions'],target=target,now=target,live_after=target)
+        assert [tuple(r) for r in owner.conn.execute('SELECT * FROM native15_candidate')]==events
+        assert [tuple(r) for r in owner.conn.execute('SELECT * FROM native15_bar')]==market_before
+        assert {t:row_digests(owner.conn,t) for t in legacy_before}==legacy_before
+
+
+def test_factor_cooldown_does_not_block_new_market_target_and_backoff_is_persistent(tmp_path, monkeypatch):
+    from addons.lan_ma55.backend import native15_store, native15_scheduler
+    clock = [1000000.0]
+    monkeypatch.setattr(native15_store,'time',lambda:clock[0])
+    monkeypatch.setattr(native15_scheduler,'time',lambda:clock[0])
+    sessions,five = sample(64)
+    bars = native(five,sessions)
+    target = max(bars)
+    next_target = points(sessions,target,sessions[-1]+' 15:00:00',step=15)[1]
+    path,symbol = tmp_path/'state.sqlite3','000000.SZ'
+    with NativeOwner(path) as owner:
+        prepare(owner,sessions)
+        accept(owner,bars,sessions,factors={symbol:None})
+        selected = task(owner.market,owner.market.universe(),sessions,next_target,next_target)
+        assert selected[2:] == ('A',[symbol])
+        accept(owner,{next_target:dict(bars[target],timestamp=next_target)},sessions,factors={},stage='A')
+        assert owner.market.instrument(symbol)['latest_completed15']==next_target
+        assert owner.status_snapshot(target=next_target)['today_analyzed_candidates']==0
+        for expected in (900,1800,3600,7200,21600,21600):
+            owner.market.factor_failed([symbol],next_target,'MISSING_RESPONSE')
+            assert owner.conn.execute('SELECT next_eligible FROM native15_factor_retry').fetchone()[0]==clock[0]+expected
+        owner.market.factor_failed([symbol],next_target,'RATE_LIMITED',delay=25000)
+    with NativeOwner(path) as owner:
+        retry = owner.conn.execute('SELECT * FROM native15_factor_retry').fetchone()
+        assert retry['error_type']=='RATE_LIMITED' and retry['next_eligible']==clock[0]+25000
+        assert owner.market.instrument(symbol)['factors_day'] is None
+
+
+def test_factor_only_revision_uses_existing_lock_replay_rules(tmp_path, scenarios):
+    case = scenarios['single']
+    bars = {b['timestamp']:dict(b,source_id=SOURCE,source_count=1,source_proof=PROOF,amount=None) for b in case['bars']}
+    symbol,target='000000.SZ',max(bars)
+    with NativeOwner(tmp_path/'state.sqlite3') as owner:
+        prepare(owner,case['sessions'])
+        accept(owner,bars,case['sessions'])
+        events = [tuple(r) for r in owner.conn.execute('SELECT * FROM native15_candidate')]
+        revision = owner.market.instrument(symbol)['basis_revision']
+        owner.accept_factors([symbol],{symbol:[dict(day=case['bars'][-20]['timestamp'][:10],ex_factor=1.1)]},
+                             sessions=case['sessions'],target=target,now=target,live_after=target)
+        assert owner.market.instrument(symbol)['basis_revision']==revision+1
+        assert owner.conn.execute('SELECT reason FROM native15_signal_state').fetchone()[0]=='INPUT_REVISION_LOCK_HISTORY_REQUIRED'
+        assert [tuple(r) for r in owner.conn.execute('SELECT * FROM native15_candidate')]==events
+
+
+def test_55_bar_warmup_and_real_gap_require_repair_before_analysis(tmp_path, monkeypatch):
+    from addons.lan_ma55.backend import native15_store,native15_scheduler
+    clock=[1000000.0]
+    monkeypatch.setattr(native15_store,'time',lambda:clock[0])
+    monkeypatch.setattr(native15_scheduler,'time',lambda:clock[0])
+    sessions,five=sample(64)
+    bars=native(five,sessions)
+    last56=dict(list(bars.items())[-56:])
+    missing=list(last56)[-20]
+    partial={t:b for t,b in last56.items() if t!=missing}
+    with NativeOwner(tmp_path/'state.sqlite3') as owner:
+        prepare(owner,sessions)
+        accept(owner,partial,sessions)
+        assert owner.status_snapshot(target=max(bars))['today_analyzed_candidates']==0
+        assert owner.market.instrument('000000.SZ')['rebuild_from']==missing
+        clock[0]+=301
+        assert task(owner.market,owner.market.universe(),sessions,max(bars),max(bars))[2]=='B'
+        accept(owner,last56,sessions,factors={})
+        assert owner.status_snapshot(target=max(bars))['today_analyzed_candidates']==1
+
+
+def test_new_trading_day_waits_for_factor_verification_then_uses_saved_target(tmp_path):
+    sessions,five=sample(80)
+    bars=native(five,sessions)
+    initial=dict(list(bars.items())[:64])
+    after=list(bars)[64]
+    symbol='000000.SZ'
+    assert after[:10]>max(initial)[:10]
+    with NativeOwner(tmp_path/'state.sqlite3') as owner:
+        prepare(owner,sessions)
+        accept(owner,initial,sessions)
+        previous=owner.market.instrument(symbol)
+        accept(owner,{after:bars[after]},sessions,factors={},stage='A')
+        assert owner.status_snapshot(target=after)['today_analyzed_candidates']==0
+        owner.accept_factors([symbol],{symbol:[]},sessions=sessions,target=after,now=after,live_after=after)
+        assert owner.status_snapshot(target=after)['today_analyzed_candidates']==1
+        assert owner.market.instrument(symbol)['basis_revision']==previous['basis_revision']
+        assert owner.market.instrument(symbol)['factors_day']==after[:10]
+
+
+@pytest.mark.parametrize('error',['FACTOR_PENDING','SOURCE_LAG'])
+def test_upgrade_clears_old_false_success_day_and_market_cooldown_once(tmp_path,error):
+    sessions,five=sample(64)
+    bars=native(five,sessions)
+    path,symbol=tmp_path/'state.sqlite3','000000.SZ'
+    with NativeOwner(path) as owner:
+        prepare(owner,sessions)
+        accept(owner,bars,sessions,factors={symbol:None})
+        factor_due=owner.conn.execute('SELECT next_eligible FROM native15_factor_retry').fetchone()[0]
+        with owner.conn:
+            owner.conn.execute("DELETE FROM meta WHERE key='native15.factor_retry_separated'")
+            owner.conn.execute("UPDATE native15_instrument_progress SET factors_day=?,state='FACTOR_PENDING',next_retry=?",(max(bars)[:10],time()+86400))
+            owner.conn.execute("UPDATE native15_retry SET error_type=?,next_eligible=?,retry_after=86400",(error,time()+86400))
+    with NativeOwner(path) as owner:
+        assert owner.market.instrument(symbol)['factors_day'] is None
+        assert owner.conn.execute('SELECT next_eligible FROM native15_retry').fetchone()[0]==0
+        assert owner.conn.execute('SELECT next_eligible FROM native15_factor_retry').fetchone()[0]==factor_due
+        assert owner.market.instrument(symbol)['listing_status']=='NOT_PROVIDED'

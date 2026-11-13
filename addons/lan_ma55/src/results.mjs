@@ -2,13 +2,7 @@
 const SUMMARY = 'lan_ma55_native15_summary_v1', DAY = 'lan_ma55_day', HISTORY = 'lan_ma55_history';
 import { CSS } from './styles.mjs';
 import { escapeHtml as esc, renderStatus } from './status-view.mjs';
-const num = (v, digits = 0) => Number.isFinite(v) ? v.toLocaleString('zh-CN', { maximumFractionDigits: digits }) : '未知';
 const mode = value => ({ REPLAY: '历史重放', LIVE: '实时确认', DELAYED: '延迟确认' }[value] || value || '—');
-const phase = value => ({ RUNNING: '后台持续更新', WAITING: '等待新的完成15m', DATA_SOURCE_UNAVAILABLE: '公共行情不可用，保留已保存结果', STARTING: '后台启动中', VERIFYING_UNIVERSE: '核实完整股票候选与元信息',
-  LIVE:'盘中增量', COLD:'初次历史预热', REBUILD:'历史重建', HISTORY:'历史补齐', HOST_BUSY:'礼让宿主数据任务', HOST_STATUS_UNAVAILABLE:'宿主任务状态不可核实', WAITING_NEXT_15M:'等待下一根完成15m',
-  COLLECTING: '后台采集完成5m', ANALYZING: '后台计算与提交', QUOTA_WAIT: '等待滚动请求额度',
-  RATE_LIMITED: '供应商429冷却', NETWORK_WAIT: '网络重试等待', WAITING_NEXT_SESSION: '等待下一交易日，缺口按计划重试',
-  WAITING_NEXT_5M: '等待下一个完成5m', ERROR: '后台受阻', CALENDAR_PENDING: '等待真实交易日历' }[value] || value || '尚未收到后台状态');
 const reason = value => ({ VERSION_HISTORY_INSUFFICIENT: '旧确认状态缺少足够真实历史，等待重建', FACTOR_PENDING: '因子覆盖待补', REBUILD_PENDING: '更正数据重建中', METADATA_PENDING: '证券元信息待补', WARMUP: '不足56根连续完成15m', INSUFFICIENT_WARMUP: '不足56根连续完成15m',
   EMPTY_OR_OMITTED_5M: '源未返回有效5m，原因未确认', MISSING_5M: '缺少真实5m', MISSING_COMPLETED_15M: '15m不连续，重新预热',
   HISTORICAL_FACTOR_UNAVAILABLE: '因子覆盖未确认，暂停BUY', PRICE_BASIS_CHANGED: '价格基准变化，重新预热',
@@ -73,7 +67,7 @@ export function mountResults(el, ctx) {
     if (disposed) return;
     const focus = root.contains(root.ownerDocument.activeElement) && root.ownerDocument.activeElement.dataset.control === 'query'
       ? { start: root.ownerDocument.activeElement.selectionStart, end: root.ownerDocument.activeElement.selectionEnd } : null;
-    const s = model.summary || {}, resultSummary = model.tab==='history' ? model.legacySummary || {} : s, cycle = s.cycle || {}, universe = s.universe || {};
+    const s = model.summary || {}, resultSummary = model.tab==='history' ? model.legacySummary || {} : s;
     const all = visibleRows(), pages = Math.max(1, Math.ceil(all.length / 50));
     model.page = Math.min(model.page, pages - 1); shown = all.slice(model.page * 50, model.page * 50 + 50);
     const buyCount = model.rows.reduce((n, r) => n + JSON.parse(r.events_json || '[]').length, 0);
@@ -93,8 +87,8 @@ export function mountResults(el, ctx) {
         return `<tr data-row="${i}" tabindex="0" aria-label="打开${esc(row.name)}K线"><td><a class="mr-kline" data-stock-link href="${esc(workbenchUrl(row.symbol,e))}">${esc(row.name)}</a>${q?.asset_type==='etf'?'<span class="mr-type">ETF</span>':''}<span class="mr-code">${esc(row.symbol)}</span></td><td class="mr-price" title="${esc(q?.bar_end?.slice(0,10)===model.date?`${q.bar_end} · 原价完成15m收盘 · ${q.source_id}`:'所选日无有效完成15m价格')}">${price(row)}</td><td>${esc(e?.confirmed_at?.slice(0,16)||'—')}${e?`<span class="mr-code">${esc(model.tab==='history'?'旧5m / 迁移历史':e.mode==='REPLAY'?'历史候选':'当日新增 · '+mode(e.mode))}</span>`:''}</td></tr>`;
       }).join('')}</tbody></table>${shown.length?'':`<div class="mr-empty">${model.loading?'正在读取…':!model.dayInfo?.ready?'所选日结果发布中':model.tab==='watch'?'暂无观察结构':model.tab==='history'?'所选日暂无历史冻结 BUY':'所选日暂无原生15m候选'}</div>`}</div>
       <div class="mr-pager"><button data-action="previous" ${model.page===0?'disabled':''}>上一页</button><span>${model.page+1} / ${pages} · ${all.length}条</span><button data-action="next" ${model.page+1>=pages?'disabled':''}>下一页</button></div>
-      <details class="mr-diagnostics" ${model.diagnostics?'open':''}><summary>数据状态 / 详情</summary><p>${esc(phase(s.phase))} · ${esc(cycle.bar_end||'')} · 股票 ${num(universe.stock)} / ETF ${num(universe.etf)}</p><p>有效 ${num(cycle.valid_symbols)} · 不足 ${num(cycle.insufficient_symbols)} · 缺口 ${num(cycle.gap_symbols)} · 失败 ${num(cycle.failed_symbols)} · 缺tick ${num(universe.unpriced)}</p><p>原生15m请求 ${num(s.requests?.period_15m)} / HTTP ${num(s.requests?.http_requests)} · 待预热 ${num(s.pending_symbols)}</p><button data-action="tab" data-tab="data">查看证券状态</button><details><summary>后台状态</summary><pre>${esc(JSON.stringify(s,null,2))}</pre></details><div>${shown.map(({row,event:e},i)=>`<button data-detail="${i}">${esc(row.name)} · ${esc(reason(row.reason))}${e?' · '+esc(mode(e.mode)):''}</button>`).join('')}</div>
-      ${selected?`<section class="mr-panel mr-selected"><h2>${esc(selected.name)} ${esc(selected.symbol)}</h2><p>${esc(reason(selected.reason))}</p><p>支撑测试 ${esc(event?.setup_at||d?.support_test_time||'—')} · 确认 ${esc(event?.confirmed_at||'尚未确认')} · ${esc(mode(event?.mode))}</p><p>首次看到 ${esc(event?.first_seen_at||'—')} · ${esc(event?.risk_text||'')}</p><pre>${esc(JSON.stringify({event,decision:d},null,2))}</pre><button data-action="preview" ${ctx.ui?.openStockPreview?'':'disabled'}>官方个股详情 ↗</button> ${model.workbench==='enabled'?`<a href="${esc(workbenchUrl(selected.symbol,event))}" class="mr-kline">15 分钟 K ↗</a>`:'<span>安装并启用独立分钟K工作台后可打开K线。</span>'}</section>`:''}</details>`;
+      <details class="mr-diagnostics" ${model.diagnostics?'open':''}><summary>证券状态 / 候选详情</summary><button data-action="tab" data-tab="data">查看证券状态</button><div>${shown.map(({row,event:e},i)=>`<button data-detail="${i}">${esc(row.name)} · ${esc(reason(row.reason))}${e?' · '+esc(mode(e.mode)):''}</button>`).join('')}</div>
+      ${selected?`<section class="mr-panel mr-selected"><h2>${esc(selected.name)} ${esc(selected.symbol)}</h2><p>${esc(reason(selected.reason))}</p><p>支撑测试 ${esc(event?.setup_at||d?.support_test_time||'—')} · 确认 ${esc(event?.confirmed_at||'尚未确认')} · ${esc(mode(event?.mode))}</p><p>首次看到 ${esc(event?.first_seen_at||'—')} · ${esc(event?.risk_text||'')}</p><details><summary>候选原始字段</summary><pre>${esc(JSON.stringify({event,decision:d},null,2))}</pre></details><button data-action="preview" ${ctx.ui?.openStockPreview?'':'disabled'}>官方个股详情 ↗</button> ${model.workbench==='enabled'?`<a href="${esc(workbenchUrl(selected.symbol,event))}" class="mr-kline">15 分钟 K ↗</a>`:'<span>安装并启用独立分钟K工作台后可打开K线。</span>'}</section>`:''}</details>`;
     if (focus) {
       const input = root.querySelector('[data-control="query"]');
       input.focus({preventScroll:true}); input.setSelectionRange(focus.start,focus.end);

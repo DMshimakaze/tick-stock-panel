@@ -25,7 +25,8 @@ def run(folder):
 
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=False)
-    result = dict(synthetic=True, supplier_http=0, symbols=100, raw15_per_symbol=1280, paths={})
+    result = dict(synthetic=True, supplier_http=0, symbols=100, raw15_per_symbol=1280,
+                  factor_fixture="EXPLICIT_EMPTY_VERIFIED_BEFORE_TARGETS", paths={})
     for name, kind, seed in (("five", UnifiedStore, legacy_seed), ("native15", NativeOwner, native_seed)):
         with kind(folder/(name+".sqlite3")) as owner:
             sessions, five, bars, securities = seed(owner, 116)
@@ -81,6 +82,8 @@ def run(folder):
                                            now=target, factors={}, stage="A", live_after=target)
                         transactions.append((perf_counter()-tick)*1000)
                         phases = dict(owner.conn.execute("SELECT write_ms,scan_ms,commit_ms FROM native15_timing ORDER BY id DESC LIMIT 1").fetchone())
+                        status = owner.status_snapshot(target=target, scope=symbols)
+                        assert status["today_native15_saved"] == status["today_analyzed_candidates"] == len(symbols)
                     committed = perf_counter()
                     publisher.day(target[:10], owner.day_rows(target[:10], symbols))
                     publisher.prices(target[:10], owner.market.prices(target[:10]))
