@@ -20,8 +20,10 @@ export function fixture() {
   return {config:{...config},membership:{total:rows.length,rows},
     rotation:{dates:[...dates],columns,concept_count:names.length},
     market:{as_of:dates[0],rows:[{symbol:symbol(1),change_pct:.01},{symbol:symbol(2),change_pct:-.01}]},
-    summary:{signal_family:'NATIVE15_REVIEW_V1',market_date:dates[0],published_market_date:dates[0],generation:2},
-    day:{total:1,rows:[{symbol:symbol(1),name:'股票0',market_date:dates[0],events_json:JSON.stringify([event])}]},
+    summary:{signal_family:'NATIVE15_REVIEW_V1',market_date:dates[0],published_market_date:dates[0],generation:2,pending_publish:false},
+    day:{date:'2026-11-14 10:00:00',total:1,rows:[{symbol:symbol(1),name:'股票0',market_date:dates[0],generation:2,events_json:JSON.stringify([event])}]},
+    sources:Object.fromEntries(['configs','membership','market','summary','rotation','day','pages'].map(key=>[key,
+      {ok:true,error:null,read_at:now,as_of:dates[0],total:1,received:1}])),
     event,now};
 }
 export function sdk(input=fixture()) {

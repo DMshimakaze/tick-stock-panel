@@ -59,11 +59,10 @@ test('slash-name matrix mismatch and empty rotation stay unavailable, not a fake
 test('native event IDs and modes survive; duplicate symbols and independent events are distinct',()=>{
   const f=fixture();const second={...f.event,event_id:'native:test:2',confirmed_at:'2026-11-13 14:45:00',mode:'LIVE'};
   f.day.rows[0].events_json=JSON.stringify([f.event,second,f.event]);
-  f.day.rows.push({symbol:symbol(9),market_date:dates[0],events_json:JSON.stringify([{...f.event,rule_version:'V5_R1'}])});f.day.total=2;
-  const c=nativeCandidates(f.summary,f.day);
+  const c=nativeCandidates(f.summary,f.day,f.sources);
   assert.equal(c.events.length,2);assert.equal(c.bySymbol.size,1);
   assert.equal(c.events.find(e=>e.event_id==='native:test:1').mode,'REPLAY');
-  assert.equal(c.rejected.length,1);assert.equal(c.events[0].confirmed_at,second.confirmed_at);
+  assert.equal(c.rejected.length,0);assert.equal(c.events[0].confirmed_at,second.confirmed_at);
 });
 
 test('industry intersection does not label unmatched ETFs, mutate events or duplicate a stock',()=>{
@@ -90,4 +89,42 @@ test('a full 20-date matrix still cannot be current if a later completed local s
   assert.equal(stale.scores.rows[0].score,null);
   f.now='2026-11-16 14:30:00';
   assert.equal(project(f).scores.rows[0].valid,true,'current unfinished day must not displace the last completed session');
+});
+
+test('NO_EVENTS requires successful full same-day state rows with verified empty event arrays',()=>{
+  const f=fixture();f.day.rows[0].events_json='[]';f.summary.latest_day_buy_count=0;
+  const c=nativeCandidates(f.summary,f.day,f.sources);
+  assert.equal(c.state,'NO_EVENTS');assert.equal(c.complete,true);assert.equal(c.eventCount,0);assert.equal(c.stockCount,0);
+  f.day={total:0,rows:[]};
+  const missing=nativeCandidates(f.summary,f.day,f.sources);
+  assert.equal(missing.state,'SOURCE_UNAVAILABLE');assert.equal(missing.eventCount,null);
+});
+
+test('truncation, wrong date and forward generation never produce a current intersection',()=>{
+  for(const [change,expected] of [
+    [f=>f.day.total++,'TRUNCATED'],
+    [f=>f.summary.published_market_date='2026-11-12','WRONG_DATE'],
+    [f=>f.day.rows[0].market_date='2026-11-12','WRONG_DATE'],
+    [f=>f.day.rows[0].generation=3,'GENERATION_MISMATCH'],
+  ]) {
+    const f=fixture();change(f);const v=project(f);
+    assert.equal(v.candidates.state,expected);assert.equal(v.candidates.complete,false);
+    assert.equal(v.candidates.eventCount,null);assert.equal(v.intersection.size,0);
+  }
+});
+
+test('older generation retained confirmations stay valid under the actual changed-row publishing contract',()=>{
+  const f=fixture();f.day.rows[0].generation=1;
+  const c=nativeCandidates(f.summary,f.day,f.sources);
+  assert.equal(c.complete,true);assert.equal(c.events[0].event_id,f.event.event_id);
+  assert.equal(c.retainedOlderGenerationRows,1);
+});
+
+test('malformed events, unexpected family, pending publication and count conflicts cannot become NO_EVENTS',()=>{
+  for(const change of [f=>f.day.rows[0].events_json='{',
+    f=>f.day.rows[0].events_json=JSON.stringify([{...f.event,rule_version:'V5_R1'}]),
+    f=>f.summary.pending_publish=true,f=>f.summary.latest_day_buy_count=2]) {
+    const f=fixture();change(f);const c=nativeCandidates(f.summary,f.day,f.sources);
+    assert.equal(c.complete,false);assert.equal(c.state,'SOURCE_UNAVAILABLE');assert.equal(c.eventCount,null);
+  }
 });

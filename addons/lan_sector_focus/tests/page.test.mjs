@@ -51,10 +51,38 @@ test('ambiguous labels and only-MA55/no-industry remain visible as unmatched',as
 });
 
 test('industry without candidates shows members, with no fake event or Kline link',async()=>{
-  const f=fixture();f.day={total:0,rows:[]};const {root,stop}=await mounted(f);
+  const f=fixture();f.day.rows[0].events_json='[]';f.summary.latest_day_buy_count=0;const {root,stop}=await mounted(f);
   assert.equal(root.querySelectorAll('[data-candidate]').length,0);
   assert.match(root.querySelector('.sf-members').textContent,/没有对应原生15m候选/);
   root.querySelector('[data-member-mode="all"]').click();assert.equal(root.querySelectorAll('.sf-stock').length,1);stop();
+});
+
+test('failed day refresh keeps industry ranking but displays NA and last verified date, then recovers',async()=>{
+  const {root,ctx,stop}=await mounted(),original=ctx.api.extDataRows;
+  ctx.api.extDataRows=async(id,opts)=>{
+    if(id==='lan_ma55_native15_day_v1')throw Object.assign(Error('HTTP 500'),{status:500});
+    return original(id,opts);
+  };
+  root.querySelector('[data-action="refresh"]').click();await ready(root);
+  assert.equal(root.querySelector('.sf-kpi:last-child strong').textContent,'NA');
+  assert.equal(root.querySelectorAll('[data-candidate]').length,0);
+  assert.match(root.textContent,/候选暂不可用/);assert.match(root.textContent,/上次核实.*2026-11-13/);
+  assert.equal(root.querySelector('[data-sector]').lastElementChild.textContent,'100');
+  assert.doesNotMatch(root.querySelector('[aria-label="行业列表"]').textContent,/0只候选/);
+  ctx.api.extDataRows=original;root.querySelector('[data-action="refresh"]').click();await ready(root);
+  assert.equal(root.querySelectorAll('[data-candidate]').length,1);
+  assert.equal(root.querySelector('.sf-kpi:last-child strong').textContent,'1');stop();
+});
+
+test('initial day permission failure is unavailable, with no fake previous date or zero count',async()=>{
+  const dom=new JSDOM('<main></main>',{url:'http://localhost/lan-industry'}),root=dom.window.document.querySelector('main');
+  const ctx=sdk(),original=ctx.api.extDataRows;
+  ctx.api.extDataRows=async(id,opts)=>{
+    if(id==='lan_ma55_native15_day_v1')throw Object.assign(Error('HTTP 403'),{status:403});return original(id,opts);
+  };
+  const stop=mountIndustry(root,ctx,{now:()=>now});await ready(root);
+  assert.equal(root.querySelector('.sf-kpi:last-child strong').textContent,'NA');
+  assert.match(root.textContent,/尚无成功核实记录/);assert.doesNotMatch(root.textContent,/0条 \/ 0只/);stop();
 });
 
 test('empty RPS refresh keeps explicitly stale previous snapshot instead of a new valid zero',async()=>{

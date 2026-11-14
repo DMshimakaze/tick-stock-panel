@@ -7,11 +7,12 @@ const mean = values => values.length ? values.reduce((a,b)=>a+b,0)/values.length
 
 /** The saved fanout flattened multiple catalog labels with '-'. Neither that
  * string nor slash/space-delimited words establish a hierarchy or industry ID. */
-export function membershipIndex(data, config={}) {
-  const sectors=new Map(),bySymbol=new Map(),pending=[],invalidSymbols=[];
-  for(const row of data.rows) {
+export function membershipIndex(data, config={},source) {
+  const sectors=new Map(),bySymbol=new Map(),pending=[],invalidSymbols=[],sourceSymbols=new Set();
+  for(const row of data?.rows||[]) {
     const symbol=fullSymbol(row.symbol),raw_label=String(row[FIELD]??'').trim();
     if(!symbol) { invalidSymbols.push({symbol:row.symbol,raw_label});continue; }
+    sourceSymbols.add(symbol);
     if(!raw_label || raw_label.includes('-')) {
       pending.push({symbol,name:row.name||row['股票简称']||'',raw_label,reason:raw_label?'AMBIGUOUS_JOIN':'MISSING_LABEL'});
       continue;
@@ -22,15 +23,15 @@ export function membershipIndex(data, config={}) {
     if(!bySymbol.get(symbol).includes(raw_label))bySymbol.get(symbol).push(raw_label);
   }
   const syncAt=config.latest_sync_date?.replace('T',' ')||null;
-  return {sectors,bySymbol,pending,invalidSymbols,total:data.total,received:data.rows.length,
-    complete:data.total===data.rows.length,source:config.id,description:config.description||'',syncAt,
+  return {sectors,bySymbol,pending,invalidSymbols,sourceSymbolCount:sourceSymbols.size,total:data?.total??null,received:data?.rows?.length??null,
+    complete:source?.ok!==false&&!!data&&data.total===data.rows.length,source:config.id,description:config.description||'',syncAt,
     // This is an observed file-write version, not a vendor effective date.
-    sourceAsOf:null,version:`${config.id}@${syncAt||'unknown'}|${config.updated_at||'unknown'}|${data.total}`};
+    sourceAsOf:null,version:`${config.id}@${syncAt||'unknown'}|${config.updated_at||'unknown'}|${data?.total??'unknown'}`};
 }
 
 export function scoreIndustries(rotation,membership,market,now,referenceDate=market?.as_of?.slice(0,10)) {
   const today=now.slice(0,10),closed=now.slice(11,19)>='15:00:00';
-  const dates=[...new Set(rotation.dates)].filter(d=>d<today || d===today&&closed).sort().reverse().slice(0,20);
+  const dates=[...new Set(rotation?.dates||[])].filter(d=>d<today || d===today&&closed).sort().reverse().slice(0,20);
   const daily=new Map(),values=new Map();
   for(const date of dates) {
     const column=(rotation.columns[date]||[]).filter(([name,pct])=>membership.sectors.has(name)&&Number.isFinite(pct));
@@ -74,34 +75,53 @@ export function scoreIndustries(rotation,membership,market,now,referenceDate=mar
     missingDayCount:20-dates.length,algorithm:VERSION,fresh};
 }
 
-export function nativeCandidates(summary,day) {
+export function nativeCandidates(summary,day,sources) {
   const events=[],bySymbol=new Map(),rejected=[],seen=new Set();
-  const date=summary?.published_market_date||summary?.market_date||null;
-  if(summary?.signal_family!==FAMILY)return {events,bySymbol,rejected,date,complete:false,error:'NATIVE_SUMMARY_UNAVAILABLE'};
+  const date=summary?.published_market_date||null;
+  const unavailable=(state,error)=>({events:[],bySymbol:new Map(),rejected,date,complete:false,state,error,eventCount:null,stockCount:null});
+  if(!sources?.summary?.ok||!sources?.day?.ok||!day)
+    return unavailable('SOURCE_UNAVAILABLE',sources?.day?.error||sources?.summary?.error||'原生来源未成功读取');
+  if(summary?.signal_family!==FAMILY||!date||summary.pending_publish)
+    return unavailable('SOURCE_UNAVAILABLE','原生状态未核实或仍有待发布结果');
+  if(day.total!==day.rows.length)return unavailable('TRUNCATED','原生day返回行数与total不符');
+  if(!day.rows.length)return unavailable('SOURCE_UNAVAILABLE','原生day没有证券状态行，不能核实0事件');
+  if(day.rows.some(row=>row.market_date!==date))return unavailable('WRONG_DATE','day行交易日与summary已发布交易日不一致');
+  if(!Number.isInteger(summary.generation)||day.rows.some(row=>!Number.isInteger(row.generation)||row.generation>summary.generation))
+    return unavailable('GENERATION_MISMATCH','day生成代缺失或晚于summary，来源未对齐');
+  // Publishing upserts changed symbols only. Older row generations retain
+  // immutable saved confirmations and are not a reason to delete history.
+  const retainedOlderGenerationRows=day.rows.filter(row=>row.generation<summary.generation).length;
   for(const row of day.rows) {
-    if(row.market_date!==date)continue;
-    for(const event of JSON.parse(row.events_json||'[]')) {
+    let rowEvents;
+    try { rowEvents=JSON.parse(row.events_json); }
+    catch { return unavailable('SOURCE_UNAVAILABLE','原生events_json无法解析'); }
+    if(!Array.isArray(rowEvents))return unavailable('SOURCE_UNAVAILABLE','原生事件列表未核实');
+    for(const event of rowEvents) {
       const symbol=fullSymbol(row.symbol);
       if(!symbol || event.symbol!==symbol || event.rule_version!==FAMILY ||
         event.source_id!=='TICKFLOW_NATIVE_15M' || !event.event_id || event.confirmed_at?.slice(0,10)!==date) {
-        rejected.push({symbol:row.symbol,event_id:event.event_id,reason:'UNVERIFIED_NATIVE_EVENT'});continue;
+        rejected.push({symbol:row.symbol,event_id:event.event_id,reason:'UNVERIFIED_NATIVE_EVENT'});
+        return unavailable(event.confirmed_at?.slice(0,10)!==date?'WRONG_DATE':'SOURCE_UNAVAILABLE','原生事件日期、完整代码或来源未核实');
       }
       if(seen.has(event.event_id))continue;
       seen.add(event.event_id);
       events.push({...event,name:row.name||'',market_date:date});
     }
   }
+  if(summary.market_date===date&&Number.isInteger(summary.latest_day_buy_count)&&summary.latest_day_buy_count!==events.length)
+    return unavailable('SOURCE_UNAVAILABLE','summary当日事件数与day事件数不一致，发布快照未对齐');
   events.sort((a,b)=>b.confirmed_at.localeCompare(a.confirmed_at)||a.event_id.localeCompare(b.event_id));
   for(const event of events) {
     if(!bySymbol.has(event.symbol))bySymbol.set(event.symbol,[]);
     bySymbol.get(event.symbol).push(event);
   }
-  return {events,bySymbol,rejected,date,complete:day.total===day.rows.length,error:null};
+  return {events,bySymbol,rejected,date,complete:true,state:events.length?'OK':'NO_EVENTS',error:null,
+    eventCount:events.length,stockCount:bySymbol.size,retainedOlderGenerationRows};
 }
 
 export function project(input) {
-  const membership=membershipIndex(input.membership,input.config);
-  const candidates=nativeCandidates(input.summary,input.day),intersection=new Map(),unmatched=[];
+  const membership=membershipIndex(input.membership,input.config,input.sources?.membership);
+  const candidates=nativeCandidates(input.summary,input.day,input.sources),intersection=new Map(),unmatched=[];
   const today=input.now.slice(0,10),closed=input.now.slice(11,19)>='15:00:00';
   const reference=[input.market?.as_of?.slice(0,10),candidates.date]
     .filter(d=>d&&(d<today||d===today&&closed)).sort().at(-1);
