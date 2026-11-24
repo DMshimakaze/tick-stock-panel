@@ -1,8 +1,8 @@
 """Single-owner scheduler for verified THS focus and completed TickFlow bars."""
 
 import atexit
-from datetime import timedelta
 import os
+from datetime import timedelta
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic, time
@@ -13,21 +13,21 @@ from .collector import Collector, SourceError
 from .daily_store import DailyStore
 from .exchange_sessions import frame_schedules, planned_session
 from .focus_owner import FocusOwner
-from .multiframe_core.multiframe import VERSION
-from .observations import Observations
 from .market_grid import (
     CAPACITY,
     now_cn,
     wall,
 )
-from .request_budget import CollectionStopped, RequestDeferred, RollingBudget
+from .multiframe_core.multiframe import VERSION
 from .native15_owner import NativeOwner
-from .native15_shadow import SOURCE as NATIVE_SOURCE
 from .native15_scheduler import task as native_task
+from .native15_shadow import SOURCE as NATIVE_SOURCE
+from .observations import Observations
+from .request_budget import CollectionStopped, RequestDeferred, RollingBudget
 from .result_publisher import Publisher, workbench_configs
-from .worker_lease import ProcessLease
 from .runtime_status import observation_summary
 from .workbench_bridge import WorkbenchBridge, focus_view
+from .worker_lease import ProcessLease
 
 
 def classify(items, day):
@@ -81,7 +81,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.10.0", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.11.0", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -269,7 +269,6 @@ class Worker:
                 try:
                     self.prepare_bridge()
                     market_day = sessions[-1] if sessions else None
-                    self.focus.schedule(market_day, now, sessions, trading_today=market_day == now[:10])
                     if self.bridge_prepared and monotonic() - self.last_commands >= 2:
                         self.last_commands = monotonic()
                         try:
@@ -313,6 +312,10 @@ class Worker:
                             phase = "QUOTA_WAIT"
                     self.report(phase=phase, active_operation="IDLE", backend_scanning=bool(scope and self.collector and not self.market_rejected),
                                 work_stage=stage, error=None, waiting_for=None)
+                    if not stage or not "09:30:00" <= now[11:19] < "15:00:00":
+                        self.focus.schedule(sessions[-1] if sessions else None, sessions,
+                                            self.collector.taxonomy_universe
+                                            if self.collector and not self.market_rejected else None)
                 except RequestDeferred as exc:
                     if exc.status_code == 429 and not (exc.reason or "").startswith("HOST_"):
                         with self.owner.conn:

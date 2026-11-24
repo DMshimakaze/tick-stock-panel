@@ -1,12 +1,35 @@
-# MA55 v0.11.0 development handoff
+# TSP v0.4.1 与 MA55 0.11.0 验收
 
-This branch is a source migration candidate, not a verified Windows release.
+## 已发布的同花顺指数映射
 
-- Host: official TSP v0.4.1 commit 49a35c0cf89a9c2a665f9190b8aa347fde63c555.
-- Previous validated source baseline: f22a15f50572e8e3f751ae7acef786682f8b0bb8 (MA55 0.10.0).
-- Only lan.ma55 is an active personal addon in this checkout. Retired personal addon sources and the old QuantDash example are available in the previous branch/Git history. The offline DuckDB importer is moved into lan_ma55 and is not packaged. No installed plugin or user database has been deleted by these Git commits.
-- THS full inventory seed: ths_taxonomy.py stages both index catalogs and reverse membership coverage against a fixed stock universe. The documented reverse API does not guarantee a source timestamp; preserve NULL and record observed time separately. Direct board membership needs its own receipt. Do not label reverse coverage as verified hierarchy, actual source freshness or individually verified direct membership. Caller must prove the authorized source and cross-check sample boards before accepting bulk reverse data; fallback to direct board requests if coverage differs.
-- The seed is not wired into FocusOwner/runtime. The existing v0.10 behavior must not be mistaken for complete inventory integration. Add local selection and background maintenance; preserve the existing focus pool and all old events. No full-market K-line collection.
-- Search is generalized to names, codes, explicit aliases and verified hierarchy paths. Fuzzy or alias matches require explicit selection. Persist user-defined groups/aliases; do not invent hierarchy for index-only rows. The provider's catalog and reverse endpoints return flat identities, not parent IDs. Obtain an authorized hierarchy source or expose the missing coverage explicitly.
-- Current candidate manifest targets v0.4.1 only; test actual package inspection, installation, host SDK Ext Data reads/writes, owner startup, charts and data protection before production activation. Retire installed old personal packages via official managers only after proof. Preserve original plugin ZIPs, configs and databases locally for rollback. Do not disable a provider still used by host without first verifying replacement.
-- Research multiframe core unchanged. No actual market calls or Windows tests were executed by the GitHub seed author. See previous acceptance record for v0.10.0 only.
+分类代 `tickflow-ths-20261124-1806` 核验完成于 2026-11-24 18:38（北京时间）。TickFlow `CN_Equity_A` 给出沪 2319、深 2905、北 357，共 5581 股。与交易所股票主数据交叉核对，其中 313 条历史代码在宽口径主数据中、未列入当前 A 股证券池。深市 2905 个代码同深交所 A 股名录完全一致。证券池保留仍在上市的停牌股。 [TickFlow 官方 SDK](https://github.com/tickflow-org/tickflow) · [深交所股票名录](https://www.szse.cn/market/product/stock/list/index.html)
+
+本代收到了 2 次目录、56 次反查、328 次板块正查，共 386 次成功的同花顺请求。初始权限探针另有 7 次请求。反查 5581 股均有对应分组，未见未知板块或漏组。177 条显示空白差异用相同指数 ID 和去空白后的名称核对，保留两种原始写法。反查源时间为 NULL，采集时间保存在请求收据。本轮按插件 12 RPM 运行，响应头显示 15 RPM。 [同花顺接口文档](https://fuyao.aicubes.cn/docs/api-reference/a-share-index/)
+
+320 个行业全部正查。半导体材料、半导体设备、消费电子零部件及组装和品牌消费电子等板块，正查分别多出 30、26、85、11 只。390 个概念中 8 个实际名单核对完全一致，其余 382 个以该类通过抽样的完整反查记录发布。全库有 710 板块、80,996 条关系。消费电子、半导体材料、光刻胶、光刻机分别为 96、30、82、52 股。光刻胶与光刻机共享 7 股，关注预览和保存均得到 127 股。
+
+后台沿用唯一 MA55 owner。SQLite 保存固定证券池、待建收据、上一成功代及当前代。日常更新目录及关注成分，完整代每周安排重核。用户也可手动排队。保存和重加关注从已发布库计算，检查代 ID 和关注版本。页面通过宿主 Ext Data 发布目录摘要，按需分页读取成分和归属。
+
+## 同花顺层级证据
+
+同花顺 F10 的行业对比明确列出「电子 → 半导体 → 半导体材料」和「电子 → 消费电子 → 消费电子零部件及组装」的层级样例。当前 Fuyao 目录没有父 ID、等级和权威对照字段。SuperMind 文档列有行业级别和分类代码，本机现有 Fuyao 授权和本地缓存未取得该服务的完整分类与成分。工作台仍标明层级未核实。 [沪硅产业行业对比](https://basic.10jqka.com.cn/688126/field.html) · [可川科技行业对比](https://basic.10jqka.com.cn/603052/field.html) · [SuperMind 行业分类字段](https://quant.10jqka.com.cn/view/dataplatform/detail/24)
+
+同花顺公告将物理 AI（客户端细分 ID `A5F7`）和端侧 AI 芯片（`ABDB`）列在人工智能 `885728` 下。公告分别给出千方科技、汇川技术，以及晶晨股份、国科微的入选样例，完整名单入口指向同花顺客户端。当前授权未取到这两类完整成分。国产算力仍是关注方向，用户可用明确板块创建自定义组。 [物理 AI 千方科技公告](https://news.10jqka.com.cn/field/20261020/680893163.shtml) · [物理 AI 汇川技术公告](https://news.10jqka.com.cn/20261020/c680893157.shtml) · [晶晨股份公告](https://news.10jqka.com.cn/field/20251201/672864228.shtml) · [国科微公告](https://news.10jqka.com.cn/field/20251201/672864222.shtml)
+
+## 本机与回归
+
+- v0.4.1 官方预检、前端候选和安装接口均返回 200。独立副本重启生效，退役旧个人扩展与页面以及 `quantdash_user` 后，唯一个人扩展和页面是 `lan.ma55 0.11.0` 及其工作台。保留官方 Fuyao、TdxQuant 及原生引擎。7 项能力仍指向 TickFlow。以 002008.SZ 实测原生日线、因子、报价及盘口均返回 HTTP 200。
+- Edge 实测亮暗主题、990px 窗口、中文组合输入事件、搜索、50/32 条成员翻页、股票多归属、关注人数预览、自定义组和别名跨重启、个股详情和冻结 BUY 定位。隔离股池实测取消草稿后保持 127 股，移除光刻胶后保留 52 股，清空后暂停，从已存组重加后恢复 127 股。以当天已保存的四股真实 TickFlow 数据复核六周期，其中大族激光六周期均可绘制，周线末日是 2026-11-20。该回放在收盘后进行。
+- 独立副本升级前后，冻结事件和风险表均为 48,982 行，原生候选和对应风险均为 25,168 行，旧 15m 与原生 15m 库存分别保留 2,282,749 和 10,120,505 行。27 项需另行配置或进入真实时段的测试按现有条件跳过。
+- `nga` 的后端与市场测试目录合计 167 通过、27 跳过。定向 Ruff、11 项 Node 测试、官方宿主和插件构建均通过。测试覆盖反查续传、缺组、429/3002 退避、旧代在待建时保持可读、跨代草稿冲突和空池暂停。新增的全市场请求仅涉及证券主数据和归属。
+- 合并提交 `30e16a5af9f5da8c8b12e569cbc4716a32ef4909` 的双亲为 `36974e3e12e6b8177009561eca3b49e81ebfc241` 和官方 tag `49a35c0cf89a9c2a665f9190b8aa347fde63c555`。相对官方的 `backend/app`、`frontend/src`、`dev.ps1` 差异为空。变更从 `3fd5235a44b47127fd0f2efeb60ef4e4a39f7d47` 接续。`multiframe.py` 为 `b1f75615d0acdb3bd27e1efeda534addc2b622f3`，`structure.py` 为 `f5922c5d7dfdaebb6d0f6a8c1dcf1b1071c7c41b`。
+
+## 正式安装与回退
+
+桌面入口和宿主端口分别为 `127.0.0.1:3011` 与 `127.0.0.1:3018`，两者均报告 TSP v0.4.1。正式扩展清单只有 `lan.ma55 0.11.0`，页面清单只有 `package:lan.ma55`。已在正式页面打开消费电子 96 股的成分分页。启动时沿用生产原有空关注状态，MA55 的 TickFlow 请求计数为 0。
+
+旧宿主正常停机后，以 SQLite backup API 和完整目录快照保存原始数据库、配置、宿主静态资源及原安装包。备份全部表逐行核对，`quick_check` 返回 `ok`。正式停机基线有 48,982 条冻结事件及对应风险、28,208 条原生候选及对应风险、2,282,749 条旧 15m 和 10,123,868 条原生 15m。备份位置为 `data/private/codex_runs/20261124-tsp-v041-ths-taxonomy/evidence/host-before-v041`。
+
+回退所需旧源码归档为 `source-v036-before-041.zip`，与备份放在同级目录。用备份副本启动 v0.3.36，已读到原 `lan.ma55 0.9.8` 的冻结历史查询结果，同时核实了旧 `lan.kline 3.3.0` 和 `lan.theme 1.0.7`。
+
+本机验收记录 `production-live.json`、分类正反向核对 `taxonomy-admission.json`、退役回执、构建包和截图均保存在同轮次私有证据目录。

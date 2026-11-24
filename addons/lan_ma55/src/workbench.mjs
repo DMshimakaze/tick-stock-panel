@@ -30,7 +30,7 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
   node.innerHTML = `<style>${CSS}${WORKBENCH_CSS}</style>
     <header class="mr-header"><div class="mr-heading"><h1>MA55 板块观察</h1><p data-role="market"></p></div>
       <button type="button" data-act="refresh">刷新</button></header>
-    <div data-role="focus"></div><p class="mr-error" role="status" data-role="error"></p>
+    <div data-role="focus"></div><p class="mr-error" role="status" data-role="workbench-error"></p>
     <div class="mr-coverage" data-role="coverage"></div>
     <section aria-label="关注股票"><div class="mr-tabs mr-sector-tabs" data-role="tabs"></div>
       <div class="mr-tools"><input data-role="search" aria-label="搜索股票" placeholder="名称或代码">
@@ -62,19 +62,18 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
   let archiveOffset = 0, archiveRows = [];
   const focus = mountFocusControls($('focus'), {
     onApply: args => edit('save', args),
+    onPreview: args => edit('preview', args),
     onRefresh: args => edit('refresh', args),
+    onLookup: args => io.submit('members', args),
   });
 
   function decorateFocus(data) {
     const source = Object.values(data.catalog_source_ms || {}).filter(Number.isFinite);
     const at = source.length ? beijing(Math.min(...source) / 1000).slice(0, 16) : '';
-    return { ...data, sectors: data.sectors.map(sector => ({
-      ...sector, checked_day: sector.observed_ms ? beijing(sector.observed_ms / 1000).slice(0, 10) : null,
-      source_time: sector.source_ms ? beijing(sector.source_ms / 1000).slice(0, 16) : null,
-    })), catalog_status: [
+    return { ...data, catalog_status: [
       data.catalog_error ? statusText(data.catalog_error) : null,
       data.catalog_stale && at ? '目录为旧快照' : null,
-      at ? `目录源时间 ${at}` : null,
+      at ? `目录接口时间 ${at}` : null,
     ].filter(Boolean).join(' · ') };
   }
   function updateFocus(data) {
@@ -85,6 +84,7 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     try {
       const result = await io.submit('edit', { ...args, action: name });
       if (stopped || !result) return null;
+      if (name === 'preview') return result;
       lastFocus = JSON.stringify(result.focus);
       if (view && result.focus.revision >= view.focus.revision) {
         const memberKeys = new Set(Object.keys(result.focus.members));
@@ -100,13 +100,18 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
   }
   function renderTable() {
     const rows = view?.rows || [], sectors = view?.focus.sectors || [];
-    if (board && !sectors.some(item => item.key === board)) board = '';
+    const groups = (view?.focus.groups || []).map(group => ({
+      key: 'group:' + group.id, name: group.name + ' · 自定义组', boards: group.boards,
+    }));
+    const options = [{ key: '', name: '全部' }, ...sectors, ...groups];
+    if (!options.some(item => item.key === board)) board = '';
+    const filterBoards = new Set(options.find(item => item.key === board)?.boards ?? [board]);
     const wanted = $('search').value.trim().toLowerCase(), state = $('filter').value, period = $('filter-period').value;
     const oldTab = doc.activeElement?.dataset.board;
-    $('tabs').innerHTML = [{ key: '', name: '全部' }, ...sectors].map(item =>
+    $('tabs').innerHTML = options.map(item =>
       `<button type="button" class="${board === item.key ? 'active' : ''}" aria-pressed="${board === item.key}" data-board="${esc(item.key)}">${esc(item.name)}</button>`).join('');
     if (oldTab !== undefined) [...$('tabs').children].find(item => item.dataset.board === oldTab)?.focus({ preventScroll: true });
-    filtered = rows.filter(row => (!board || row.sectors.includes(board)) &&
+    filtered = rows.filter(row => (!board || row.sectors.some(key => filterBoards.has(key))) &&
       (!wanted || [row.symbol, row.name].some(value => value.toLowerCase().includes(wanted))) &&
       (state === 'all' || (period === 'all' ? TIMEFRAMES : [period]).some(tf => state === 'blocked'
         ? row.frames[tf]?.status !== 'READY' : frameLabel(row.frames[tf]) === state)));
@@ -221,7 +226,7 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
       const raw = await io.view();
       if (stopped) return;
       if (!raw) { $('market').textContent = '等待后台发布工作台'; return; }
-      $('error').textContent = '';
+      $('workbench-error').textContent = '';
       if (raw !== lastRaw) {
         const incoming = JSON.parse(raw);
         if (view && incoming.focus.revision < view.focus.revision) return;
@@ -246,7 +251,7 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
           if (prior !== null || !chart) void loadChart(false);
         }
       }
-    } catch (error) { if (!stopped) $('error').textContent = statusText(error.message); }
+    } catch (error) { if (!stopped) $('workbench-error').textContent = statusText(error.message); }
     finally { refreshPending = false; }
   }
   async function history(offset) {

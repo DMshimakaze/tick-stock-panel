@@ -1,7 +1,7 @@
 export const WORKBENCH = 'lan_ma55_sector_workbench_v1';
 export const COMMAND = 'lan_ma55_sector_command_v1';
 export const RECEIPT = 'lan_ma55_sector_receipt_v1';
-const SLOTS = 16, LEASE_MS = 90000;
+const SLOTS = 16, COMMAND_ROWS = 4 * SLOTS, LEASE_MS = 90000;
 
 export const TIMEFRAMES = ['15m', '30m', '60m', '120m', 'daily', 'weekly'];
 export const PERIOD_LABEL = { '15m': '15m', '30m': '30m', '60m': '60m', '120m': '120m', daily: '日K', weekly: '周K' };
@@ -24,6 +24,14 @@ const MESSAGES = {
   OUTSIDE_FOCUS: '该证券已移出关注范围',
   HOST_BUSY: '宿主正在同步数据',
   THS_CATALOG_PENDING: '同花顺目录待核实',
+  THS_MAPPING_PENDING: '等待同花顺完整成分库',
+  THS_BOARD_UNAVAILABLE: '板块当前缺少可用成分快照',
+  THS_STOCK_OUTSIDE_UNIVERSE: '股票未纳入当前 A 股证券池',
+  THS_UNIVERSE_DEFERRED: '证券主目录等待核实',
+  THS_CODE_3002: '同花顺正在准备板块关系，已延后重查',
+  THS_MAPPING_UNVERIFIED_ValueError: '分类数据未通过核实',
+  INVALID_PREFERENCES: '组或别名包含无效板块',
+  MARKET_WIDE_SELECTION: '请缩小关注范围，全市场仅更新分类库',
   THS_KEY_REQUIRED: '请配置 THS_API_TOKEN',
   THS_KEY_REJECTED: '同花顺 Key 未获授权',
   THS_HTTP_401: '同花顺认证失败',
@@ -69,7 +77,7 @@ export function createWorkbenchIO(api, {
     const request_id = uuid();
     async function write() {
       for (let attempt = 0; attempt < 3 && current(); attempt++) {
-        const { rows } = await api.extDataRows(COMMAND, { limit: 3 * SLOTS });
+        const { rows } = await api.extDataRows(COMMAND, { limit: COMMAND_ROWS });
         if (!current()) return null;
         const active = rows.filter(row => row.scope.startsWith(kind + '-') && clock() - row.request_ms < LEASE_MS);
         const taken = new Set(active.map(row => row.scope));
@@ -79,7 +87,7 @@ export function createWorkbenchIO(api, {
         const request = { scope, client_id, request_id, request_ms: clock(), payload_json: JSON.stringify(args) };
         await api.extDataIngest(COMMAND, { rows: [request] });
         if (!current()) return null;
-        const echo = (await api.extDataRows(COMMAND, { limit: 3 * SLOTS })).rows.find(row => row.scope === scope);
+        const echo = (await api.extDataRows(COMMAND, { limit: COMMAND_ROWS })).rows.find(row => row.scope === scope);
         if (echo?.client_id === client_id && echo.request_id === request_id) return request;
       }
       if (current()) throw Error('工作台会话发生竞争，请重试');
@@ -90,7 +98,7 @@ export function createWorkbenchIO(api, {
     const sent = await sending;
     if (!sent) return null;
     while (current() && clock() - sent.request_ms < LEASE_MS) {
-      const { rows } = await api.extDataRows(RECEIPT, { limit: 3 * SLOTS });
+      const { rows } = await api.extDataRows(RECEIPT, { limit: COMMAND_ROWS });
       if (!current()) return null;
       const receipt = rows.find(row => row.scope === sent.scope && row.client_id === client_id
         && row.request_id === request_id && row.request_ms === sent.request_ms);

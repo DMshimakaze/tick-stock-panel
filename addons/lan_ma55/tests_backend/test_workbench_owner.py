@@ -2,6 +2,7 @@ import json
 from datetime import date, timedelta
 from threading import Event
 from time import time
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -15,6 +16,7 @@ from addons.lan_ma55.backend.native15_owner import NativeOwner
 from addons.lan_ma55.backend.native15_shadow import SOURCE
 from addons.lan_ma55.backend.observations import Observations
 from addons.lan_ma55.backend.ths_focus import CATALOG, MEMBERS, THSUnavailable
+from addons.lan_ma55.backend.ths_taxonomy import REVERSE
 
 SYMBOL = "600000.SH"
 BOARD = "industry:881001.TI"
@@ -53,26 +55,74 @@ def test_ths_rejection_stops_actual_http_and_429_survives_restart(tmp_path, stat
 def test_focus_explicit_pause_persists_and_noop_does_not_pull_members(tmp_path):
     day = "2026-11-24"
     requests = []
+    concept = "cn_concept:886001.TI"
+    names = {BOARD: "行业", concept: "概念"}
+    other = "000001.SZ"
 
     def vendor(request):
         requests.append(request)
-        item = {"thscode": SYMBOL}
-        return httpx.Response(200, json=dict(code=0, data=dict(timestamp=int(time() * 1000), item=[item])))
+        path = request.url.path
+        if path == REVERSE:
+            indexes = [dict(thscode=k.split(":")[1], name=v, type=k.split(":")[0]) for k, v in names.items()]
+            rows = [dict(thscode=s, index_list=indexes if s == SYMBOL else [])
+                    for s in request.url.params["thscode"].split(",")]
+            return httpx.Response(200, json=dict(code=0, data=dict(item=rows)))
+        if path == CATALOG:
+            tag = request.url.params["tag"]
+            rows = [dict(thscode=k.split(":")[1], name=v) for k, v in names.items() if k.startswith(tag+":")]
+        else:
+            rows = [dict(thscode=SYMBOL)]
+        return httpx.Response(200, json=dict(code=0, data=dict(timestamp=int(time() * 1000), item=rows)))
 
     with NativeOwner(tmp_path / "state.sqlite3") as owner:
         focus = FocusOwner(owner, "test", Event(), transport=httpx.MockTransport(vendor))
-        focus.catalog = dict(checked_day=day, entries={BOARD: "板块"})
         try:
-            assert focus.edit("save", [BOARD, BOARD], 0, day)["added"] == [SYMBOL]
-            assert focus.edit("save", [BOARD], 1, day)["ok"]
-            assert focus.edit("save", [], 0, day)["error"] == "SCOPE_CONFLICT"
-            assert focus.edit("save", [], 1, day)["removed"] == [SYMBOL]
-            assert focus.pool.read()["revision"] == 2
+            for _ in range(8):
+                focus.schedule(day, [day], lambda: dict(stocks=[SYMBOL, other]))
+            run = focus.run
+            assert run
+            calls = len(requests)
+            assert calls == 5
+            assert focus.edit("preview", 0, run, day, selection=[BOARD, concept])["added"] == 1
+            prefs = dict(groups=[dict(id=str(uuid4()), name="自定义", boards=[concept])], aliases={BOARD: ["细查"]})
+            assert focus.edit("save", 0, run, day, selection=[BOARD, concept, BOARD], preferences=prefs)["added"] == 1
+            assert sorted(focus.lookup(dict(run=run, symbol=SYMBOL), day)["rows"]) == sorted(names)
+            assert focus.edit("save", 1, run, day, selection=[BOARD, concept])["ok"]
+            assert focus.edit("save", 1, "past-run", day, selection=[])["error"] == "SCOPE_CONFLICT"
+            assert focus.edit("save", 1, run, day, selection=[concept])["retained"] == 1
+            assert focus.edit("save", 0, run, day, selection=[])["error"] == "SCOPE_CONFLICT"
+            assert focus.edit("save", 2, run, day, selection=[])["removed"] == 1
+            assert focus.pool.read()["revision"] == 3
             assert not focus.pool.read()["members"]
-            assert len(requests) == 1
-            assert owner.conn.execute("SELECT count(*) FROM focus_scope_history_v1").fetchone()[0] == 2
+            assert owner.conn.execute("SELECT count(*) FROM focus_scope_history_v1").fetchone()[0] == 3
+            restored = FocusOwner(owner, "test", Event(), transport=httpx.MockTransport(vendor))
+            try:
+                assert restored.snapshot["groups"] == prefs["groups"]
+                assert restored.snapshot["aliases"] == prefs["aliases"]
+                assert restored.edit("save", 3, run, day, selection=[concept])["added"] == 1
+            finally:
+                restored.source.close()
+            assert len(requests) == calls
         finally:
             focus.source.close()
+
+
+def test_ths_reverse_optional_time_then_persisted_3002(tmp_path):
+    responses = iter([{"code": 0, "data": {"item": []}}, {"code": 3002}])
+    with NativeOwner(tmp_path / "state.sqlite3") as owner:
+        source = THSTransport(owner, "test", Event(), 12, transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, json=next(responses))))
+        try:
+            source.request(REVERSE, {"thscode": "600000.SH,000001.SZ"})
+            assert source.last_receipt["source_ms"] is None
+            for _ in range(2):
+                with pytest.raises(THSUnavailable, match="THS_CODE_3002"):
+                    source.request(REVERSE, {"thscode": "600000.SH"})
+            assert owner.meta("ths_retry_until") > time()
+            rows = owner.conn.execute("SELECT capability,symbol_count FROM native15_request_receipt").fetchall()
+            assert [tuple(row) for row in rows] == [("ths.reverse", 2), ("ths.reverse", 1)]
+        finally:
+            source.close()
 
 
 def bar(at, source=SOURCE, close=10, volume=100):

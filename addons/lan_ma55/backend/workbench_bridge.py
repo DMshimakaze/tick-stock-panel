@@ -10,10 +10,16 @@ from .market_grid import CAPACITY, wall
 from .market_store import encoded
 from .multiframe_core.multiframe import TIMEFRAMES
 from .native15_owner import candidates_page
-from .result_publisher import COMMAND_ID, COMMAND_LEASE_MS, COMMAND_SLOTS, RECEIPT_ID, WORKBENCH_ID
+from .result_publisher import (
+    COMMAND_ID,
+    COMMAND_LEASE_MS,
+    COMMAND_SLOTS,
+    RECEIPT_ID,
+    WORKBENCH_ID,
+)
 from .store import read_page
 
-SLOT = re.compile(r"(edit|chart|history)-(\d{1,2})")
+SLOT = re.compile(r"(edit|chart|history|members)-(\d{1,2})")
 
 
 def _identity(value):
@@ -24,13 +30,25 @@ def _identity(value):
 
 
 def focus_view(focus, market_day):
+    active = focus.taxonomy.active or {}
+    entries = focus.catalog.get("entries", {}) or active.get("catalog", {})
+    boards = active.get("boards", {})
+    catalog = []
+    for key, name in {**active.get("catalog", {}), **entries}.items():
+        meta = boards.get(key, {})
+        catalog.append(dict(**{k: v for k, v in meta.items() if k not in ("key", "name")},
+                            key=key, name=name, hierarchy_status="UNVERIFIED",
+                            available=focus.is_available(key, market_day),
+                            removed=key not in entries, aliases=focus.snapshot["aliases"].get(key, [])))
+    taxonomy = focus.taxonomy.status()
     return dict(
         **focus.snapshot,
-        catalog=[dict(key=key, name=name) for key, name in focus.catalog.get("entries", {}).items()],
-        catalog_source_ms=focus.catalog.get("source_ms", {}),
+        catalog=catalog,
+        taxonomy=taxonomy,
+        catalog_source_ms=focus.catalog.get("source_ms") or active.get("source_ms", {}),
         catalog_checked_day=focus.catalog.get("checked_day"),
-        catalog_stale=focus.catalog.get("checked_day") != market_day,
-        catalog_error=focus.error,
+        catalog_stale=(focus.catalog.get("checked_day") or active.get("market_day")) != market_day,
+        catalog_error=taxonomy["error"],
         sector_errors=focus.sector_errors,
         market_day=market_day,
     )
@@ -50,7 +68,7 @@ class WorkbenchBridge:
             self.last_view = current
 
     def consume(self, market_day, sessions, schedules, weeks):
-        rows = self.publisher.rows(COMMAND_ID, 3 * COMMAND_SLOTS)
+        rows = self.publisher.rows(COMMAND_ID, 4 * COMMAND_SLOTS)
         received = int(time() * 1000)
         replies = []
         ordered = sorted(rows, key=lambda r: not str(r.get("scope")).startswith("edit-"))
@@ -76,10 +94,14 @@ class WorkbenchBridge:
                     raise ValueError("INVALID_COMMAND")
                 if kind == "edit":
                     action = args.get("action")
-                    if action not in ("save", "refresh"):
+                    if action not in ("save", "refresh", "preview"):
                         raise ValueError("INVALID_COMMAND")
-                    result = self.focus.edit(action, args.get("selection"), args.get("expected_revision"), market_day)
-                    result["focus"] = focus_view(self.focus, market_day)
+                    result = self.focus.edit(action, args.get("expected_revision"), args.get("run"), market_day,
+                                             selection=args.get("selection"), preferences=args.get("preferences"))
+                    if action != "preview" or not result["ok"]:
+                        result["focus"] = focus_view(self.focus, market_day)
+                elif kind == "members":
+                    result = self.focus.lookup(args, market_day)
                 elif kind == "history":
                     offset = args.get("offset", 0)
                     if type(offset) is not int or offset < 0:

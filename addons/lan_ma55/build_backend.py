@@ -16,7 +16,7 @@ def build(destination=None):
              'indicator_cache.py','native15_shadow.py','native15_store.py',
              'native15_signal_adapter.py','native15_scheduler.py','native15_owner.py',
              'focus_pool.py','ths_focus.py','ma55_levels.py',
-             'focus_owner.py','ths_taxonomy.py','exchange_sessions.py','multiframe_input.py',
+             'focus_owner.py','taxonomy_owner.py','ths_taxonomy.py','exchange_sessions.py','multiframe_input.py',
              'daily_store.py','observations.py','workbench_bridge.py',
              'multiframe_core/__init__.py','multiframe_core/features.py',
              'multiframe_core/structure.py','multiframe_core/multiframe.py']

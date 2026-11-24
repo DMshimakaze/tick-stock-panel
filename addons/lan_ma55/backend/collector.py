@@ -1,8 +1,8 @@
 """One bounded TickFlow SDK owner; actual HTTP hooks account for all SDK calls."""
 
+import json
 from collections import Counter, deque
 from datetime import datetime, timedelta
-import json
 from math import isfinite
 from threading import Event, Lock
 from time import monotonic
@@ -10,7 +10,7 @@ from time import monotonic
 import httpx
 from tickflow import TickFlow, TickFlowError
 
-from .market_grid import BEIJING, as_ms, latest_point, normalize_five, wall, now_cn
+from .market_grid import BEIJING, as_ms, latest_point, normalize_five, now_cn, wall
 from .multiframe_input import DAILY_HISTORY, normalize_daily
 from .native15_shadow import normalize_native
 from .request_budget import (
@@ -188,7 +188,7 @@ class Collector:
     def metadata(self, symbols):
         return self.request(lambda: self.tf.instruments.batch(symbols))
 
-    def master(self):
+    def stock_master(self):
         rows = []
         for exchange in ("SH", "SZ", "BJ"):
             rows.extend(
@@ -198,9 +198,31 @@ class Collector:
                     )
                 )
             )
+        return rows
+
+    def master(self):
+        rows = self.stock_master()
         for exchange in ("SH", "SZ"):
             rows.extend(self.request(lambda ex=exchange: self.tf.exchanges.get_instruments(ex, instrument_type="etf")))
         return rows
+
+    def taxonomy_universe(self):
+        """TickFlow's listed A-share universe plus the historical code master."""
+        from .focus_pool import SYMBOL
+
+        selected = self.request(lambda: self.tf.universes.get("CN_Equity_A"))
+        stocks = selected["symbols"]
+        if (selected["id"] != "CN_Equity_A" or len(stocks) != selected["symbol_count"] or
+            len(set(stocks)) != len(stocks) or not all(SYMBOL.fullmatch(s) for s in stocks) or
+            {s[-2:] for s in stocks} != {"SH", "SZ", "BJ"}):
+            raise ValueError("THS_UNIVERSE_UNVERIFIED")
+        master = {r["symbol"] for r in self.stock_master() if r.get("region") == "CN"
+                  and r.get("type") == "stock" and SYMBOL.fullmatch(r["symbol"])}
+        if not set(stocks) <= master:
+            raise ValueError("THS_UNIVERSE_NOT_IN_MASTER")
+        return dict(stocks=stocks, excluded=sorted(master-set(stocks)), universe_receipt=dict(
+            source="TickFlow CN_Equity_A", at=str(now_cn()), exchange_counts=dict(Counter(s[-2:] for s in stocks)),
+            master_count=len(master), listed_count=len(stocks)))
 
     def calendar(self):
         self.calendar_request = True

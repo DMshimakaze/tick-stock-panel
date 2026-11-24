@@ -23,7 +23,7 @@ test('substring suggests rather than silently adding a board', () => {
   assert.deepEqual(resolveTerms(catalog,'光刻'), {selection:[],unresolved:['光刻']});
 });
 test('empty query does not expand scope', () => {
-  assert.deepEqual(catalogMatches(catalog,' '), []);
+  assert.equal(catalogMatches(catalog,' ').length, catalog.length);
   assert.deepEqual(resolveTerms(catalog,' ',['industry:881001.TI']), {selection:['industry:881001.TI'],unresolved:[]});
 });
 

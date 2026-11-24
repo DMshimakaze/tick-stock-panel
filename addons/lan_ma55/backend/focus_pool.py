@@ -59,16 +59,24 @@ def _snapshot(value):
     if not isinstance(name, str) or not name.strip():
         raise ValueError("Missing sector name")
     source, observed = value["source_ms"], value["observed_ms"]
-    if any(type(v) is not int or v <= 0 for v in (source, observed)):
+    proof, run = value.get("proof"), value.get("run")
+    if (type(observed) is not int or observed <= 0 or
+            (source is None and proof != "BULK_REVERSE_CHECKED") or
+            (source is not None and (type(source) is not int or source <= 0))):
         raise ValueError("Missing snapshot time")
     symbols = value["symbols"]
-    if not isinstance(symbols, (tuple, list)) or not symbols:
+    if not isinstance(symbols, (tuple, list)) or (not symbols and proof != "DIRECT_EMPTY"):
         raise ValueError("Empty/unverified membership cannot replace snapshot")
-    return dict(key=key, name=name.strip(), source_ms=source, observed_ms=observed,
-                symbols=sorted({_canonical(s, SYMBOL) for s in symbols}))
+    snapshot = dict(key=key, name=name.strip(), source_ms=source, observed_ms=observed,
+                    symbols=sorted({_canonical(s, SYMBOL) for s in symbols}))
+    if proof:
+        snapshot["proof"] = proof
+    if run:
+        snapshot["run"] = run
+    return snapshot
 
 
-def decode_members(key, name, payload, observed_ms):
+def decode_members(key, name, payload, observed_ms, *, verified=False):
     """Decode a successful complete single-index constituent response.
 
     The caller binds the response to its requested catalog ID and validates
@@ -77,9 +85,12 @@ def decode_members(key, name, payload, observed_ms):
     source_ms, items = _items(payload)
     if any(not isinstance(row, dict) for row in items):
         raise ValueError("Invalid constituent row")
-    return _snapshot(dict(key=key, name=name, source_ms=source_ms,
-                          observed_ms=observed_ms,
-                          symbols=[row.get("thscode") for row in items]))
+    symbols = [_canonical(row.get("thscode"), SYMBOL) for row in items]
+    snapshot = dict(key=key, name=name, source_ms=source_ms,
+                    observed_ms=observed_ms, symbols=symbols)
+    if verified:
+        snapshot["proof"] = "DIRECT" if symbols else "DIRECT_EMPTY"
+    return _snapshot(snapshot)
 
 
 def _union(sectors):
@@ -105,18 +116,22 @@ class FocusPool:
             conn.execute("INSERT OR IGNORE INTO focus_scope_v1 VALUES (1, 0, '[]')")
             conn.execute("CREATE TABLE IF NOT EXISTS focus_scope_history_v1 ("
                          "revision INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
+            conn.execute("CREATE TABLE IF NOT EXISTS focus_preferences_v1 ("
+                         "id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
 
     @staticmethod
     def _read(conn):
         revision, payload = conn.execute("SELECT revision,payload FROM focus_scope_v1 WHERE id=1").fetchone()
         sectors = json.loads(payload)
-        return dict(revision=revision, sectors=sectors, members=_union(sectors))
+        row = conn.execute("SELECT payload FROM focus_preferences_v1 WHERE id=1").fetchone()
+        preferences = json.loads(row[0]) if row else dict(groups=[], aliases={})
+        return dict(revision=revision, sectors=sectors, members=_union(sectors), **preferences)
 
     def read(self):
         with closing(sqlite3.connect(self.path)) as conn:
             return self._read(conn)
 
-    def apply(self, selection, snapshots, *, expected_revision):
+    def apply(self, selection, snapshots, *, expected_revision, preferences=None):
         """Apply an explicit ordered selection and verified fresh snapshots.
 
         Omit failed refreshes for retained IDs; never fabricate an empty board.
@@ -144,20 +159,27 @@ class FocusPool:
                 if after is None and before is None:
                     raise ValueError("New sector requires verified membership")
                 if before and after and (after["observed_ms"] < before["observed_ms"] or
-                                         after["source_ms"] < before["source_ms"]):
+                    (before["source_ms"] is not None and after["source_ms"] is not None and
+                     after["source_ms"] < before["source_ms"])):
                     raise ValueError("Older snapshot cannot replace newer membership")
                 sectors.append(after if after is not None else before)
             members = _union(sectors)
-            revision = old["revision"] + int(old["revision"] == 0 or sectors != old["sectors"])
+            saved = {key: old[key] for key in ("groups", "aliases")}
+            changed = preferences is not None and preferences != saved
+            revision = old["revision"] + int(old["revision"] == 0 or sectors != old["sectors"] or changed)
             payload = json.dumps(sectors, ensure_ascii=False)
             if revision != old["revision"]:
                 conn.execute("UPDATE focus_scope_v1 SET revision=?,payload=? WHERE id=1",
                              (revision, payload))
+            if changed:
+                conn.execute("INSERT INTO focus_preferences_v1 VALUES (1,?) ON CONFLICT(id) "
+                             "DO UPDATE SET payload=excluded.payload", (json.dumps(preferences, ensure_ascii=False),))
             before, after = set(old["members"]), set(members)
             membership_changed = members != old["members"]
             if membership_changed or keys != list(previous) or old["revision"] == 0:
                 conn.execute("INSERT INTO focus_scope_history_v1 VALUES (?,?)", (revision, payload))
             return dict(revision=revision, sectors=sectors, members=members,
+                        **(preferences if changed else saved),
                         added=sorted(after-before), removed=sorted(before-after),
                         retained=sorted(before & after),
                         membership_changed=membership_changed)

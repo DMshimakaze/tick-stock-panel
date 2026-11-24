@@ -1,8 +1,12 @@
-/** Focus editor for the existing .mr themed page. No transport or chart logic. */
+/** Local taxonomy search and the saved focus draft. */
+import { beijing } from './chart_model.mjs';
+import { SYMBOL, statusText } from './workbench_data.mjs';
+
 const normalize = value => String(value).normalize('NFKC').trim().toLowerCase();
-const INITIAL_DIRECTIONS = '消费电子、物理AI、端侧、半导体材料、光刻胶、光刻机、国产算力';
-// Aliases and taxonomy paths are supplied by the local inventory or user.
+const INITIAL_DIRECTIONS = ['消费电子', '物理AI', '端侧', '半导体材料', '光刻胶', '光刻机', '国产算力'];
 const compact = value => normalize(value).replace(/[\s·/\\_\-]+/g, '');
+const codeOf = entry => entry.key.split(':').at(-1);
+const identity = entry => [entry.name, entry.key, codeOf(entry), codeOf(entry).replace(/\.TI$/, '')];
 const orderedMatch = (field, query) => {
   if (query.length < 2) return false;
   let pos = 0;
@@ -13,22 +17,17 @@ export const splitTerms = value => [...new Set(String(value).split(/[、,，;；
 
 export function catalogMatches(catalog, query, kind = 'all') {
   const q = normalize(query), short = compact(query);
-  if (!q || !short) return [];
-  const score = entry => {
-    const name = normalize(entry.name), key = normalize(entry.key);
-    const words = [entry.name, entry.key,
-      ...(Array.isArray(entry.aliases) ? entry.aliases : []),
-      ...(Array.isArray(entry.path) ? entry.path : [])].map(compact);
-    if (name === q || key === q) return 0;
-    if (words.some(word => word === short)) return 1;
-    if (words.some(word => word.includes(short))) return 2;
-    if (words.some(word => orderedMatch(word, short))) return 3;
-    return Infinity;
-  };
-  return catalog.filter(e => kind === 'all' || e.key.startsWith(kind+':'))
-    .map(entry => ({entry, score:score(entry)}))
+  return catalog.filter(e => kind === 'all' || e.key.startsWith(kind + ':'))
+    .map(entry => {
+      if (!short || identity(entry).some(value => normalize(value) === q)) return { entry, score: 0 };
+      const words = [...identity(entry), ...(entry.aliases || []), ...(entry.path || [])].map(compact);
+      const score = words.some(word => word === short) ? 1
+        : words.some(word => word.includes(short)) ? 2
+        : words.some(word => orderedMatch(word, short)) ? 3 : Infinity;
+      return { entry, score };
+    })
     .filter(item => Number.isFinite(item.score))
-    .sort((a,b) => a.score-b.score || a.entry.name.localeCompare(b.entry.name,'zh-CN') ||
+    .sort((a, b) => a.score - b.score || a.entry.name.localeCompare(b.entry.name, 'zh-CN') ||
       a.entry.key.localeCompare(b.entry.key))
     .map(item => item.entry);
 }
@@ -36,123 +35,243 @@ export function catalogMatches(catalog, query, kind = 'all') {
 export function resolveTerms(catalog, query, selected = []) {
   const keys = new Set(selected), unresolved = [];
   for (const term of splitTerms(query)) {
-    const exact = catalog.filter(e => [normalize(e.name), normalize(e.key)].includes(normalize(term)));
-    if (exact.length === 1) keys.add(exact[0].key);
+    const exact = catalog.filter(e => identity(e).map(normalize).includes(normalize(term)));
+    if (exact.length === 1 && exact[0].available !== false) keys.add(exact[0].key);
     else unresolved.push(term);
   }
   return { selection: [...keys], unresolved };
 }
 
-const equal = (a, b) => a.length === b.length && a.every((key, i) => key === b[i]);
-const label = entry => {
-  const kind = entry.key.startsWith('industry:') ? '行业' : '概念';
-  const tier = entry.hierarchy_verified === true && [1,2].includes(entry.level)
-    ? (entry.level === 1 ? '一级' : '二级') : '';
-  return `${entry.name} · ${tier}${kind}`;
-};
+const kindLabel = key => key.startsWith('industry:') ? '行业' : '概念';
+const at = ms => Number.isFinite(ms) ? beijing(ms / 1000).slice(0, 16) : '';
+const emptyPrefs = () => ({ groups: [], aliases: {} });
+const PAGE = 12;
 
-/** Parent supplies backend-acknowledged {revision,sectors,members,catalog,...}.
- * apply/refresh return the acknowledged view, not an optimistic write receipt.
- * Use a stable element outside any periodically replaced results table.
- */
-export function mountFocusControls(el, { onApply, onRefresh }) {
+export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup }) {
   const doc = el.ownerDocument, node = doc.createElement('section');
-  node.className = 'mr-panel';
-  node.innerHTML = `<h2>关注板块</h2><div class="mr-tools" data-role="selected"></div>
-    <div class="mr-tools"><input aria-label="添加同花顺板块" placeholder="输入板块名称，可用顿号分隔" data-role="query"><select aria-label="板块分类" data-role="kind"><option value="all">全部分类</option><option value="industry">行业</option><option value="cn_concept">概念</option></select><button data-role="add">添加</button></div>
-    <div class="mr-tools" data-role="matches"></div>
-    <p data-role="summary" aria-live="polite"></p><p class="mr-error" data-role="error" role="status"></p>
-    <div class="mr-tools"><button data-role="apply">保存并更新</button><button data-role="refresh">刷新成分</button><button data-role="reset">撤销未保存修改</button></div>`;
+  node.className = 'mr-panel mr-taxonomy';
+  node.innerHTML = `<h2>同花顺板块库</h2>
+    <p class="mr-meta" data-role="inventory" aria-live="polite"></p>
+    <div class="mr-tools"><input aria-label="搜索同花顺板块" placeholder="板块名称、指数代码或股票代码" data-role="query">
+      <select aria-label="板块分类" data-role="kind"><option value="all">全部分类</option><option value="industry">行业</option><option value="cn_concept">概念</option></select>
+      <button data-role="add">添加精确匹配</button><button data-role="refresh">更新完整库</button></div>
+    <details><summary>首次关注方向</summary><div class="mr-tools" data-role="directions"></div></details>
+    <p class="mr-meta" data-role="match-count"></p>
+    <div class="mr-taxonomy-board-list" data-role="matches"></div>
+    <div class="mr-tools"><button data-role="prev" hidden>上一页</button><button data-role="next" hidden>下一页</button></div>
+    <section class="mr-taxonomy-detail" data-role="detail" hidden>
+      <div class="mr-tools"><strong data-role="detail-title"></strong><button data-role="close">收起</button></div>
+      <p class="mr-meta" data-role="detail-source"></p><div class="mr-tools" data-role="detail-rows"></div>
+      <div class="mr-tools"><button data-role="detail-prev" hidden>上一页</button><button data-role="detail-next" hidden>下一页</button></div>
+      <div class="mr-tools" data-role="alias"><input data-role="alias-input" aria-label="自定义别名" placeholder="自定义别名，可用顿号分隔">
+        <button data-role="alias-save">保存别名到草稿</button></div>
+    </section>
+    <h2>当前关注</h2><div class="mr-tools" data-role="selected"></div>
+    <details data-role="group-panel"><summary>自定义关注组</summary>
+      <div data-role="groups"></div>
+      <div class="mr-tools"><input data-role="group-name" aria-label="自定义组名" maxlength="80" placeholder="输入组名">
+        <button data-role="group-add">加入草稿中的板块</button>
+        <button data-role="group-save">保存组到草稿</button><button data-role="group-reset">清空编辑</button></div>
+      <div class="mr-tools" data-role="group-entries"></div></details>
+    <p class="mr-meta" data-role="summary" aria-live="polite"></p><p class="mr-error" data-role="error" role="status"></p>
+    <div class="mr-tools"><button data-role="preview">预览变更</button><button data-role="apply">保存关注</button>
+      <button data-role="reset">撤销草稿</button></div>`;
   el.append(node);
-  const $ = role => node.querySelector(`[data-role="${role}"]`);
-  const input = $('query');
-  let view = null, draft = [], base = [], suggested = [], initialized = false, revision = null;
-  let busy = false, disposed = false, error = '';
-  const dirty = () => !equal(base, draft);
-  const conflict = () => dirty() && revision !== view?.revision;
-  const catalog = () => [...new Map([...(view?.sectors || []), ...(view?.catalog || [])].map(e => [e.key, e])).values()];
-  function button(text, action, title) {
+  const $ = role => node.querySelector(`[data-role="${role}"]`), input = $('query');
+  let view, base = [], draft = [], saved = emptyPrefs(), prefs = emptyPrefs(), revision, run;
+  let busy = false, disposed = false, page = 0, error = '', delta, detail, lookupId = 0;
+  let groupId = null, groupBoards = [];
+  const dirty = () => JSON.stringify([base, saved]) !== JSON.stringify([draft, prefs]);
+  const conflict = () => dirty() && (revision !== view?.revision || run !== (view?.taxonomy?.run ?? null));
+  const entries = () => new Map([...(view?.sectors || []), ...(view?.catalog || [])]
+    .map(e => [e.key, { ...e, aliases: prefs.aliases[e.key] || [] }]));
+  function button(text, action, { label = text, disabled = false } = {}) {
     const b = doc.createElement('button');
-    b.type = 'button'; b.textContent = text; b.disabled = busy; b.title = title || text;
-    b.addEventListener('click', action); return b;
+    b.type = 'button'; b.textContent = text; b.disabled = disabled;
+    b.setAttribute('aria-label', label); b.addEventListener('click', action);
+    return b;
+  }
+  function changed() { delta = null; error = ''; render(); }
+  function choose(key) {
+    if (!draft.includes(key)) { draft = [...draft, key]; changed(); }
+  }
+  function editGroup(group) {
+    groupId = group?.id || null;
+    groupBoards = [...(group?.boards || [])];
+    $('group-name').value = group?.name || '';
+    render();
   }
   function render() {
     if (disposed) return;
-    const entries = catalog(), tags = $('selected'), matches = $('matches');
-    tags.replaceChildren(); matches.replaceChildren();
+    const catalog = entries(), selected = $('selected'), matches = $('matches'), t = view?.taxonomy;
+    const progress = t?.progress?.board_total ?
+      `建库 ${t.progress.board_ready}/${t.progress.board_total} 板块 · ${t.progress.stock_seen}/${t.progress.stock_total} 反查` : '';
+    $('inventory').textContent = [t?.complete ? `完整快照 ${at(t.observed_ms)} · ${t.stock_total} 只股票` : '等待完整成分库',
+      progress, view?.catalog_status, t?.queued ? '已安排更新' : '', '层级未核实'].filter(Boolean).join(' · ');
+    selected.replaceChildren();
     for (const key of draft) {
-      const entry = entries.find(e => e.key === key), saved = view?.sectors.find(e => e.key === key);
-      const stale = view?.sector_errors?.[key] || (saved && view.market_day && saved.checked_day !== view.market_day);
-      const status = stale ? ' · 旧快照' : saved ? ` · ${saved.symbols.length}只` : ' · 待核实';
-      tags.append(button(`${entry ? label(entry) : key}${status} ×`, () => {
-        draft = draft.filter(k => k !== key); error = ''; render();
-      }, `移除 ${entry?.name || key}（保存后生效）${saved?.source_time ? ' · 成分源时间 '+saved.source_time : ''}`));
+      const entry = catalog.get(key), snapshot = view?.sectors.find(s => s.key === key);
+      const count = snapshot?.symbols.length ?? entry?.count;
+      const stale = entry?.removed || view?.sector_errors?.[key] ||
+        (snapshot?.observed_ms && at(snapshot.observed_ms).slice(0, 10) !== view?.market_day);
+      selected.append(button(`${entry?.name || key}${Number.isInteger(count) ? ` · ${count}只` : ''}${stale ? ' · 旧快照' : ''} ×`,
+        () => { draft = draft.filter(k => k !== key); changed(); },
+        { label: `移除 ${entry?.name || key}`, disabled: busy }));
     }
-    for (const term of suggested) {
-      const chip = doc.createElement('span');
-      chip.className = 'mr-focus-chip';
-      chip.append(button(`${term} · ${view?.catalog.length ? '未精确匹配' : '待匹配'}`, () => {
-        input.value = term; render(); input.focus();
-      }), button('×', () => { suggested = suggested.filter(name => name !== term); render(); }, `移除关注方向 ${term}`));
-      tags.append(chip);
-    }
-    if (!draft.length && !suggested.length) tags.textContent = '未选择板块 · 采集暂停';
+    if (!draft.length) selected.textContent = '未选择板块';
     const terms = splitTerms(input.value);
-    if (terms.length === 1) for (const entry of catalogMatches(entries, terms[0], $('kind').value).slice(0, 12)) {
-      matches.append(button(`${label(entry)} · ${entry.key.split(':')[1]}`, () => {
-        if (!draft.includes(entry.key)) draft.push(entry.key);
-        input.value = ''; error = ''; render(); input.focus();
+    const query = terms.length === 1 ? terms[0] : '';
+    const hits = terms.length > 1 ? [] : catalogMatches([...catalog.values()], query, $('kind').value);
+    const shown = hits.slice(page * PAGE, (page + 1) * PAGE);
+    $('match-count').textContent = `${hits.length} 个匹配${hits.length > PAGE ? ` · 第 ${page + 1}/${Math.ceil(hits.length / PAGE)} 页` : ''}`;
+    matches.replaceChildren();
+    for (const entry of shown) {
+      const row = doc.createElement('div'), info = doc.createElement('span');
+      const brief = entry.removed ? '目录已移除' : entry.available === false ? '等待核实' :
+        Number.isInteger(entry.count) ? `${entry.count} 只` : '';
+      row.className = 'mr-taxonomy-board';
+      info.textContent = [entry.name, codeOf(entry), kindLabel(entry.key), brief].filter(Boolean).join(' · ');
+      row.append(info, button('成分', () => void lookup({ board: entry.key }), {
+        label: `查看 ${entry.name} 成分`, disabled: !Number.isInteger(entry.count) || busy,
+      }), button(draft.includes(entry.key) ? '已选' : '添加', () => choose(entry.key), {
+        label: `添加 ${entry.name}`, disabled: draft.includes(entry.key) || entry.available === false || busy,
       }));
+      matches.append(row);
     }
-    $('summary').textContent = view ? `已保存 ${view.sectors.length} 个板块 · 去重 ${Object.keys(view.members).length} 只股票${dirty() ? ' · 草稿未保存' : ''}${view.catalog_status ? ' · '+view.catalog_status : ''}` : '正在读取关注池…';
-    $('error').textContent = conflict() ? '后台关注池已变化，请撤销草稿并重新编辑。' : error;
-    $('apply').textContent = draft.length ? '保存并更新' : '暂停并保存';
-    $('apply').disabled = !view || busy || (!dirty() && revision !== 0) || conflict() || terms.length > 0;
-    $('refresh').disabled = !view || busy || !view.sectors.length || dirty() || terms.length > 0;
-    $('reset').disabled = !view || busy || (!dirty() && !terms.length && !suggested.length);
-    $('add').disabled = busy || !view || !terms.length;
-    input.disabled = busy || !view;
+    $('prev').hidden = page === 0;
+    $('next').hidden = (page + 1) * PAGE >= hits.length;
+    $('groups').replaceChildren();
+    for (const group of prefs.groups) {
+      const row = doc.createElement('div'), name = doc.createElement('span');
+      row.className = 'mr-tools';
+      name.textContent = `${group.name} · ${group.boards.length} 个板块`;
+      row.append(name, button('加入关注', () => {
+        const usable = group.boards.filter(k => catalog.get(k)?.available !== false && catalog.has(k));
+        draft = [...new Set([...draft, ...usable])]; changed();
+        if (usable.length !== group.boards.length) { error = '组内有暂不可用板块'; render(); }
+      }), button('编辑', () => editGroup(group), { label: `编辑组 ${group.name}` }),
+      button('删除', () => {
+        prefs.groups = prefs.groups.filter(g => g.id !== group.id);
+        if (groupId === group.id) editGroup(null);
+        changed();
+      }, { label: `删除组 ${group.name}` }));
+      $('groups').append(row);
+    }
+    $('group-entries').replaceChildren(...groupBoards.map(key => button(`${catalog.get(key)?.name || key} ×`, () => {
+      groupBoards = groupBoards.filter(k => k !== key); render();
+    })));
+    const count = view ? Object.keys(view.members).length : 0;
+    $('summary').textContent = view ? `已保存 ${view.sectors.length} 个板块 · 去重 ${count} 只股票${
+      delta ? ` · 新增 ${delta.added} · 退出 ${delta.removed} · 保留 ${delta.retained}` : dirty() ? ' · 有未保存草稿' : ''}`
+      : '正在读取关注池…';
+    $('error').textContent = conflict() ? '关注池或映射代已更新，撤销草稿后可重新编辑。' : error;
+    $('apply').disabled = !view || busy || !delta || conflict();
+    $('preview').disabled = !view || busy || !dirty() || conflict();
+    $('refresh').disabled = !view || busy || Boolean(t?.queued);
+    $('reset').disabled = !view || busy || !dirty();
+    $('add').textContent = SYMBOL.test(query.toUpperCase()) ? '查股票归属' : '添加精确匹配';
+    $('add').disabled = !view || busy || !terms.length;
+    input.disabled = !view;
   }
   function update(next, reset = false) {
-    if (disposed) return;
-    if (!next || !Number.isInteger(next.revision) || !Array.isArray(next.sectors) || !next.members || !Array.isArray(next.catalog)) throw Error('关注池回执无效');
-    if (view && next.revision < view.revision) { if (reset) throw Error('回执版本已过期'); return; }
-    const clean = !dirty(); view = next;
-    if (reset || clean) {
-      base = next.sectors.map(e => e.key); draft = [...base]; revision = next.revision;
-      if (reset || revision > 0) { initialized = true; suggested = []; }
+    if (disposed || !next) return;
+    if (!Number.isInteger(next.revision) || !Array.isArray(next.sectors) || !next.members || !Array.isArray(next.catalog)) {
+      throw Error('关注池回执无效');
     }
-    if (!initialized && revision === 0) {
-      const first = resolveTerms(catalog(), INITIAL_DIRECTIONS, draft);
-      draft = first.selection; suggested = first.unresolved;
-      initialized = next.catalog.length > 0;
+    if (view && next.revision < view.revision) return;
+    const clean = !dirty();
+    view = next;
+    if (clean || reset) {
+      base = next.sectors.map(e => e.key);
+      draft = [...base];
+      saved = { groups: next.groups || [], aliases: next.aliases || {} };
+      prefs = { groups: [...saved.groups], aliases: { ...saved.aliases } };
+      revision = next.revision;
+      run = next.taxonomy?.run ?? null;
+      delta = null;
     }
     render();
   }
   function add() {
-    const r = resolveTerms(catalog(), input.value, draft); draft = r.selection;
-    suggested = suggested.filter(term => !splitTerms(input.value).includes(term) || r.unresolved.includes(term));
-    input.value = r.unresolved.join('、');
-    error = r.unresolved.length ? '名称未唯一匹配，请选择确切同花顺板块；不会自动扩展为上级板块。' : '';
+    const symbol = input.value.trim().toUpperCase();
+    if (SYMBOL.test(symbol)) { void lookup({ symbol }); return; }
+    const resolved = resolveTerms([...entries().values()], input.value, draft);
+    draft = resolved.selection;
+    input.value = resolved.unresolved.join('、');
+    page = 0;
+    changed();
+    if (resolved.unresolved.length) { error = '请选择有成分证据的具体板块'; render(); }
+  }
+  async function lookup(query, offset = 0) {
+    const request = ++lookupId;
+    const generation = view?.taxonomy?.run;
+    if (!generation) return;
+    try {
+      const next = await onLookup({ ...query, run: generation, offset });
+      if (disposed || request !== lookupId || !next || generation !== view.taxonomy?.run) return;
+      detail = { query, ...next };
+      $('detail').hidden = false;
+      $('detail-title').textContent = `${next.board?.name || next.symbol} · ${next.total} ${next.board ? '只' : '个板块'}`;
+      $('detail-source').textContent = next.board ?
+        `接口时间 ${at(next.board.source_ms) || '供应商未提供'} · 核验 ${at(next.board.observed_ms)} · ${
+          next.board.proof === 'BULK_REVERSE_CHECKED' ? '批量反查、按类抽样正查' : '正向全名单'}` : '';
+      $('detail-rows').textContent = next.board ? next.rows.join(' · ') :
+        next.rows.map(key => entries().get(key)?.name || key).join(' · ');
+      $('detail-prev').hidden = offset === 0;
+      $('detail-next').hidden = offset + next.rows.length >= next.total;
+      $('alias').hidden = !next.board;
+      $('alias-input').value = (prefs.aliases[query.board] || []).join('、');
+      error = '';
+    } catch (e) { if (request === lookupId) error = e.message; }
     render();
   }
-  async function submit(refresh) {
-    const control = $(refresh ? 'refresh' : 'apply');
-    if (control.disabled || disposed) return;
+  async function submit(action) {
+    if (busy) return;
     busy = true; error = ''; render();
     try {
-      const next = await (refresh ? onRefresh({ expected_revision: revision }) : onApply({ selection: [...draft], expected_revision: revision }));
-      if (!disposed) update(next, true);
-    } catch (e) { if (!disposed) error = `操作未确认：${e.message || e}；保留上次已核实显示及草稿，请重读确认。`; }
+      const args = { expected_revision: revision, run, selection: [...draft], preferences: structuredClone(prefs) };
+      if (action === 'preview') delta = await onPreview(args);
+      else if (action === 'refresh') update(await onRefresh({ expected_revision: view.revision, run: view.taxonomy?.run ?? null }));
+      else update(await onApply(args), true);
+    } catch (e) { error = statusText(e.message); }
     finally { busy = false; render(); }
   }
-  input.addEventListener('input', render);
-  $('kind').addEventListener('change', render);
-  input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (!$('add').disabled) add(); } });
+  $('directions').replaceChildren(...INITIAL_DIRECTIONS.map(term => button(term, () => {
+    input.value = term; page = 0; render(); input.focus();
+  })));
+  input.addEventListener('input', () => { page = 0; render(); });
+  $('kind').addEventListener('change', () => { page = 0; render(); });
+  input.addEventListener('keydown', event => {
+    if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) {
+      event.preventDefault();
+      if (!$('add').disabled) add();
+    }
+  });
   $('add').addEventListener('click', add);
-  $('apply').addEventListener('click', () => void submit(false));
-  $('refresh').addEventListener('click', () => void submit(true));
-  $('reset').addEventListener('click', () => { input.value = ''; error = ''; update(view, true); });
+  $('prev').addEventListener('click', () => { page--; render(); });
+  $('next').addEventListener('click', () => { page++; render(); });
+  $('close').addEventListener('click', () => { lookupId++; $('detail').hidden = true; });
+  $('detail-prev').addEventListener('click', () => void lookup(detail.query, Math.max(0, detail.offset - 50)));
+  $('detail-next').addEventListener('click', () => void lookup(detail.query, detail.offset + 50));
+  $('alias-save').addEventListener('click', () => {
+    const aliases = splitTerms($('alias-input').value);
+    if (aliases.length) prefs.aliases[detail.query.board] = aliases;
+    else delete prefs.aliases[detail.query.board];
+    changed();
+  });
+  $('group-add').addEventListener('click', () => { groupBoards = [...new Set([...groupBoards, ...draft])]; render(); });
+  $('group-reset').addEventListener('click', () => editGroup(null));
+  $('group-save').addEventListener('click', () => {
+    const name = $('group-name').value.trim(), id = groupId || doc.defaultView.crypto.randomUUID();
+    if (!name || !groupBoards.length || prefs.groups.some(g => g.id !== id && normalize(g.name) === normalize(name))) {
+      error = '请填写唯一组名并加入至少一个板块'; render(); return;
+    }
+    const group = { id, name, boards: [...groupBoards] };
+    prefs.groups = groupId ? prefs.groups.map(g => g.id === id ? group : g) : [...prefs.groups, group];
+    editGroup(null); changed();
+  });
+  for (const action of ['preview', 'apply', 'refresh']) $(action).addEventListener('click', () => void submit(action));
+  $('reset').addEventListener('click', () => { error = ''; editGroup(null); update(view, true); });
   render();
   return { update, dispose: () => { disposed = true; node.remove(); } };
 }

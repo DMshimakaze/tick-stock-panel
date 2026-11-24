@@ -20,6 +20,12 @@ export const WORKBENCH_CSS = `
 .mr-workbench .mr-coverage{display:flex;flex-wrap:wrap;gap:8px 24px;margin:12px 0;font-size:12px;color:var(--mr-muted)}
 .mr-workbench .mr-coverage strong{padding-left:4px;color:hsl(var(--fg-primary));font-variant-numeric:tabular-nums}
 .mr-workbench .mr-focus-chip{display:inline-flex;gap:2px}.mr-workbench .mr-focus-chip button{color:var(--mr-muted)}
+.mr-workbench .mr-taxonomy h2:not(:first-child){margin-top:14px}
+.mr-workbench .mr-taxonomy-board-list{max-height:190px;overflow:auto}
+.mr-workbench .mr-taxonomy-board{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--mr-line)}
+.mr-workbench .mr-taxonomy-board span,.mr-workbench .mr-taxonomy-detail{overflow-wrap:anywhere}
+.mr-workbench .mr-taxonomy-detail{padding:9px 0;border-top:1px solid var(--mr-line)}
+.mr-workbench .mr-taxonomy details{margin:6px 0}
 .mr-workbench .mr-focus-list{max-height:460px;overflow:auto}.mr-workbench .mr-focus-list table{min-width:760px}
 .mr-workbench .mr-focus-list th{position:sticky;top:0;z-index:1}.mr-workbench .mr-focus-list th,.mr-workbench .mr-focus-list td{padding:6px 9px;white-space:nowrap}
 .mr-workbench .mr-focus-list :is(th,td):nth-child(n+3):nth-child(-n+8){text-align:center}.mr-workbench .mr-focus-list tr.selected{background:hsl(var(--accent)/.11)}
