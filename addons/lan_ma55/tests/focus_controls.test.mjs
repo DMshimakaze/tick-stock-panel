@@ -26,3 +26,13 @@ test('empty query does not expand scope', () => {
   assert.deepEqual(catalogMatches(catalog,' '), []);
   assert.deepEqual(resolveTerms(catalog,' ',['industry:881001.TI']), {selection:['industry:881001.TI'],unresolved:[]});
 });
+
+test('unified local search ranks exact names, aliases and ordered matches without auto-selecting them', () => {
+  const expanded = [...catalog, { key:'industry:884091.TI',name:'半导体材料',path:['半导体','材料'] },
+    { key:'cn_concept:886069.TI',name:'人形机器人',aliases:['物理AI'] }];
+  assert.equal(catalogMatches(expanded,'半材')[0].name,'半导体材料');
+  assert.equal(catalogMatches(expanded,'物理AI')[0].name,'人形机器人');
+  assert.deepEqual(resolveTerms(expanded,'物理AI'),{selection:[],unresolved:['物理AI']});
+  assert.deepEqual(catalogMatches(expanded,'消费电子','industry').map(e=>e.key),['industry:881001.TI']);
+  assert.deepEqual(catalogMatches(expanded,'物理AI','industry'),[]);
+});

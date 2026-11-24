@@ -1,19 +1,36 @@
 /** Focus editor for the existing .mr themed page. No transport or chart logic. */
 const normalize = value => String(value).normalize('NFKC').trim().toLowerCase();
 const INITIAL_DIRECTIONS = '消费电子、物理AI、端侧、半导体材料、光刻胶、光刻机、国产算力';
-const RELATED_BOARD_NAMES = {
-  '物理ai': ['人形机器人', '机器视觉', '传感器'],
-  '端侧': ['AI手机', 'AIPC', 'AI眼镜', '智能穿戴', '消费电子零部件及组装', '品牌消费电子'],
-  '国产算力': ['华为昇腾', '华为鲲鹏'],
+// Aliases and taxonomy paths are supplied by the local inventory or user.
+const compact = value => normalize(value).replace(/[\s·/\\_\-]+/g, '');
+const orderedMatch = (field, query) => {
+  if (query.length < 2) return false;
+  let pos = 0;
+  for (const char of field) if (char === query[pos]) pos++;
+  return pos === query.length;
 };
 export const splitTerms = value => [...new Set(String(value).split(/[、,，;；\n]+/).map(t => t.trim()).filter(Boolean))];
 
-export function catalogMatches(catalog, query) {
-  const q = normalize(query);
-  if (!q) return [];
-  const related = new Set((RELATED_BOARD_NAMES[q] || []).map(normalize));
-  return catalog.filter(e => normalize(e.name).includes(q) || normalize(e.key).includes(q) || related.has(normalize(e.name)))
-    .sort((a, b) => Number(normalize(b.name) === q) - Number(normalize(a.name) === q) || a.name.localeCompare(b.name, 'zh-CN') || a.key.localeCompare(b.key));
+export function catalogMatches(catalog, query, kind = 'all') {
+  const q = normalize(query), short = compact(query);
+  if (!q || !short) return [];
+  const score = entry => {
+    const name = normalize(entry.name), key = normalize(entry.key);
+    const words = [entry.name, entry.key,
+      ...(Array.isArray(entry.aliases) ? entry.aliases : []),
+      ...(Array.isArray(entry.path) ? entry.path : [])].map(compact);
+    if (name === q || key === q) return 0;
+    if (words.some(word => word === short)) return 1;
+    if (words.some(word => word.includes(short))) return 2;
+    if (words.some(word => orderedMatch(word, short))) return 3;
+    return Infinity;
+  };
+  return catalog.filter(e => kind === 'all' || e.key.startsWith(kind+':'))
+    .map(entry => ({entry, score:score(entry)}))
+    .filter(item => Number.isFinite(item.score))
+    .sort((a,b) => a.score-b.score || a.entry.name.localeCompare(b.entry.name,'zh-CN') ||
+      a.entry.key.localeCompare(b.entry.key))
+    .map(item => item.entry);
 }
 
 export function resolveTerms(catalog, query, selected = []) {
@@ -27,7 +44,12 @@ export function resolveTerms(catalog, query, selected = []) {
 }
 
 const equal = (a, b) => a.length === b.length && a.every((key, i) => key === b[i]);
-const label = entry => `${entry.name} · ${entry.key.startsWith('industry:') ? '行业' : '概念'}`;
+const label = entry => {
+  const kind = entry.key.startsWith('industry:') ? '行业' : '概念';
+  const tier = entry.hierarchy_verified === true && [1,2].includes(entry.level)
+    ? (entry.level === 1 ? '一级' : '二级') : '';
+  return `${entry.name} · ${tier}${kind}`;
+};
 
 /** Parent supplies backend-acknowledged {revision,sectors,members,catalog,...}.
  * apply/refresh return the acknowledged view, not an optimistic write receipt.
@@ -37,7 +59,7 @@ export function mountFocusControls(el, { onApply, onRefresh }) {
   const doc = el.ownerDocument, node = doc.createElement('section');
   node.className = 'mr-panel';
   node.innerHTML = `<h2>关注板块</h2><div class="mr-tools" data-role="selected"></div>
-    <div class="mr-tools"><input aria-label="添加同花顺板块" placeholder="输入板块名称，可用顿号分隔" data-role="query"><button data-role="add">添加</button></div>
+    <div class="mr-tools"><input aria-label="添加同花顺板块" placeholder="输入板块名称，可用顿号分隔" data-role="query"><select aria-label="板块分类" data-role="kind"><option value="all">全部分类</option><option value="industry">行业</option><option value="cn_concept">概念</option></select><button data-role="add">添加</button></div>
     <div class="mr-tools" data-role="matches"></div>
     <p data-role="summary" aria-live="polite"></p><p class="mr-error" data-role="error" role="status"></p>
     <div class="mr-tools"><button data-role="apply">保存并更新</button><button data-role="refresh">刷新成分</button><button data-role="reset">撤销未保存修改</button></div>`;
@@ -76,7 +98,7 @@ export function mountFocusControls(el, { onApply, onRefresh }) {
     }
     if (!draft.length && !suggested.length) tags.textContent = '未选择板块 · 采集暂停';
     const terms = splitTerms(input.value);
-    if (terms.length === 1) for (const entry of catalogMatches(entries, terms[0]).slice(0, 12)) {
+    if (terms.length === 1) for (const entry of catalogMatches(entries, terms[0], $('kind').value).slice(0, 12)) {
       matches.append(button(`${label(entry)} · ${entry.key.split(':')[1]}`, () => {
         if (!draft.includes(entry.key)) draft.push(entry.key);
         input.value = ''; error = ''; render(); input.focus();
@@ -125,6 +147,7 @@ export function mountFocusControls(el, { onApply, onRefresh }) {
     finally { busy = false; render(); }
   }
   input.addEventListener('input', render);
+  $('kind').addEventListener('change', render);
   input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); if (!$('add').disabled) add(); } });
   $('add').addEventListener('click', add);
   $('apply').addEventListener('click', () => void submit(false));

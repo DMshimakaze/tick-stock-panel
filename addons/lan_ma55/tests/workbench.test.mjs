@@ -8,7 +8,7 @@ import { COMMAND, RECEIPT, WORKBENCH, deepLink, TIMEFRAMES } from '../src/workbe
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 20));
 const board = { key: 'cn_concept:886054.TI', name: '光刻机' };
-const related = { key: 'cn_concept:886069.TI', name: '人形机器人' };
+const related = { key: 'cn_concept:886069.TI', name: '人形机器人', aliases: ['物理AI'] };
 const time = '2026-11-20 15:00:00';
 const bar = { timestamp: time, open: 10, high: 12, low: 9, close: 11, volume: 100, ma55: 10, complete: true };
 const frames = Object.fromEntries(TIMEFRAMES.map(tf => [tf, { status: 'INSUFFICIENT_HISTORY', expected_end: time }]));
@@ -16,7 +16,7 @@ const row = (symbol, name) => ({ symbol, name, sectors: [board.key], frames });
 const empty = { revision: 0, sectors: [], members: {}, catalog: [board, related] };
 const summary = { expected: 0, ready_symbols: 0, candidate_symbols: 0, blocked_symbols: 0, target_15m: time };
 
-test('confirmed focus handles the draft and offers related catalogue matches for manual confirmation', async () => {
+test('confirmed focus handles the draft and offers explicit local alias matches for manual confirmation', async () => {
   const dom = new JSDOM('<div id="mount"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
   const { document } = dom.window, calls = [], commands = new Map(), replies = [];
   const saved = { ...empty, revision: 1, sectors: [{ ...board, symbols: ['600000.SH'] }], members: { '600000.SH': [board.key] } };
