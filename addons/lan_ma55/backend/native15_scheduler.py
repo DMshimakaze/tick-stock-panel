@@ -15,11 +15,11 @@ def task(store, master, sessions, target, now, demanded=()):
     factors = {r["symbol"]: dict(r) for r in store.conn.execute("SELECT * FROM native15_factor_retry")}
     groups = {}
     for symbol, info in master.items():
-        if not info["eligible"] and symbol not in demanded:
+        if not info["eligible"]:
             continue
         retry = retries.get(symbol, {})
         factor = factors.get(symbol, {})
-        if (info["factor_coverage"] != "EXPLICIT" or info["factors_day"] != now[:10]) and factor.get("next_eligible", 0) <= time():
+        if (info["factor_coverage"] != "EXPLICIT" or (info["factors_day"] or "") < target[:10]) and factor.get("next_eligible", 0) <= time():
             groups.setdefault(("F", target, target), []).append((factor.get("last_attempt") or "", symbol not in demanded, symbol))
         latest = info["latest_completed15"]
         progress = store.history_progress(symbol)

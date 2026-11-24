@@ -1,7 +1,18 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {membershipIndex,scoreIndustries,nativeCandidates,project,workbenchLink} from '../src/model.mjs';
+import {membershipIndex,scoreIndustries,nativeCandidates,project,workbenchLink,workbenchRoute} from '../src/model.mjs';
 import {fixture,config,field,dates,now,symbol} from './fixtures.mjs';
+
+test('managed MA55 publishes the new deep-link path without mutating native event provenance',()=>{
+  const route=workbenchRoute([{enabled:false,managed_by:'lan.kline',version:'3.3.0'},
+    {enabled:true,managed_by:'lan.ma55',version:'0.10.0'}]);
+  const url=new URL(workbenchLink({symbol:'600000.SH',confirmed_at:'2026-11-06 11:30:00',
+    source_id:'TICKFLOW_NATIVE_15M',event_id:'native'},route),'http://local');
+  assert.equal(url.pathname,'/lan-ma55');
+  assert.equal(url.searchParams.get('source'),'TICKFLOW_NATIVE_15M');
+  assert.equal(url.searchParams.get('event'),'2026-11-06T11:30:00');
+  assert.equal(url.searchParams.get('event_id'),'native');
+});
 
 test('flat identity is exact; hyphens stay unresolved; slash and spaces are not split',()=>{
   const rows=[{symbol:symbol(1),[field]:'IT服务'}, {symbol:symbol(1),[field]:'IT服务'},

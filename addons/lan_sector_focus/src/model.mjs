@@ -135,7 +135,7 @@ export function project(input) {
   return {membership,scores,candidates,intersection,unmatched,observedAt:input.now};
 }
 
-export function workbenchLink(event) {
+export function workbenchLink(event,path='/lan-kline') {
   const params=new URLSearchParams({symbol:event.symbol,period:'15m',event:event.confirmed_at.replace(' ','T'),
     event_id:event.event_id,rule_version:event.rule_version,source:event.source_id});
   for(const key of ['basis_id','factor_revision','basis_revision','risk_text'])if(event[key]!=null)
@@ -143,5 +143,14 @@ export function workbenchLink(event) {
   if(event.setup_at)params.set('setup',event.setup_at.replace(' ','T'));
   if(event.adjust_factor>0)params.set('factor',String(event.adjust_factor));
   if(event.defense>0)params.set('defense',String(event.defense));
-  return '/lan-kline?'+params;
+  return path+'?'+params;
+}
+
+export function workbenchRoute(pages) {
+  const available = pages.filter(page => page.enabled && !page.error);
+  if (available.some(page => {
+    const [major, minor] = (page.version || '').split('.').map(Number);
+    return page.managed_by === 'lan.ma55' && (major > 0 || (major === 0 && minor >= 10));
+  })) return '/lan-ma55';
+  return available.some(page => page.path === '/lan-kline' || page.managed_by === 'lan.kline') ? '/lan-kline' : null;
 }

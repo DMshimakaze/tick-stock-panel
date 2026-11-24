@@ -147,14 +147,14 @@ def setup(registrar):
 
     @public.get("/universe")
     def universe(offset: int = Query(0, ge=0), limit: int = Query(100, ge=1, le=100)):
-        with ready() as store:
-            page = store.universe_page(offset, limit)
-            return dict(
-                page,
-                api_version=1,
-                offset=offset,
-                latest_completed_at=latest_point(page["sessions"], str(now_cn())),
-            )
+        with ready():
+            with worker.lock:
+                view = worker.view
+            if view is None:
+                raise HTTPException(503, "Focus projection starting")
+            rows, focus = view["rows"], view["focus"]
+            return dict(api_version=1, offset=offset, total=len(rows), rows=rows[offset:offset + limit],
+                        revision=focus["revision"], latest_completed_at=view["summary"]["target_15m"])
 
     @public.get("/bars")
     def bars(
@@ -192,13 +192,6 @@ def setup(registrar):
             if not cutoff or not current or cutoff > current:
                 raise HTTPException(422, "asof exceeds latest completed exchange point")
             rows = [store.read(s, tf, cutoff, limit) for s in codes for tf in tfs]
-            worker.demand_cache(
-                [
-                    r["symbol"]
-                    for r in rows
-                    if not r.get("cache", {}).get("hit")
-                ]
-            )
             return dict(
                 api_version=1,
                 asof=cutoff,

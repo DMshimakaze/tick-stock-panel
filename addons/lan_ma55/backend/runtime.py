@@ -1,19 +1,22 @@
-"""One TickFlow 15m producer: completed rounds first, a bounded cold queue second."""
+"""Single-owner scheduler for verified THS focus and completed TickFlow bars."""
 
 import atexit
 from datetime import timedelta
 import os
 from pathlib import Path
-import sqlite3
 from threading import Event, Lock, Thread
 from time import monotonic, time
 
 import httpx
 
 from .collector import Collector, SourceError
+from .daily_store import DailyStore
+from .exchange_sessions import frame_schedules, planned_session
+from .focus_owner import FocusOwner
+from .multiframe_core.multiframe import VERSION
+from .observations import Observations
 from .market_grid import (
     CAPACITY,
-    latest_point,
     now_cn,
     wall,
 )
@@ -21,10 +24,10 @@ from .request_budget import CollectionStopped, RequestDeferred, RollingBudget
 from .native15_owner import NativeOwner
 from .native15_shadow import SOURCE as NATIVE_SOURCE
 from .native15_scheduler import task as native_task
-from .result_publisher import Publisher
+from .result_publisher import Publisher, workbench_configs
 from .worker_lease import ProcessLease
-from .native15_signal_adapter import FAMILY, RULE_REFERENCE
-from .runtime_status import business_status
+from .runtime_status import observation_summary
+from .workbench_bridge import WorkbenchBridge, focus_view
 
 
 def classify(items, day):
@@ -72,107 +75,53 @@ class Worker:
         self.folder = Path(context.data_dir) / "user_data" / "lan_ma55"
         self.folder.mkdir(parents=True, exist_ok=True)
         self.stop, self.lock = Event(), Lock()
-        self.store = self.owner = self.collector = None
-        self.demands = {}
-        self.cache_demands = {}
+        self.store = self.owner = self.collector = self.focus = None
+        self.market_rejected = False
+        self.view = None
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
-        self.cold_budget = RollingBudget(
-            int(settings.get("cold_requests_per_minute", 2))
-        )
+        self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.9.8",
-            api_version=1,
-            phase="STARTING",
-            active_operation="IDLE",
-            backend_scanning=True,
-            rule_version=FAMILY,
-            rule_reference=RULE_REFERENCE,
-            state_revision=4,
-            source_id=NATIVE_SOURCE,
-            source="TickFlow native15 → NATIVE15_REVIEW_V1",
-            database="user_data/lan_ma55/state.sqlite3",
-            database_connected=False,
-            capacities=dict(CAPACITY),
-            error=None,
-            started_at=str(now_cn()),
-            minute_request_limit=self.minute_limit,
-            cold_request_limit=self.cold_budget.limit,
-            collection_scope=settings.get(
-                "collection_symbols", "FULL_MARKET_BOUNDED_QUEUE"
-            ),
-            official_reuse="NOT_AVAILABLE_RAW_PROVENANCE_OR_BATCH_READ_CONTRACT",
-            quota_coordination="PLUGIN_BUDGET_ONLY_ACCOUNT_POOL_NOT_VERIFIED",
+            version="0.10.0", api_version=1, phase="STARTING", active_operation="IDLE",
+            backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
+            source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
+            database_connected=False, capacities=dict(CAPACITY), error=None,
+            started_at=str(now_cn()), collection_scope="VERIFIED_THS_FOCUS",
+            minute_request_limit=self.minute_limit, cold_request_limit=self.cold_budget.limit,
         )
-        self.publisher = Publisher(
-            settings["api_base"],
-            settings.get("api_token"),
-            session=settings.get("api_session"),
-            native=True,
-        )
+        credentials = dict(session=settings.get("api_session"))
+        self.publisher = Publisher(settings["api_base"], settings.get("api_token"), **credentials)
         self.http = httpx.Client(
-            base_url=settings["api_base"],
-            timeout=5,
-            trust_env=False,
-            cookies={"tf_session": settings["api_session"]}
-            if settings.get("api_session")
-            else {},
+            base_url=settings["api_base"], timeout=5, trust_env=False,
+            cookies={"tf_session": settings["api_session"]} if settings.get("api_session") else {},
         )
-        self.thread = Thread(
-            target=self.run, name="lan-ma55-unified-writer", daemon=True
-        )
-        self.last_publication = self.last_history = 0
-        self.host_retry_at = 0
-        self.host_failures = 0
+        self.thread = Thread(target=self.run, name="lan-ma55-unified-writer", daemon=True)
+        self.last_commands = self.last_publication = 0
+        self.host_retry_at = self.host_failures = 0
         self.host_failure_reason = None
+        self.bridge_prepared = False
+        self.bridge_retry = 0
 
     def start(self):
         self.lease = ProcessLease(self.folder / "worker.lock")
         self.thread.start()
         atexit.register(self.close)
 
-    def demand(self, symbols):
-        with self.lock:
-            self.demands = {
-                s: t for s, t in self.demands.items() if monotonic() - t < 600
-            }
-            for symbol in symbols:
-                if symbol in self.demands or len(self.demands) < 64:
-                    self.demands[symbol] = monotonic()
-
-    def demand_cache(self, symbols):
-        with self.lock:
-            for symbol in symbols:
-                if len(self.cache_demands) < 64:
-                    self.cache_demands[symbol] = monotonic()
+    def active_scope(self):
+        return self.focus.snapshot["members"].keys() if self.focus else set()
 
     def report(self, **values):
         with self.lock:
             if values.get("error") or values.get("publisher_error"):
                 values["last_error_at"] = str(now_cn())
-            if values.get("phase") and values["phase"] not in ("QUOTA_WAIT", "RATE_LIMITED", "HOST_BUSY"):
-                values.setdefault("wait_seconds", 0)
-                values.setdefault("waiting_for", None)
             self.state.update(values)
 
     def status(self):
         with self.lock:
-            result = dict(
-                self.state,
-                writer_alive=self.thread.is_alive(),
-                worker_alive=self.thread.is_alive(),
+            return dict(
+                self.state, **(self.view["summary"] if self.view else {}),
+                writer_alive=self.thread.is_alive(), worker_alive=self.thread.is_alive(),
                 requests=dict(self.collector.metrics) if self.collector else {},
             )
-        if self.store:
-            try:
-                snapshot = self.owner.status_snapshot(scope=self.settings.get("collection_symbols"))
-                result.update(snapshot)
-                result.update(business_status(result, snapshot, str(now_cn())))
-                result["source_asof"] = result["latest_saved_15m"]
-            except sqlite3.Error:
-                result.update(
-                    database_connected=False, database_error="SQLITE_READ_ERROR"
-                )
-        return result
 
     def host_busy(self):
         if monotonic() < self.host_retry_at:
@@ -212,292 +161,180 @@ class Worker:
                     retry_seconds=delay, consecutive_failures=self.host_failures))
         raise RequestDeferred(self.host_retry_at, status=status, reason=reason)
 
-    def refresh_calendar(self, now):
-        """Daily bars seed history; completed native15 independently admits today."""
+    def sessions(self, now):
+        observed = self.store.meta("sessions", [])
         day = now[:10]
-        sessions = self.store.meta("sessions", [])
-        check = self.store.meta("calendar_check", {})
-        if day in sessions:
-            check = dict(check, confirmed_day=day, pending_day=None,
-                         state="CONFIRMED", next_retry_at=None)
-            if self.store.meta("calendar_check", {}) != check:
-                with self.owner.conn:
-                    self.store.set_meta("calendar_check", check)
-            self.report(calendar=check)
-            return sessions
-        if check.get("next_retry_at") and now < check["next_retry_at"]:
-            self.report(calendar=check)
-            return sessions
-        weekend = wall(now).weekday() >= 5
-        check.update(checked_at=now, pending_day=None if weekend else day,
-                     state="CLOSED" if weekend else "UNCONFIRMED",
-                     next_retry_at=str(wall(now) + timedelta(seconds=300)))
-        if not weekend and wall(now) < wall(day + " 09:46:15"):
-            check.update(state="WAITING_FIRST_COMPLETED_15M", next_retry_at=day+" 09:46:15")
-        # Persist the retry boundary before I/O, including failed source requests.
-        with self.owner.conn:
-            self.store.set_meta("calendar_check", check)
-        self.report(calendar=check, phase="VERIFYING_CALENDAR", active_operation="IDLE")
-        if check.get("daily_checked_day") != day:
-            daily = self.collector.calendar()
-            sessions = sorted(set(sessions) | {d for d in daily if d <= day})
-            check.update(daily_last=max(daily, default=None), daily_checked_day=day)
+        return sorted(set(observed) | ({day} if planned_session(day) else set()))
+
+    def refresh_calendar(self, now):
+        """Fill the calendar once per market session, before any focus K-lines."""
+        day = now[:10]
+        observed = self.store.meta("sessions", [])
+        sessions = self.sessions(now)
+        market_day = sessions[-1] if sessions else None
+        key = market_day if planned_session(day) is not None else day
+        state = self.store.meta("focus_calendar_check", {})
+        if key and state.get("key") != key and time() >= state.get("retry_at", 0):
             with self.owner.conn:
-                self.store.set_meta("calendar_check", check)
-        if day not in sessions and not weekend:
-            evidence = self.collector.session_evidence(now)
-            check["source_native15_asof"] = evidence["source_asof"]
-            if evidence["confirmed_day"]:
-                sessions = sorted(set(sessions) | {evidence["confirmed_day"]})
-                check["verification_source"] = "TICKFLOW_COMPLETED_INDEX_NATIVE15"
-        if day in sessions:
-            check.update(confirmed_day=day, pending_day=None, state="CONFIRMED",
-                         last_verified_at=now, next_retry_at=None)
-            check.setdefault("verification_source", "TICKFLOW_DAILY_BAR")
-        with self.owner.conn:
-            self.store.set_sessions(sessions)
-            self.owner.set_meta("sessions", self.store.meta("sessions", []))
-            self.store.set_meta("calendar_check", check)
-        self.report(calendar=check, active_operation="IDLE")
+                self.store.set_meta("focus_calendar_check", dict(state, retry_at=time() + 300))
+            history = self.collector.calendar()
+            verified = [d for d in history if d <= day and planned_session(d) is not False]
+            if not verified:
+                raise ValueError("EXCHANGE_CALENDAR_MISSING")
+            with self.owner.conn:
+                self.store.set_sessions(verified)
+                self.owner.set_meta("sessions", self.store.meta("sessions", []))
+                self.store.set_meta("focus_calendar_check", dict(
+                    key=key if planned_session(day) is not None or day in verified else None,
+                    retry_at=time() + 300, source="TICKFLOW_INDEX_1D",
+                ))
+            observed = self.store.meta("sessions", [])
+            sessions = self.sessions(now)
+        verified_today = day in observed or planned_session(day) is True
+        self.report(calendar=dict(
+            state="CONFIRMED" if verified_today else "CLOSED" if planned_session(day) is False else "UNCONFIRMED",
+            confirmed_day=day if verified_today else None, last_data_day=max(observed, default=None),
+            verification_source="EXCHANGE_2026_NOTICE" if planned_session(day) is not None else "TICKFLOW_INDEX_1D",
+        ))
         return sessions
 
-    def publish(self, target, *, force=False):
-        now = monotonic()
-        if not force and now - self.last_publication < 5:
-            return
-        pending = self.owner.meta("pending_publish")
-        prior_operation = self.state.get("active_operation", "IDLE")
-        self.report(active_operation="PUBLISHING")
-        self.report(**self.owner.summary(target))
-        try:
-            if pending:
-                self.publisher.day(
-                    pending["day"],
-                    self.owner.day_rows(pending["day"], pending["symbols"]),
-                )
-                with self.owner.conn:
-                    self.owner.set_meta("pending_publish", None)
-                    self.owner.set_meta("published_market_date", pending["day"])
-                    self.owner.set_meta("day_published_revision", self.owner.meta("revision", 0))
-                self.report(published_market_date=pending["day"],
-                            day_published_revision=self.owner.meta("revision", 0),
-                            day_published_at=str(now_cn()))
-            if now - self.last_history >= 60:
-                self.publisher.history(self.owner.history())
-                self.last_history = now
-                self.owner.checkpoint()
-                self.report(history_published_at=str(now_cn()))
-            self.report(publisher_error=None)
-            if target:
-                self.publisher.prices(target[:10], self.store.prices(target[:10]))
-        except (httpx.HTTPError, ValueError):
-            self.report(
-                publisher_error="官方结果发布失败；SQLite已提交，保留上次有效投影"
-            )
-        try:
-            payload = self.status()
-            # Publishing itself is visible on /status. A completed projection
-            # resumes the actual operation instead of sticking at PUBLISHING.
-            if payload["active_operation"] != "BLOCKED":
-                payload["active_operation"] = prior_operation
-            payload["pending_publish"] = self.owner.meta("pending_publish") is not None
-            self.publisher.summary(payload)
-            self.report(last_publish_at=str(now_cn()))
-            self.last_publication = now
-        except (httpx.HTTPError, ValueError):
-            self.report(publisher_error="官方状态投影发布失败；保留上次有效投影")
-        finally:
-            self.report(active_operation=prior_operation)
+    def prepare_bridge(self):
+        if not self.bridge_prepared and monotonic() >= self.bridge_retry:
+            self.bridge_retry = monotonic() + 15
+            try:
+                self.publisher.prepare(workbench_configs())
+            except (httpx.HTTPError, ValueError):
+                self.report(publisher_error="工作台扩展数据尚未就绪")
+            else:
+                self.bridge_prepared = True
+                self.report(publisher_error=None)
 
-    def analyze_pending(self, target, now):
-        symbols = self.owner.catch_up(target, now, self.state["started_at"])
-        master = self.store.universe()
-        symbols = [s for s in symbols if master[s]["source_id"] == NATIVE_SOURCE
-                   and (master[s]["latest_completed15"] or "") >= target]
-        scope = self.settings.get("collection_symbols")
-        if scope is not None:
-            symbols = [s for s in symbols if s in scope]
-        for offset in range(0, len(symbols), 24):
-            if self.stop.is_set():
-                break
+    def publish(self, sessions, schedules, *, force=False):
+        if not force and monotonic() - self.last_publication < 5:
+            return
+        master = self.store.universe(self.active_scope())
+        rows = self.observations.rows(self.focus.snapshot, master, schedules)
+        target = schedules["15m"][-1] if schedules["15m"] else None
+        market_day = sessions[-1] if sessions else None
+        summary = observation_summary(rows, target, market_day)
+        view = dict(focus=focus_view(self.focus, market_day), rows=rows, summary=summary,
+                    state={k: self.state.get(k) for k in ("phase", "error", "waiting_for",
+                           "calendar", "active_operation", "publisher_error")}, rule_version=VERSION)
+        with self.lock:
+            self.view = view
+        if self.bridge_prepared:
+            try:
+                self.bridge.publish(view)
+                self.report(publisher_error=None)
+            except (httpx.HTTPError, ValueError):
+                self.report(publisher_error="工作台发布失败，保留上次结果")
+        self.last_publication = monotonic()
+
+    def update_metadata(self, scope, now, market_day):
+        saved = self.store.meta("focus_metadata_checks", {})
+        missing = [symbol for symbol in scope if saved.get(symbol) != market_day][:100]
+        if missing:
+            rows, _ = classify(self.collector.metadata(missing), now[:10])
             with self.owner.conn:
-                self.owner.conn.execute("BEGIN IMMEDIATE")
-                self.report(active_operation="CALCULATING_NATIVE15_CANDIDATES", pending_analysis=len(symbols)-offset)
-                self.owner.analyze(
-                    symbols[offset : offset + 24],
-                    self.store.meta("sessions", []),
-                    target,
-                    now,
-                    self.state["started_at"],
-                )
-            self.report(active_operation="IDLE")
-            self.publish(target)
-        self.report(
-            pending_analysis=max(0, len(symbols) - offset - 24) if symbols else 0
-        )
+                self.store.put_metadata([row for row in rows if row["symbol"] in missing])
+                self.store.set_meta("focus_metadata_checks", dict(saved, **dict.fromkeys(missing, market_day)))
+        return self.store.universe(scope)
 
     def run(self):
         try:
             self.owner = NativeOwner(self.folder / "state.sqlite3")
             self.store = self.owner.market
-            self.report(database_connected=True, calendar=self.store.meta("calendar_check", {}),
-                        published_market_date=self.owner.meta("published_market_date") or self.owner.summary(None)["market_date"],
-                        day_published_revision=self.owner.meta("day_published_revision", 0))
-            key = self.settings.get("tickflow_api_key") or os.environ.get(
-                "TICKFLOW_API_KEY"
-            )
-            if not key:
-                self.report(
-                    phase="CREDENTIAL_REQUIRED",
-                    error="Configure TickFlow key for the MA55 owner",
+            self.daily = DailyStore(self.owner.conn)
+            self.observations = Observations(self.store, self.daily)
+            ths_key = (self.settings.get("ths_api_key") or os.environ.get("THS_API_TOKEN")
+                       or os.environ.get("LAN_MA55_THS_API_KEY") or os.environ.get("FUYAO_API_KEY"))
+            self.focus = FocusOwner(self.owner, ths_key, self.stop, int(self.settings.get("ths_requests_per_minute", 12)))
+            self.bridge = WorkbenchBridge(self.owner, self.focus, self.observations, self.publisher)
+            self.report(database_connected=True)
+            key = self.settings.get("tickflow_api_key") or os.environ.get("TICKFLOW_API_KEY")
+            if key:
+                self.collector = Collector(
+                    key, self.folder / "tickflow_sdk_cache", stop=self.stop, report=self.report,
+                    limit=self.minute_limit, host_busy=self.host_busy, cold_budget=self.cold_budget,
+                    scope=self.active_scope,
                 )
-                self.publish(latest_point(self.store.meta("sessions", []), str(now_cn())), force=True)
-                return
-            self.collector = Collector(
-                key,
-                self.folder / "tickflow_sdk_cache",
-                stop=self.stop,
-                report=self.report,
-                limit=self.minute_limit,
-                host_busy=self.host_busy,
-                cold_budget=self.cold_budget,
-            )
-            self.restore_budgets(str(now_cn()))
-            last_master_day = self.store.meta("metadata_day")
-            last_target = None
+                self.restore_budgets(str(now_cn()))
+            last_input = None
             while not self.stop.is_set():
+                now = str(now_cn())
+                sessions = self.sessions(now)
+                schedules, weeks = frame_schedules(sessions, now)
                 work = None
+                phase, stage = "WAITING_NEXT_15M", None
                 try:
-                    now = str(now_cn())
-                    sessions = self.store.meta("sessions", [])
-                    target = latest_point(sessions, now)
-                    if self.host_busy():
-                        self.report(phase="HOST_BUSY", active_operation="IDLE", wait_seconds=10)
-                        self.publish(target)
-                        self.stop.wait(10)
-                        continue
-                    sessions = self.refresh_calendar(now)
-                    target = latest_point(sessions, now)
-                    if last_master_day != now[:10]:
-                        rows, overview = classify(self.collector.master(), now[:10])
-                        self.owner.refresh_master(rows, overview, sessions)
-                        with self.owner.conn:
-                            self.store.set_meta("metadata_day", now[:10])
-                        last_master_day = now[:10]
-                        target = latest_point(sessions, now)
-                    # Verify the session first. Only actually arrived target
-                    # bars enter restart analysis; stale input is not a new scan.
-                    if target and (target != last_target or self.owner.catch_up(target, now, self.state["started_at"])):
-                        self.analyze_pending(target, now)
-                        self.publish(target, force=True)
-                        last_target = target
-                    if not target:
-                        self.report(phase="CALENDAR_PENDING")
-                        self.stop.wait(10)
-                        continue
-                    self.report(target_15m=target)
-                    master = self.store.universe()
-                    with self.lock:
-                        demanded = {
-                            s for s, t in self.demands.items() if monotonic() - t < 600
-                        }
-                    unknown = sorted(demanded - master.keys())[:8]
-                    if unknown:
-                        rows, _ = classify(self.collector.metadata(unknown), now[:10])
-                        self.store.put_metadata(rows)
-                        master = self.store.universe()
-                    scope = self.settings.get("collection_symbols")
-                    if scope is not None:
-                        master = {
-                            s: r
-                            for s, r in master.items()
-                            if s in scope or s in demanded
-                        }
-                    with self.owner.conn:
-                        self.owner.set_meta("target", target)
-                    work = native_task(self.store, master, sessions, target, now, demanded)
-                    # Saved chart rebuilds never consume commercial quota.
-                    with self.lock:
-                        cache_symbols = list(self.cache_demands)[:8]
-                        for symbol in cache_symbols:
-                            self.cache_demands.pop(symbol, None)
-                    if not work or work[2] != "A":
-                        self.store.warm_cache(cache_symbols)
-                    self.report(queue_size=sum(r["eligible"] and (r["latest_completed15"] or "") < target for r in master.values()),
-                                queue_bound=len(master))
-                    if not work:
-                        self.report(phase="WAITING_NEXT_15M", active_operation="IDLE", active_symbols=0, work_stage=None, error=None)
-                        self.publish(target)
-                        self.stop.wait(5)
-                        continue
-                    start, end, stage, symbols = work
-                    self.report(work_stage=stage)
-                    delay = self.collector.budgets["minute"].delay()
-                    if delay > 0:
-                        raise RequestDeferred(monotonic()+delay, reason="QUOTA_WAIT")
-                    if stage == "F":
-                        self.report(phase="F", active_operation="CHECKING_FACTORS", active_symbols=len(symbols))
-                        self.store.factor_attempt(symbols, now)
-                        factors = self.collector.factors(symbols)
-                        self.owner.accept_factors(symbols, factors, sessions=sessions, target=target,
-                                                  now=str(now_cn()), live_after=self.state["started_at"])
-                        self.flush_requests(stage)
-                        self.report(phase="RUNNING", active_operation="IDLE", error=None)
-                        self.publish(target, force=True)
-                        continue
-                    if stage == "C" and self.cold_budget.delay() > 0:
-                        self.report(phase="QUOTA_WAIT", active_operation="IDLE", wait_seconds=round(self.cold_budget.delay(), 2), waiting_for="HISTORY_BUDGET")
-                        self.publish(target)
-                        self.stop.wait(min(5, self.cold_budget.delay()))
-                        continue
-                    # B is essential strategy input and uses the main 8 RPM pool;
-                    # only optional C deep history is restricted to the cold pool.
-                    self.report(phase=stage, error=None, active_symbols=len(symbols), range_start=start, range_end=end,
-                                active_operation="COLLECTING_NATIVE15")
-                    self.store.attempt(symbols, end, now, stage)
-                    self.publish(target, force=True)
-                    received, errors = self.collector.fetch(symbols, start, end, cold=stage == "C")
-                    self.report(active_operation="CALCULATING_NATIVE15_CANDIDATES")
-                    self.owner.accept_batch(symbols, received, errors, sessions=sessions, start=start, end=end, now=str(now_cn()),
-                                            factors={}, stage=stage, live_after=self.state["started_at"])
-                    self.flush_requests(stage)
-                    self.report(phase="RUNNING", active_operation="IDLE", error=None, last_commit=str(now_cn()))
-                    if any(received.get(s) for s in symbols):
-                        self.report(last_success_at=str(now_cn()), last_success_stage=stage)
-                    self.publish(target, force=True)
+                    self.prepare_bridge()
+                    market_day = sessions[-1] if sessions else None
+                    self.focus.schedule(market_day, now, sessions, trading_today=market_day == now[:10])
+                    if self.bridge_prepared and monotonic() - self.last_commands >= 2:
+                        self.last_commands = monotonic()
+                        try:
+                            self.bridge.consume(market_day, sessions, schedules, weeks)
+                        except (httpx.HTTPError, ValueError):
+                            self.report(publisher_error="工作台请求或回执暂不可用")
+                    scope = self.active_scope()
+                    if not scope:
+                        phase = "SCOPE_PAUSED"
+                    elif not self.collector or self.market_rejected:
+                        phase = "CREDENTIAL_REQUIRED"
+                    elif self.host_busy():
+                        phase = "HOST_BUSY"
+                    else:
+                        sessions = self.refresh_calendar(now)
+                        schedules, weeks = frame_schedules(sessions, now)
+                        target = schedules["15m"][-1] if schedules["15m"] else None
+                        master = self.update_metadata(scope, now, sessions[-1]) if sessions else {}
+                        input_key = (tuple(scope), tuple((values[-1] if values else None) for values in schedules.values()),
+                                     self.store.meta("calendar_revision", 0))
+                        if last_input != input_key:
+                            self.observations.refresh(master, sessions, schedules, weeks, now, self.state["started_at"])
+                            last_input = input_key
+                        if target:
+                            work = native_task(self.store, master, sessions, target, now)
+                        daily = self.daily.task(master, schedules["daily"]) if not work or work[2] == "C" else None
+                        if daily and (not daily[-1] or self.cold_budget.delay() == 0):
+                            start, end, count, symbols, cold = daily
+                            stage = "W" if cold else "D"
+                            self.report(phase=stage, active_operation="COLLECTING_DAILY", active_symbols=len(symbols))
+                            received, errors = self.collector.fetch_daily(symbols, start, end, count=count, cold=cold)
+                            self.daily.accept(symbols, received, errors, schedules["daily"], master)
+                            self.observations.refresh(symbols, sessions, schedules, weeks, str(now_cn()),
+                                                      self.state["started_at"], live=not cold)
+                        elif work and (work[2] != "C" or self.cold_budget.delay() == 0):
+                            stage = work[2]
+                            self.collect_work(work, sessions, schedules, weeks, now, target)
+                        elif not target:
+                            phase = "CALENDAR_PENDING"
+                        elif work or daily:
+                            phase = "QUOTA_WAIT"
+                    self.report(phase=phase, active_operation="IDLE", backend_scanning=bool(scope and self.collector and not self.market_rejected),
+                                work_stage=stage, error=None, waiting_for=None)
                 except RequestDeferred as exc:
-                    self.flush_requests(work[2] if work else "DEFERRED")
                     if exc.status_code == 429 and not (exc.reason or "").startswith("HOST_"):
                         with self.owner.conn:
                             self.owner.set_meta("quota_until", time()+max(0, exc.until-monotonic()))
-                    if exc.status_code == 429 and not (exc.reason or "").startswith("HOST_") and work:
-                        if work[2] == "F":
-                            self.store.factor_failed(work[3], str(now_cn()), "RATE_LIMITED", delay=max(1, exc.until-monotonic()))
-                        else:
-                            self.store.failed(work[3], work[1], str(now_cn()), "RATE_LIMITED", stage=work[2],
-                                              delay=max(1, exc.until-monotonic()))
-                    self.report(phase="HOST_STATUS_UNAVAILABLE" if (exc.reason or "").startswith("HOST_") else "RATE_LIMITED" if exc.status_code == 429 else "QUOTA_WAIT",
-                                active_operation="IDLE", wait_seconds=round(max(0, exc.until-monotonic()), 2), waiting_for=exc.reason)
-                    self.publish(target)
-                    self.stop.wait(min(5, max(1, exc.until-monotonic())))
+                    phase = "HOST_STATUS_UNAVAILABLE" if (exc.reason or "").startswith("HOST_") else (
+                        "RATE_LIMITED" if exc.status_code == 429 else "QUOTA_WAIT")
+                    self.report(phase=phase, active_operation="IDLE", waiting_for=exc.reason)
                 except (SourceError, ValueError) as exc:
-                    self.flush_requests(work[2] if work else "FAILED")
                     credential = getattr(exc, "status_code", None) in (401, 403)
+                    self.market_rejected = self.market_rejected or credential
+                    if stage in ("D", "W"):
+                        self.daily.accept(symbols, {}, dict.fromkeys(symbols, "SOURCE_UNAVAILABLE"),
+                                          schedules["daily"], master)
+                    if stage in ("A", "B", "C") and work:
+                        self.store.failed(work[3], work[1], now, "SOURCE_UNAVAILABLE", stage=stage)
+                    if stage == "F" and work:
+                        self.store.factor_failed(work[3], now, "SOURCE_UNAVAILABLE")
                     self.report(phase="CREDENTIAL_REQUIRED" if credential else "SOURCE_UNAVAILABLE",
                                 active_operation="BLOCKED", error=str(exc))
-                    if work:
-                        if work[2] == "F":
-                            self.store.factor_failed(work[3], str(now_cn()), f"HTTP_{exc.status_code}" if credential else "SOURCE_UNAVAILABLE")
-                        else:
-                            self.store.failed(work[3], work[1], str(now_cn()), "CREDENTIAL_REQUIRED" if credential else "SOURCE_UNAVAILABLE", stage=work[2])
-                    self.publish(target, force=True)
-                    if credential:
-                        # Explicit account refusal requires a settings/restart action.
-                        # Keep the RO service alive without further supplier calls.
-                        while not self.stop.wait(5):
-                            self.publish(target)
-                        break
-                    self.stop.wait(5)
+                self.flush_requests(stage or "METADATA")
+                self.publish(sessions, schedules, force=bool(stage))
+                self.stop.wait(2)
         except CollectionStopped:
             pass
         except Exception as exc:
@@ -505,6 +342,8 @@ class Worker:
         finally:
             if self.collector:
                 self.collector.close()
+            if self.focus:
+                self.focus.source.close()
             if self.owner:
                 self.owner.checkpoint()
                 self.owner.close()
@@ -512,6 +351,26 @@ class Worker:
             self.http.close()
             self.lease.close()
             self.report(database_connected=False, backend_scanning=False)
+
+    def collect_work(self, work, sessions, schedules, weeks, now, target):
+        start, end, stage, symbols = work
+        live_after = self.state["started_at"]
+        with self.owner.conn:
+            self.owner.set_meta("target", target)
+        if stage == "F":
+            self.report(phase=stage, active_operation="CHECKING_FACTORS", active_symbols=len(symbols))
+            self.store.factor_attempt(symbols, now)
+            factors = self.collector.factors(symbols)
+            self.owner.accept_factors(symbols, factors, sessions=sessions, target=target,
+                                      now=str(now_cn()), live_after=live_after, analyze_candidates=False)
+        else:
+            self.report(phase=stage, active_operation="COLLECTING_NATIVE15", active_symbols=len(symbols))
+            self.store.attempt(symbols, end, now, stage)
+            received, errors = self.collector.fetch(symbols, start, end, cold=stage == "C")
+            self.owner.accept_batch(symbols, received, errors, sessions=sessions, start=start, end=end,
+                                    now=str(now_cn()), factors={}, stage=stage, live_after=live_after,
+                                    analyze_candidates=False)
+        self.observations.refresh(symbols, sessions, schedules, weeks, str(now_cn()), live_after, live=stage == "A")
 
     def flush_requests(self, stage):
         if self.collector:
@@ -526,9 +385,9 @@ class Worker:
         clock = monotonic()
         for row in self.owner.conn.execute("SELECT at,capability,period,stage FROM native15_request_receipt WHERE at>? ORDER BY id", (boundary,)):
             age = max(0, (wall(now)-wall(row['at'])).total_seconds())
-            if row['capability'] == 'adj_factor' or row['period'] == '15m':
+            if row['capability'] in ('adj_factor', 'kline.minute.batch', 'kline.daily.batch'):
                 self.collector.budgets['minute'].sent.append(clock-age)
-            if row['stage'] == 'C' and row['period'] == '15m':
+            if row['stage'] in ('C', 'W'):
                 self.cold_budget.sent.append(clock-age)
         delay = self.owner.meta('quota_until',0)-time()
         if delay > 0:

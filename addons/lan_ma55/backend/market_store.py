@@ -240,10 +240,12 @@ class Store:
             self.set_meta("calendar_revision", self.meta("calendar_revision", 0) + 1)
             self.set_meta("sessions", combined)
 
-    def universe(self):
+    def universe(self, scope=None):
+        where = "" if scope is None else " WHERE symbol IN (SELECT value FROM json_each(?))"
+        params = () if scope is None else (encoded(list(scope)),)
         return {
             r["symbol"]: unpack(r)
-            for r in self.conn.execute(f"SELECT * FROM {self.instrument_table} ORDER BY symbol")
+            for r in self.conn.execute(f"SELECT * FROM {self.instrument_table}{where} ORDER BY symbol", params)
         }
 
     def universe_page(self, offset, limit):
@@ -287,12 +289,12 @@ class Store:
                 [(symbol, i, e["day"], e["ex_factor"]) for i, e in enumerate(events)],
             )
 
-    def raw_rows(self, symbol, asof="9999", *, limit=STRATEGY_CAPACITY, conn=None):
+    def raw_rows(self, symbol, asof="9999", *, start="", limit=STRATEGY_CAPACITY, conn=None):
         rows = (
             (conn or self.conn)
             .execute(
-                f"SELECT * FROM {self.bar_table} WHERE symbol=? AND bar_end<=? ORDER BY bar_end DESC LIMIT ?",
-                (symbol, asof, limit),
+                f"SELECT * FROM {self.bar_table} WHERE symbol=? AND bar_end BETWEEN ? AND ? ORDER BY bar_end DESC LIMIT ?",
+                (symbol, start, asof, limit),
             )
             .fetchall()
         )

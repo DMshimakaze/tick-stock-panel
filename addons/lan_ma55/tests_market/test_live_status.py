@@ -19,7 +19,7 @@ def test_daily_bar_can_lag_while_completed_five_confirms_today(tmp_path):
         calls.append(request)
         if request.url.params["period"] == "1d":
             return httpx.Response(
-                200, json={"data": {"timestamp": [as_ms("2026-11-12 00:00:00")]}}
+                200, json={"data": {"000001.SH": {"timestamp": [as_ms("2026-11-12 00:00:00")]}}}
             )
         at = "2026-11-13 10:45:00"
         bar = dict(
@@ -138,19 +138,13 @@ def test_calendar_recheck_is_independent_from_metadata_day_and_bounded(tmp_path)
         with worker.owner.conn:
             worker.store.set_sessions(["2026-11-12"])
             worker.store.set_meta("metadata_day", "2026-11-13")
-        worker.refresh_calendar("2026-11-13 10:52:00")
-        worker.refresh_calendar("2026-11-13 10:52:30")
-        assert calls == ["daily", "five"]
-        assert worker.state["calendar"]["pending_day"] == "2026-11-13"
-        worker.collector.session_evidence = lambda now: (
-            calls.append("five")
-            or {"confirmed_day": "2026-11-13", "source_asof": "2026-11-13 10:55:00"}
-        )
-        worker.refresh_calendar("2026-11-13 10:57:01")
-        assert calls == ["daily", "five", "five"]
-        assert worker.store.meta("sessions") == ["2026-11-12", "2026-11-13"]
+        assert worker.refresh_calendar("2026-11-13 08:52:00") == ["2026-11-12", "2026-11-13"]
+        assert worker.refresh_calendar("2026-11-13 10:52:30") == ["2026-11-12", "2026-11-13"]
+        assert calls == ["daily"]
+        assert worker.state["calendar"]["confirmed_day"] == "2026-11-13"
+        assert worker.state["calendar"]["verification_source"] == "EXCHANGE_2026_NOTICE"
+        assert worker.store.meta("sessions") == ["2026-11-12"]
         assert worker.owner.meta("sessions") == worker.store.meta("sessions")
-        assert worker.state["calendar"]["pending_day"] is None
     finally:
         worker.owner.close()
         worker.http.close()
@@ -270,231 +264,138 @@ def test_verified_session_target_boundaries(now, expected):
     assert latest_point(["2026-11-12", "2026-11-13"], now) == expected
 
 
-def test_worker_native15_to_candidates_to_separate_official_projection(
-    tmp_path, monkeypatch
-):
+@pytest.mark.parametrize("configured", [False, True])
+def test_worker_scope_is_enforced_at_the_sdk_http_boundary(tmp_path, monkeypatch, configured):
     import json
     from datetime import datetime
     from threading import Event
-    from addons.lan_ma55.backend import runtime, market_store
-    from addons.lan_ma55.backend.market_grid import points
-    from addons.lan_ma55.backend.result_publisher import Publisher
+    from uuid import uuid4
 
-    now, target = "2026-11-13 10:52:00", "2026-11-13 10:45:00"
+    from addons.lan_ma55.backend import runtime, workbench_bridge
+    from addons.lan_ma55.backend.focus_pool import FocusPool
+    from addons.lan_ma55.backend.market_grid import BEIJING, points
+    from addons.lan_ma55.backend.native15_owner import NativeOwner
+    from addons.lan_ma55.backend.result_publisher import COMMAND_ID, RECEIPT_ID, WORKBENCH_ID, Publisher, workbench_configs
+
+    day, now, target = "2026-11-13", "2026-11-13 10:52:00", "2026-11-13 10:45:00"
+    a, b, board = "600000.SH", "159231.SZ", "industry:881001.TI"
     monkeypatch.setattr(runtime, "now_cn", lambda: datetime.fromisoformat(now))
-    monkeypatch.setattr(market_store, "now_cn", lambda: datetime.fromisoformat(now))
+    monkeypatch.setattr(workbench_bridge, "time", lambda: as_ms(now) / 1000)
     sessions = ["2026-11-09", "2026-11-10", "2026-11-11", "2026-11-12"]
-    five = {
-        t: dict(open=10, high=10.1, low=9.9, close=10, volume=10000, amount=100000)
-        for t in points(sessions, sessions[0], sessions[-1] + " 15:00:00")
-    }
     path = tmp_path / "user_data/lan_ma55/state.sqlite3"
-    with UnifiedStore(path) as owner:
-        owner.refresh_master(
-            [
-                dict(
-                    symbol="600000.SH",
-                    name="synthetic",
-                    source_type="stock",
-                    eligible=True,
-                    raw_tick=0.01,
-                )
-            ],
-            {"expected": 1},
-            sessions,
-        )
-        owner.accept_market(
-            "600000.SH",
-            five,
-            sessions=sessions,
-            start=min(five),
-            end=max(five),
-            now=max(five),
-            events=[],
-            factor_response=True,
-            live_after=max(five),
-        )
+    path.parent.mkdir(parents=True)
+    with NativeOwner(path) as owner:
+        owner.refresh_master([dict(symbol=s, name=s, source_type=asset, eligible=True, raw_tick=tick)
+                              for s, asset, tick in [(a, "stock", .01), (b, "etf", .001)]],
+                             {"expected": 2}, sessions)
         with owner.conn:
-            owner.market.set_meta("metadata_day", "2026-11-13")
-            owner.set_meta("pending_publish", None)
-    operations, requests, published, done = [], [], {}, Event()
-    worker = worker_at(
-        tmp_path, lambda r: httpx.Response(200, json={"active_id": None})
-    )
-    worker.settings.update(
-        tickflow_api_key="synthetic", collection_symbols=["600000.SH"]
-    )
-    original_report = worker.report
-
-    def report(**kw):
-        if "active_operation" in kw:
-            operations.append(kw["active_operation"])
-        original_report(**kw)
-
-    worker.report = report
+            owner.market.set_meta("focus_metadata_checks", dict.fromkeys((a, b), day))
+            owner.set_meta("focus_catalog_v1", dict(entries={board:"板块"}, checked_day=day))
+    pool = FocusPool(path)
+    if configured:
+        pool.apply([board], [dict(key=board,name="板块",symbols=[a],source_ms=as_ms(now)-1,observed_ms=as_ms(now))],
+                   expected_revision=0)
+    requests, published, done = [], {}, Event()
+    worker = worker_at(tmp_path, lambda r: httpx.Response(200, json={"active_id": None}))
+    worker.settings.update(tickflow_api_key="synthetic", collection_symbols=[a, b])
 
     def vendor(request):
-        requests.append(request)
         period = request.url.params.get("period")
-        if period == "1d":
-            return httpx.Response(
-                200,
-                json={
-                    "data": {"timestamp": [as_ms(d + " 00:00:00") for d in sessions]}
-                },
-            )
+        codes = (json.loads(request.content).get("symbols") if request.content
+                 else request.url.params["symbols"].split(","))
+        requests.append((period, codes))
+        if period == "1d" and codes == ["000001.SH"]:
+            return httpx.Response(200, json={"data": {"000001.SH": {"timestamp": [as_ms(d) for d in sessions]}}})
+        assert codes == [a]
         if "ex-factors" in request.url.path:
-            return httpx.Response(200, json={"data": {"600000.SH": []}})
+            return httpx.Response(200, json={"data": {a: []}})
         assert period == "15m"
-        codes = (
-            json.loads(request.content)["symbols"]
-            if request.content
-            else request.url.params["symbols"].split(",")
-        )
-        from addons.lan_ma55.backend.market_grid import BEIJING
         start = str(datetime.fromtimestamp(int(request.url.params["start_time"])/1000, BEIJING).replace(tzinfo=None))
-        stamps = points([*sessions, "2026-11-13"], start, target, step=15)
+        stamps = points([*sessions, day], start, target, step=15)
         n = len(stamps)
-        bars = dict(
-            timestamp=[as_ms(t) for t in stamps],
-            open=[10] * n,
-            high=[10.1] * n,
-            low=[9.9] * n,
-            close=[10] * n,
-            volume=[100] * n,
-            amount=[100000] * n,
-        )
-        return httpx.Response(200, json={"data": {s: bars for s in codes}})
+        bars = dict(timestamp=[as_ms(t) for t in stamps], open=[10]*n, high=[10.1]*n, low=[9.9]*n,
+                    close=[10]*n, volume=[100]*n, amount=[100000]*n)
+        return httpx.Response(200, json={"data": {a: bars}})
 
-    collector = source(tmp_path, vendor, report=report, host_busy=worker.host_busy)
+    collector = source(tmp_path, vendor, host_busy=worker.host_busy)
+    collector.scope = worker.active_scope
     monkeypatch.setattr(runtime, "Collector", lambda *args, **kwargs: collector)
     worker.publisher.close()
+    command = dict(scope="chart-0",client_id=str(uuid4()),request_id=str(uuid4()),request_ms=as_ms(now),
+                   payload_json=json.dumps(dict(symbol=b,timeframe="15m",source="focus")))
 
     def official(request):
-        assert request.method == "POST" and request.url.path.startswith(
-            "/api/ext-data/lan_ma55_"
-        )
+        if request.url.path == "/api/ext-data":
+            return httpx.Response(200, json={"items": workbench_configs()})
         table = request.url.path.split("/")[-2]
-        published[table] = json.loads(request.content)["rows"]
-        if table == "lan_ma55_native15_summary_v1":
-            state = json.loads(published[table][0]["payload_json"])
-            if (
-                state.get("latest_saved_15m") == target
-                and state.get("analysis", {}).get("calculated") == 1
-            ):
+        if request.method == "GET":
+            assert table == COMMAND_ID
+            return httpx.Response(200, json={"rows": [command]})
+        data = json.loads(request.content)["rows"]
+        published[table] = json.loads(data[0]["payload_json"])
+        if WORKBENCH_ID in published:
+            summary = published[WORKBENCH_ID]["summary"]
+            if not configured or summary["latest_saved_15m"] == target:
                 worker.stop.set()
                 done.set()
         return httpx.Response(200, json={"ok": True})
 
-    worker.publisher = Publisher(
-        "http://localhost", transport=httpx.MockTransport(official), native=True
-    )
+    worker.publisher = Publisher("http://localhost", transport=httpx.MockTransport(official))
     worker.start()
-    arrived = done.wait(6)
+    arrived = done.wait(8)
     worker.close()
-    assert arrived, {
-        k: worker.state.get(k)
-        for k in ("phase", "error", "publisher_error", "target_15m")
-    }
-    assert not worker.thread.is_alive()
-    assert all(
-        op in operations
-        for op in [
-            "COLLECTING_NATIVE15",
-            "CALCULATING_NATIVE15_CANDIDATES",
-            "PUBLISHING",
-            "IDLE",
-        ]
-    )
-    assert operations[-1] == "IDLE"
-    assert all(r.url.params.get("period") not in ("1m", "5m") for r in requests)
-    state = json.loads(published["lan_ma55_native15_summary_v1"][0]["payload_json"])
-    assert state["today_session_verified"] is True
-    assert state["data_target_15m"] == state["latest_analyzed_15m"] == target
-    assert state["analysis"]["calculated"] == state["refresh"]["refreshed"] == 1
-    assert published["lan_ma55_native15_day_v1"][0]["market_date"] == "2026-11-13"
-    from addons.lan_ma55.backend.native15_owner import NativeOwner
-    with NativeOwner(path) as owner:
-        assert owner.market.raw_rows("600000.SH")[-1]["source_count"] == 1
-        assert (
-            owner.market.meta("calendar_check")["verification_source"]
-            == "TICKFLOW_COMPLETED_INDEX_NATIVE15"
-        )
-        assert (
-            owner.conn.execute(
-                "SELECT analysis_asof FROM native15_signal_state"
-            ).fetchone()[0]
-            == target
-        )
+    assert arrived, worker.state
+    assert published[RECEIPT_ID]["status"] == "OUTSIDE_FOCUS"
+    assert published[WORKBENCH_ID]["summary"]["expected"] == int(configured)
+    assert [row["symbol"] for row in published[WORKBENCH_ID]["rows"]] == ([a] if configured else [])
+    if configured:
+        assert ("15m", [a]) in requests
+        assert all(period in (None, "15m", "1d") for period, _ in requests)
+    else:
+        assert requests == []
 
 
-def test_day_publish_failure_is_visible_then_recovers_without_recalculation(tmp_path):
-    from addons.lan_ma55.backend.result_publisher import Publisher
+def test_focus_publication_failure_retries_the_same_committed_view(tmp_path):
     import json
+    from addons.lan_ma55.backend.daily_store import DailyStore
+    from addons.lan_ma55.backend.exchange_sessions import frame_schedules
+    from addons.lan_ma55.backend.focus_owner import FocusOwner
+    from addons.lan_ma55.backend.native15_owner import NativeOwner
+    from addons.lan_ma55.backend.observations import Observations
+    from addons.lan_ma55.backend.result_publisher import Publisher, WORKBENCH_ID
+    from addons.lan_ma55.backend.workbench_bridge import WorkbenchBridge
 
-    sessions, rows = sample(60)
-    target = max(rows)
-    worker = worker_at(
-        tmp_path, lambda r: httpx.Response(200, json={"active_id": None})
-    )
-    worker.owner = UnifiedStore(tmp_path / "user_data/lan_ma55/state.sqlite3")
-    worker.store = worker.owner.market
-    worker.owner.refresh_master(
-        [
-            dict(
-                symbol="600000.SH",
-                name="synthetic",
-                source_type="stock",
-                eligible=True,
-                raw_tick=0.01,
-            )
-        ],
-        {"expected": 1},
-        sessions,
-    )
-    worker.owner.accept_market(
-        "600000.SH",
-        rows,
-        sessions=sessions,
-        start=min(rows),
-        end=target,
-        now=target,
-        events=[],
-        factor_response=True,
-        live_after=target,
-    )
+    worker = worker_at(tmp_path, lambda r: httpx.Response(200, json={"active_id": None}))
     worker.publisher.close()
-    fail, summaries = True, []
-
+    failure, published = True, []
     def official(request):
-        if "/lan_ma55_day/" in request.url.path and fail:
+        assert request.url.path.endswith(WORKBENCH_ID + "/ingest")
+        if failure:
             return httpx.Response(500)
-        if "/lan_ma55_summary/" in request.url.path:
-            summaries.append(
-                json.loads(json.loads(request.content)["rows"][0]["payload_json"])
-            )
+        published.append(json.loads(json.loads(request.content)["rows"][0]["payload_json"]))
         return httpx.Response(200, json={})
 
-    worker.publisher = Publisher(
-        "http://localhost", transport=httpx.MockTransport(official)
-    )
-    try:
-        revision = worker.owner.meta("revision")
-        worker.publish(target, force=True)
-        assert worker.owner.meta("pending_publish") is not None
-        assert summaries[-1]["publisher_error"]
-        assert summaries[-1]["pending_publish"] is True
-        assert worker.state["active_operation"] == "IDLE"
-        fail = False
-        worker.publish(target, force=True)
-        assert worker.owner.meta("pending_publish") is None
-        assert worker.owner.meta("revision") == revision
-        assert summaries[-1]["publisher_error"] is None
-        assert worker.state["last_publish_at"]
-    finally:
-        worker.owner.close()
-        worker.http.close()
-        worker.publisher.close()
+    worker.publisher = Publisher("http://localhost", transport=httpx.MockTransport(official))
+    with NativeOwner(worker.folder / "state.sqlite3") as owner:
+        worker.owner, worker.store = owner, owner.market
+        worker.focus = FocusOwner(owner, None, worker.stop)
+        worker.observations = Observations(worker.store, DailyStore(owner.conn))
+        worker.bridge = WorkbenchBridge(owner, worker.focus, worker.observations, worker.publisher)
+        worker.bridge_prepared = True
+        sessions = ["2026-11-13"]
+        schedules, _ = frame_schedules(sessions, "2026-11-13 16:00:00")
+        try:
+            worker.publish(sessions, schedules, force=True)
+            assert worker.state["publisher_error"]
+            assert not published
+            failure = False
+            worker.publish(sessions, schedules, force=True)
+            assert worker.state["publisher_error"] is None
+            assert published[0]["focus"]["revision"] == worker.focus.snapshot["revision"] == 0
+        finally:
+            worker.focus.source.close()
+            worker.http.close()
+            worker.publisher.close()
 
 
 @pytest.mark.parametrize('phase,reason,operation', [

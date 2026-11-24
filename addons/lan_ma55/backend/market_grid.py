@@ -183,24 +183,32 @@ def adjustment(events, day, asof):
 
 
 def project(rows, events, asof, *, sessions, timeframe, periods=MAS):
-    result, continuous, previous = [], [], None
     schedule = (
         points(sessions, rows[0]["timestamp"][:10], asof, step=int(timeframe[:-1]))
         if rows
         else []
     )
+    result = [project_bar(raw, events, asof) for raw in rows]
+    return with_averages(result, schedule, periods)
+
+
+def project_bar(raw, events, asof):
+    factor = adjustment(events, raw["timestamp"][:10], asof)
+    bar = dict(
+        raw, adjust_factor=factor, price_basis="QFQ" if factor is not None else "RAW",
+        volume_unit="shares", valid=factor is not None,
+    )
+    if factor is not None:
+        bar.update({k: raw[k] * factor for k in FIELDS[:4]})
+    return bar
+
+
+def with_averages(rows, schedule, periods):
+    if not periods:
+        return rows
     ordinal = {t: i for i, t in enumerate(schedule)}
-    for raw in rows:
-        factor = adjustment(events, raw["timestamp"][:10], asof)
-        bar = dict(
-            raw,
-            adjust_factor=factor,
-            price_basis="QFQ" if factor is not None else "RAW",
-            volume_unit="shares",
-            valid=factor is not None,
-        )
-        if factor is not None:
-            bar.update({k: raw[k] * factor for k in FIELDS[:4]})
+    continuous, previous = [], None
+    for bar in rows:
         if not bar["valid"] or (
             previous is not None
             and (
@@ -214,6 +222,5 @@ def project(rows, events, asof, *, sessions, timeframe, periods=MAS):
             continuous.append(bar["close"])
         for n in periods:
             bar[f"ma{n}"] = fsum(continuous[-n:]) / n if len(continuous) >= n else None
-        result.append(bar)
         previous = bar
-    return result
+    return rows

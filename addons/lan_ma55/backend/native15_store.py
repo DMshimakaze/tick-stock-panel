@@ -171,6 +171,9 @@ class NativeStore(Store):
             return info
         old = self.raw_rows(symbol, limit=history_capacity())
         prior = {b["timestamp"]: b for b in old}
+        if old and incoming[0]["timestamp"] < old[0]["timestamp"]:
+            earlier = self.raw_rows(symbol, old[0]["timestamp"], start=incoming[0]["timestamp"], limit=-1)
+            prior.update({bar["timestamp"]: bar for bar in earlier})
         repaired = bool(old and any(b["timestamp"] not in prior and old[-min(len(old), STRATEGY_CAPACITY)]["timestamp"] <= b["timestamp"] <= old[-1]["timestamp"] for b in incoming))
         correction = any(any(not isclose(b[k], prior[b["timestamp"]][k], rel_tol=1e-12, abs_tol=1e-9)
                              if b.get(k) is not None and prior[b["timestamp"]].get(k) is not None

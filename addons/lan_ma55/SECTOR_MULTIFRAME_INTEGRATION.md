@@ -1,35 +1,30 @@
-# Sector-focused MA55 integration seed
+# MA55 板块观察整合验收 · 2026-11-24
 
-This commit is a non-installed implementation seed on TSP v0.3.36, not a
-runtime release or an acceptance result. Keep the original lan.ma55 0.9.8
-manifest and runtime unchanged until the remaining integration is verified.
+接续 `a04969608ed1b973ea8174fd845e899f85c97478`，交付 `lan.ma55 0.10.0`。宿主基线为 TSP v0.3.36 `a7868b783fc6057913bbc0a8d2b69817ad9b7d9b`。工作台沿用 Page SDK 的 Ext Data 读写及回执，后台将真实已验证关注池并集传入行情队列和实际 HTTP 边界。一份 SQLite 保存行情、因子、回放起点及版本化观察结果，旧原生候选和冻结 BUY 用原来数据读取。
 
-- Existing focus_pool.py and focus_controls.mjs are retained.
-- ths_focus.py implements the documented THS catalog/member GET contract using
-  an injected authenticated and budgeted request. A successful explicit edit
-  fetches newly selected boards only; explicit/daily refresh also fetches
-  retained boards. No-op saves and removals do not fetch constituents. Failed
-  new boards commit nothing; failed retained boards keep their last good data.
-  Real provider access, completeness and budget are not proven by mocks.
-- multiframe_core/multiframe.py and structure.py are direct copies from
-  DMshimakaze/DM-Ma55-Method commit 4440e1985151d7e03688e2b0a0ed33701789d40c.
-  Original blob SHAs: multiframe.py b1f75615d0acdb3bd27e1efeda534addc2b622f3; structure.py f5922c5d7dfdaebb6d0f6a8c1dcf1b1071c7c41b.
-  features.py contains only the verbatim minimal_features function from
-  original features.py blob e682a304c493b1ff8c78a67980f51096056451ab, with its stdlib imports. No
-  pandas/config/desktop dependencies and no runtime import from the research
-  repo. Do not change thresholds or state transitions. Research version
-  MA55_MULTIFRAME_R1_RESEARCH_V1 is not frozen production.
-- ma55_levels.py is display-only: true per-period MA55, same-basis price,
-  completed target proof, unavailable/stale distinct from zero, sorted upper
-  levels; no other MAs, no SELL or cross-period BUY veto.
-- The build allowlist includes the new files; the existing package is not
-  rebuilt or installed by this seed. The synthetic research tests are copied
-  with import adjustment only; optional private frozen-pack tests remain in
-  research. Run them and the targeted application tests in Windows nga.
+## 板块和细分
 
-Remaining: wire verified THS transport and budget into a single plugin worker;
-scope all queues/status and publications; build causal 15/30/60/120m/day/week
-input with calendar, factor and gap evidence; persist versioned observations
-and dedup events; connect focus controls, reuse the chart component under
-lan.ma55, verify compatibility/deep links before disabling lan.kline.
-No host source changes, no main changes, no raw data or credentials.
+实读两份同花顺目录，行业 320 项、概念 390 项。精确名称命中消费电子 `881124.TI`、半导体材料 `884091.TI`、光刻胶 `885864.TI`、光刻机 `886054.TI`。两个成分探针核实光刻胶 82 只、光刻机 52 只。目录及成分响应的 `data.timestamp` 随请求更新，工作台显示为源时间，保存核验时刻单列。实测响应报告 `X-RateLimit-Limit: 15`，插件自身 THS 每分钟限额默认 12。 [同花顺指数接口](https://fuyao.aicubes.cn/docs/api-reference/a-share-index/)
+
+| 方向 | 可按独立代码查询的候选 |
+| --- | --- |
+| 物理 AI | 人形机器人 `886069.TI`、机器视觉 `886002.TI`、传感器 `885946.TI` |
+| 端侧 | AI 手机 `886070.TI`、AIPC `886071.TI`、AI 眼镜 `886085.TI`、智能穿戴 `885454.TI` |
+| 消费电子细分 | 消费电子零部件及组装 `884098.TI`、品牌消费电子 `884230.TI` |
+| 国产算力 | 华为昇腾 `886058.TI`、华为鲲鹏 `885980.TI` |
+
+同花顺 iNews 另有 AI 眼镜的光学组件与芯片、光刻胶的半导体光刻胶与 PCB 光刻胶、光刻机的光源与光学系统，以及东数西算下的华为系算力。现有授权目录仅返回名称和代码。这些专题二级条目未获得独立的成员查询代码，工作台可选项以实际返回的板块身份为准。 [AI 眼镜细分](https://stock.10jqka.com.cn/20260922/c680177439.shtml) · [光刻胶细分](https://news.10jqka.com.cn/field/20260728/678491753.shtml) · [光刻机细分](https://news.10jqka.com.cn/field/20250919/671273719.shtml) · [华为系算力](https://stock.10jqka.com.cn/20260302/c675020398.shtml)
+
+## 行情、规则和验收
+
+- 两个已核实板块各抽两只。五个真实 TickFlow HTTP 均返回 200，分别取校验指数日历、证券元数据、四只原生 15m、因子、四只原价日 K。四只均得到 1,275 根 15m，日 K 为 990–1,000 根。24 个证券周期中 23 个就绪，1 个因日线缺口阻塞周线。23 个就绪结果与各自图表末根 MA55 数值一致。日线完成目标为 11 月 24 日 15:00，周线为 11 月 20 日 15:00。
+- 研究版本 `4440e1985151d7e03688e2b0a0ed33701789d40c`，规则 `MA55_MULTIFRAME_R1_RESEARCH_V1`。种子中的 `multiframe.py` 和 `structure.py` 分别保持 blob `b1f75615d0acdb3bd27e1efeda534addc2b622f3` 和 `f5922c5d7dfdaebb6d0f6a8c1dcf1b1071c7c41b`，`features.py` 同样保持种子原样。19 项研究合成回归通过。真实四股检验使用盘后 REPLAY，盘中新事件首次发现与全关注池持续运行仍需交易时段验证。
+- Windows `nga` 中用 `python -B -m pytest -q -p no:cacheprovider` 运行 11 个直接关联的后端测试文件，120 通过、0 失败、0 跳过。定向 Ruff 通过，原样研究模块保留上游格式。MA55、题材深链和行业页面定向 Node 测试分别为 22、13、31 通过。只构建三个涉及的个人插件页面，MA55 ZIP 含一份前端产物及完整研究子包。
+- Edge 在真实 v0.3.36 验收宿主中通过官方导入预检、保存真实光刻机板块的回执，观察到 52 只完整成分。使用已缓存的真实样本单击股票、切换六周期并定位 30m 确认柱，检查 1440px 亮色和 780px 暗色界面。盘后验收环境使用独立数据目录。
+- 2026 年周末和休市日按交易所公告判定，历史用校验指数实际交易日。公告覆盖以外的提前排程需补充对应年度公告。 [休市公告](https://www.sse.com.cn/disclosure/announcement/general/c/c_20251222_10802507.shtml)
+
+## 迁移和启用
+
+一致性备份副本已完成 additive 迁移演练。冻结 BUY 和风险各 48,982 行、旧原生候选和风险各 16,380 行逐行相同。旧 15m 行情 2,282,749 行、原生 15m 行情 9,650,189 行，迁移前后行数相同。用两类存量实盘事件的真实深链在 Edge 成功显示 250 根归档柱并定位原确认时刻，归档查看产生零供应商行情请求。
+
+正式安装由本机审批单独放行。备份、已安装扩展回退状态、请求收据和必要截图保存在本机私有证据目录。启用时继续使用原 SQLite，回退顺序见 README。

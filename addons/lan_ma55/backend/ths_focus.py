@@ -4,6 +4,8 @@ request(path, params) is an authenticated, budgeted GET returning decoded JSON.
 The owner supplies the authorized transport and scheduling; this module never
 retries or switches providers. The public contract is the THS Fuyao index API.
 """
+import httpx
+
 from .focus_pool import KINDS, KEY, ScopeConflict, decode_catalog, decode_members
 
 CATALOG = "/api/a-share-index/catalog/ths-index-list"
@@ -53,10 +55,17 @@ def refresh_selection(pool, selection, catalog, request, *, expected_revision,
                            snapshot["observed_ms"] < before["observed_ms"]):
                 raise ValueError("Older membership")
             fresh.append(snapshot)
-        except Exception as exc:
+        except (ValueError, httpx.HTTPError) as exc:
             # Do not serialize supplier errors or credentials into UI payloads.
-            errors[key] = type(exc).__name__
+            errors[key] = exc.reason if isinstance(exc, THSUnavailable) else "THS_MEMBER_UNVERIFIED"
             if before is None:
-                raise ValueError(f"New board membership unverified: {key}") from None
+                raise THSUnavailable(errors[key], key) from None
     result = pool.apply(keys, fresh, expected_revision=expected_revision)
     return dict(result, sector_errors=errors)
+
+
+class THSUnavailable(ValueError):
+    def __init__(self, reason, board=None):
+        self.reason = reason
+        self.board = board
+        super().__init__(f"{reason}: {board}" if board else reason)

@@ -63,11 +63,11 @@ def test_failed_new_and_retained_refresh(tmp_path):
     before = pool.read()
     fetch.members[A.split(":")[1]] = []
     fetch.members[B.split(":")[1]] = []
-    with pytest.raises(ValueError, match="New board membership"):
+    with pytest.raises(ValueError, match="THS_MEMBER_UNVERIFIED"):
         apply([A, B])
     assert pool.read() == before
     result = apply([A], True)
-    assert result["sector_errors"] == {A: "ValueError"}
+    assert result["sector_errors"] == {A: "THS_MEMBER_UNVERIFIED"}
     assert pool.read() == before
     with pytest.raises(ScopeConflict):
         refresh_selection(pool, [], catalog, fetch, expected_revision=0, observed_ms=200)

@@ -11,6 +11,7 @@ import httpx
 from tickflow import TickFlow, TickFlowError
 
 from .market_grid import BEIJING, as_ms, latest_point, normalize_five, wall, now_cn
+from .multiframe_input import DAILY_HISTORY, normalize_daily
 from .native15_shadow import normalize_native
 from .request_budget import (
     CollectionStopped,
@@ -40,6 +41,7 @@ class Collector:
         limit=8,
         host_busy=None,
         cold_budget=None,
+        scope=None,
     ):
         if not 1 <= limit <= 12:
             raise ValueError("Plugin minute budget must be 1..12 requests/minute")
@@ -47,7 +49,9 @@ class Collector:
         self.report = report or (lambda **values: None)
         self.host_busy = host_busy or (lambda: False)
         self.cold_budget = cold_budget
+        self.scope = scope
         self.request_cold = False
+        self.calendar_request = False
         self.tf = client or TickFlow(
             api_key=key, max_retries=0, timeout=20, cache_dir=str(cache_dir)
         )
@@ -65,16 +69,29 @@ class Collector:
         hooks["response"].append(self.observe)
 
     def before_request(self, request):
+        period = request.url.params.get("period")
+        try:
+            body = json.loads(request.content) if request.content else {}
+        except ValueError:
+            body = {}
+        symbols = body.get("symbols") or [
+            s for s in request.url.params.get("symbols", "").split(",") if s
+        ]
         if self.host_busy():
             self.report(phase="HOST_BUSY", wait_seconds=10)
             raise RequestDeferred(monotonic() + 10)
         minute = (
             request.url.path.endswith("/klines/batch")
-            and request.url.params.get("period") in ("1m", "5m", "10m", "15m", "30m", "60m")
+            and period in ("1m", "5m", "10m", "15m", "30m", "60m")
         )
         factor = request.url.path.endswith("/klines/ex-factors")
-        budgets = [self.budgets["minute" if minute or factor else "metadata"]]
-        if minute and self.request_cold and self.cold_budget is not None:
+        daily = request.url.path.endswith("/klines/batch") and period == "1d" and not self.calendar_request
+        collection = minute or factor or daily
+        if self.scope is not None and collection:
+            if not symbols or not set(symbols) <= self.scope() or (minute and period != "15m"):
+                raise ValueError("OUTSIDE_VERIFIED_FOCUS_SCOPE")
+        budgets = [self.budgets["minute" if collection else "metadata"]]
+        if collection and self.request_cold and self.cold_budget is not None:
             budgets.append(self.cold_budget)
         delay = max(b.delay() for b in budgets)
         if delay > 0:
@@ -83,18 +100,13 @@ class Collector:
         began = monotonic()
         for budget in budgets:
             budget.acquire(self.stop, lambda delay: self.report(phase="QUOTA_WAIT", wait_seconds=round(delay, 2)))
-        try:
-            body = json.loads(request.content) if request.content else {}
-        except ValueError:
-            body = {}
-        symbols = body.get("symbols") or [
-            s for s in request.url.params.get("symbols", "").split(",") if s
-        ]
         request.extensions["lan_measure"] = dict(
             started=monotonic(),
             endpoint=request.url.path,
             capability="kline.minute.batch"
             if minute
+            else "kline.daily.batch"
+            if daily
             else "adj_factor"
             if "ex-factors" in request.url.path
             else "metadata",
@@ -105,7 +117,7 @@ class Collector:
         with self.lock:
             self.metrics["http_requests"] += 1
             self.metrics["minute_requests"] += int(minute)
-            self.metrics["collection_requests"] += int(minute or factor)
+            self.metrics["collection_requests"] += int(collection)
             self.metrics[
                 "period_" + (request.url.params.get("period") or "metadata")
             ] += 1
@@ -191,17 +203,44 @@ class Collector:
         return rows
 
     def calendar(self):
-        data = self.request(
-            lambda: self.tf.klines.get(
-                "000001.SH", period="1d", count=300, adjust="none"
-            )
-        )
+        self.calendar_request = True
+        try:
+            source = self.request(lambda: self.tf.klines.batch(
+                ["000001.SH"], period="1d", count=DAILY_HISTORY, adjust="none", max_workers=1,
+            ))
+        finally:
+            self.calendar_request = False
+        data = source.get("000001.SH")
+        if not data or not data.get("timestamp"):
+            raise ValueError("EXCHANGE_CALENDAR_MISSING")
         return sorted(
             {
                 str(datetime.fromtimestamp(t / 1000, BEIJING).date())
                 for t in data["timestamp"]
             }
         )
+
+    def fetch_daily(self, symbols, start, end, *, count, cold=False):
+        if not 1 <= len(symbols) <= (16 if cold else 100) or not 1 <= count <= DAILY_HISTORY:
+            raise ValueError("Daily batch exceeds the scheduled request window")
+        data = self.request(lambda: self.tf.klines.batch(
+            symbols, period="1d", adjust="none", start_time=as_ms(start[:10]),
+            end_time=as_ms(end), count=count, as_dataframe=False, batch_size=100, max_workers=1,
+        ), cold=cold)
+        if set(data) - set(symbols):
+            raise ValueError("UNREQUESTED_SYMBOL")
+        bars, errors = {}, {}
+        for symbol in symbols:
+            if data.get(symbol) is None:
+                errors[symbol] = "SOURCE_UNAVAILABLE"
+                continue
+            try:
+                bars[symbol] = normalize_daily(data[symbol], start, end)
+                if not bars[symbol]:
+                    errors[symbol] = "DAILY_SOURCE_PENDING"
+            except (KeyError, TypeError, ValueError, OverflowError):
+                errors[symbol] = "INVALID_DAILY_SCHEMA"
+        return bars, errors
 
     def session_evidence(self, now):
         """Confirm today with completed native15; no 5m session probe."""

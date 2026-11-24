@@ -79,7 +79,7 @@ export function mountIndustry(el,ctx,{now=beijingNow}={}) {
           <div class="sf-members">${filtered.slice(state.memberPage*15,(state.memberPage+1)*15).map(stock=>`<article class="sf-stock" data-symbol="${esc(stock.symbol)}">
             <div class="sf-stock-header"><div><strong>${esc(stock.name||stock.symbol)}</strong><small> ${esc(stock.symbol)}</small></div><button data-preview="${esc(stock.symbol)}">个股详情</button></div>
             <small>${stock.industries.length?`所属行业：${esc(stock.industries.join('、'))}`:'无已核实行业归属；ETF等未强行贴标签'}</small>
-            <div class="sf-events">${stock.events.map(event=>`${state.input?.workbench?`<a class="sf-event" data-candidate="${esc(event.event_id)}" href="${esc(workbenchLink(event))}" target="_blank" rel="noreferrer">`:'<span class="sf-event">'}
+            <div class="sf-events">${stock.events.map(event=>`${state.input?.workbench?`<a class="sf-event" data-candidate="${esc(event.event_id)}" href="${esc(workbenchLink(event,state.input.workbenchPath))}" target="_blank" rel="noreferrer">`:'<span class="sf-event">'}
               ${esc(event.confirmed_at)} · ${esc(event.mode||'UNKNOWN')} / ${modeLabel(event.mode)} · 15m
               <small> ${esc(event.source_id)} · ${esc(event.market_date)}</small><code>${esc(event.event_id)}</code>${state.input?.workbench?'</a>':'</span>'}`).join('')||`<small>${candidateReady?'该证券没有当日已发布原生15m候选。':'候选源暂不可用，不能判断该证券是否有候选。'}</small>`}</div></article>`).join('')||`<p class="sf-empty">${candidateReady?'本行业当前没有对应原生15m候选；可切换“全部成分”。':esc(candidateNotice)}</p>`}</div>
           ${state.input&&!state.input.workbench?`<p class="sf-warning">${state.input.workbench===null?'15m工作台状态暂不可用':'15m工作台未启用'}，可使用官方个股详情。</p>`:''}

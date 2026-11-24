@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from addons.lan_ma55.backend.focus_pool import FocusPool, ScopeConflict, decode_catalog, decode_members
@@ -80,13 +81,13 @@ class TestFocusPool(unittest.TestCase):
         self.assertEqual(self.pool.read()["members"], {})
 
     def test_persistence_and_no_cache_deletion(self):
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn, conn:
             conn.execute("CREATE TABLE existing_bars(symbol TEXT)")
             conn.execute("INSERT INTO existing_bars VALUES (?)", (X,))
         self.apply([A], [snap(A, [X])])
         self.assertEqual(FocusPool(self.path).read()["members"], {X: [A]})
         self.apply([])
-        with sqlite3.connect(self.path) as conn:
+        with closing(sqlite3.connect(self.path)) as conn:
             self.assertEqual(conn.execute("SELECT symbol FROM existing_bars").fetchall(), [(X,)])
 
 

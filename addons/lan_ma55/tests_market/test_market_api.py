@@ -1,3 +1,4 @@
+from threading import Lock
 from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -9,11 +10,12 @@ def test_v2_is_bounded_and_keeps_saved_history_when_writer_stops(tmp_path, monke
     days, rows = sample(250)
     store = opened(tmp_path, days)
     put(store, rows, days)
-    demands = []
     worker = SimpleNamespace(
         store=store,
         status=lambda: dict(api_version=1, phase="SOURCE_UNAVAILABLE"),
-        demand_cache=lambda values: demands.extend(values),
+        lock=Lock(),
+        view=dict(rows=[dict(symbol="600000.SH")], focus=dict(revision=1),
+                  summary=dict(target_15m=max(rows))),
     )
     monkeypatch.setattr(extension, "worker", worker)
     app = FastAPI()

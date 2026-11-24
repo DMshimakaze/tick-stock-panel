@@ -1,4 +1,4 @@
-import {INDUSTRY,FIELD} from './model.mjs';
+import {INDUSTRY,FIELD,workbenchRoute} from './model.mjs';
 
 export function beijingNow() {
   return new Date().toLocaleString('sv-SE',{timeZone:'Asia/Shanghai'});
@@ -47,8 +47,9 @@ export async function loadInputs(api,now=beijingNow()) {
   ]);
   if(!sources.day)sources.day={ok:false,error:'原生状态不可用，未请求day',read_at:null,as_of:null,total:null,received:null,http_status:null};
   if(rotation&&!rotation.dates.length)errors.push('行业RPS返回空矩阵；尚未取得20个真实交易日。');
+  const workbenchPath=pages?workbenchRoute(pages):null;
   return {config:configs?.items.find(c=>c.id===INDUSTRY)||{id:INDUSTRY},membership,market,summary,day,
-    rotation,now,errors,sources,workbench:pages?pages.some(p=>p.enabled&&!p.error&&(p.path==='/lan-kline'||p.managed_by==='lan.kline')):null};
+    rotation,now,errors,sources,workbench:pages?Boolean(workbenchPath):null,workbenchPath};
 }
 
 /** dimension-members can match separator fragments. The saved exact snapshot

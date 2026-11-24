@@ -1,4 +1,4 @@
-import {R1,V5,STATUS,TREE,MAX_PARTS,readRows,assembleThemes,ProjectionModel,workbenchLink,readDay} from './model.mjs';
+import {R1,V5,STATUS,TREE,MAX_PARTS,readRows,assembleThemes,ProjectionModel,workbenchLink,workbenchRoute,readDay} from './model.mjs';
 import {CSS,esc} from './view.mjs';
 
 const sourceLabel=m=>({REPLAY:'历史重放',LIVE:'实时确认',DELAYED:'延迟确认'}[m]||'未标明');
@@ -54,7 +54,7 @@ export function mountTheme(el,ctx) {
         ${model.workbench!=='enabled'?'<p class="lt-warning">分钟K工作台未启用或状态未确认；可使用官方个股详情。</p>':''}
         <div class="lt-table"><table><thead><tr><th>股票 / 归属</th><th>确认 / 来源</th><th>支撑 / 防守</th></tr></thead><tbody>${shown.map((item,i)=>{
           const e=item.event,links=d.index.get(item.symbol)||[];
-          return `<tr data-event-id="${esc(e?.event_id||'')}"><td>${model.workbench==='enabled'?`<a href="${esc(workbenchLink(item.symbol,e))}">${esc(item.name||item.symbol)}</a>`:`<span>${esc(item.name||item.symbol)}</span>`}<small style="display:block">${esc(item.symbol)}</small><button data-reverse="${esc(item.symbol)}">反查归属</button>${links.map(({theme,member})=>`<span class="lt-path">${esc(theme.theme_name)} · ${esc(member.branch_path.join(' / ')||'细分未确认')}</span>`).join('')||'<span class="lt-path">本快照无已验证标签</span>'}</td>
+          return `<tr data-event-id="${esc(e?.event_id||'')}"><td>${model.workbench==='enabled'?`<a href="${esc(workbenchLink(item.symbol,e,model.workbenchPath))}">${esc(item.name||item.symbol)}</a>`:`<span>${esc(item.name||item.symbol)}</span>`}<small style="display:block">${esc(item.symbol)}</small><button data-reverse="${esc(item.symbol)}">反查归属</button>${links.map(({theme,member})=>`<span class="lt-path">${esc(theme.theme_name)} · ${esc(member.branch_path.join(' / ')||'细分未确认')}</span>`).join('')||'<span class="lt-path">本快照无已验证标签</span>'}</td>
             <td>${e?`${esc(e.confirmed_at)}<br><span class="lt-flag">${esc(sourceLabel(e.mode))}</span><small style="display:block">${esc(e.rule_version)}</small><details><summary>确认事实</summary><span class="lt-event">${esc(e.event_id)}</span><p>首次保存 ${esc(e.first_seen_at||'未提供')}</p></details>`:`WATCH · ${esc(item.row.bar_end)}<br><small>${esc(item.watch_rule||'历史规则未知')} · 来源未知</small>`}</td>
             <td>${esc(e?.setup_at||'未确认')}<br>防守 ${esc(e?.defense??'—')}<br><button data-preview="${model.page*40+i}" ${ctx.ui?.openStockPreview?'':'disabled'}>官方个股详情</button></td></tr>`;
         }).join('')}</tbody></table>${shown.length?'':`<div class="lt-empty">${model.loading?'正在读取已发布数据…':!s?.snapshot_id&&model.scope==='matched'?'待导入合法题材快照后显示交集':'所选条件下没有已发布'+(model.tab==='BUY'?'确认':'观察')+'。'}</div>`}</div>
@@ -82,8 +82,9 @@ export function mountTheme(el,ctx) {
       const day=await readDay(ctx.api,selectedDate,summary,candidateHistory);
       if(disposed||id!==request) return;
       projection.update({status,themes,summary,date:selectedDate,rows:day.rows});
+      const workbenchPath=workbenchRoute(pages);
       Object.assign(model,{status,summary,date:selectedDate,themes,rows:day.rows,cycle:day.cycle,error:'',
-        workbench:pages.some(p=>p.enabled&&!p.error&&(p.path==='/lan-kline'||p.managed_by==='lan.kline'))?'enabled':'disabled'});
+        workbench:workbenchPath?'enabled':'disabled',workbenchPath});
       treeSnapshot=status?.snapshot_id;
       history=candidateHistory;historyRevision=revision;
       if(model.themeId&&!themes.some(t=>t.theme_id===model.themeId)) {model.themeId='';model.branch='';}

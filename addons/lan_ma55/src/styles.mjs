@@ -14,3 +14,26 @@ export const CSS = `
 @container(max-width:540px){.mr .mr-diagnostic-groups{grid-template-columns:minmax(0,1fr)}.mr .mr-kpis{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.mr .mr-kpi{padding:12px;min-height:110px}.mr .mr-kpi>strong{font-size:25px}.mr .mr-runtime-detail dl{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:650px){.mr{padding:12px 10px 24px}.mr .mr-header{align-items:flex-start;gap:8px}.mr .mr-heading{padding-left:38px}.mr h1{font-size:20px}.mr .mr-title{gap:6px}.mr .mr-header>button{font-size:11px;padding-inline:7px}.mr .mr-heading>p{font-size:12px}.mr .mr-runtime{padding:11px;gap:8px;grid-template-columns:minmax(0,1fr)}.mr .mr-runtime-end{display:flex;gap:12px;justify-content:space-between;flex-wrap:wrap;min-width:0;text-align:left}.mr .mr-runtime-detail dl{width:100%}.mr .mr-tools input{flex:1 1 100%;width:100%;min-width:0;order:1}.mr .mr-tools [data-action=search],.mr .mr-tools [data-action=clear]{order:2}.mr th,.mr td{padding:8px}.mr :is(th,td):nth-child(3){font-size:11px;white-space:normal;width:105px}.mr .mr-tabs{gap:16px}}
 `;
+
+export const WORKBENCH_CSS = `
+.mr-workbench [hidden]{display:none!important}.mr-workbench .mr-error:empty{display:none}
+.mr-workbench .mr-coverage{display:flex;flex-wrap:wrap;gap:8px 24px;margin:12px 0;font-size:12px;color:var(--mr-muted)}
+.mr-workbench .mr-coverage strong{padding-left:4px;color:hsl(var(--fg-primary));font-variant-numeric:tabular-nums}
+.mr-workbench .mr-focus-chip{display:inline-flex;gap:2px}.mr-workbench .mr-focus-chip button{color:var(--mr-muted)}
+.mr-workbench .mr-focus-list{max-height:460px;overflow:auto}.mr-workbench .mr-focus-list table{min-width:760px}
+.mr-workbench .mr-focus-list th{position:sticky;top:0;z-index:1}.mr-workbench .mr-focus-list th,.mr-workbench .mr-focus-list td{padding:6px 9px;white-space:nowrap}
+.mr-workbench .mr-focus-list :is(th,td):nth-child(n+3):nth-child(-n+8){text-align:center}.mr-workbench .mr-focus-list tr.selected{background:hsl(var(--accent)/.11)}
+.mr-workbench .mr-stock-name,.mr-workbench .mr-frame{background:transparent;border-color:transparent;padding:2px 5px;min-height:25px}
+.mr-workbench .mr-stock-name{font-weight:550;padding-left:0}.mr-workbench .mr-frame{font-size:12px}.mr-workbench .mr-frame[data-state="候选"]{color:var(--mr-blue);background:hsl(var(--accent)/.12)}
+.mr-workbench .mr-frame[data-state="反压"]{color:hsl(var(--warning))}.mr-workbench .mr-frame:is([data-state="待补"],[data-state="—"]){color:var(--mr-muted)}
+.mr-workbench .mr-rise{color:hsl(var(--bull))}.mr-workbench .mr-fall{color:hsl(var(--bear))}
+.mr-workbench .mr-chart-heading,.mr-workbench .mr-controls{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.mr-workbench .mr-chart-heading{justify-content:space-between}.mr-workbench [data-period][aria-pressed="true"]{color:var(--mr-blue);border-color:var(--mr-blue)}
+.mr-workbench .mr-chart-panel input[type="checkbox"]{flex:none;min-width:0;min-height:0;width:auto}.mr-workbench .mr-chart-body{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,250px);gap:12px;margin-top:8px}
+.mr-workbench [data-role="levels"]:empty{display:none}.mr-workbench .mr-chart-body:has(>[data-role="levels"]:empty,>.mr-canvas[hidden]){grid-template-columns:minmax(0,1fr)}
+.mr-workbench .mr-canvas{min-width:0;height:360px;color:var(--mr-muted)}.mr-workbench .mr-readout{font:11px/1.5 var(--mr-mono);color:var(--mr-muted);min-height:1.5em}
+.mr-workbench .mr-levels{border:1px solid var(--mr-line);border-radius:6px;padding:8px}.mr-workbench .mr-levels>div{display:grid;grid-template-columns:42px 1fr;column-gap:8px;border-top:1px solid var(--mr-line);padding:4px 2px}
+.mr-workbench .mr-levels h2{margin-bottom:4px}.mr-workbench .mr-levels small{grid-column:1/-1;color:var(--mr-muted)}.mr-workbench .mr-levels span{text-align:right;font-variant-numeric:tabular-nums}
+.mr-workbench [data-role="archive-list"] p{margin-top:5px}.mr-workbench summary{cursor:pointer}
+@container(max-width:720px){.mr-workbench .mr-chart-body{grid-template-columns:minmax(0,1fr)}.mr-workbench .mr-canvas{height:305px}}
+`;

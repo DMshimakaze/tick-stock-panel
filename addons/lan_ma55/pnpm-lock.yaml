@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      lightweight-charts:
+        specifier: 5.2.1
+        version: 5.2.1
     devDependencies:
       jsdom:
         specifier: 26.1.0
@@ -352,6 +356,9 @@ packages:
     engines: {node: '>=12'}
     hasBin: true
 
+  fancy-canvas@2.1.0:
+    resolution: {integrity: sha512-nifxXJ95JNLFR2NgRV4/MxVP45G9909wJTEKz5fg/TZS20JJZA6hfgRVh/bC9bwl2zBtBNcYPjiBE4njQHVBwQ==}
+
   fsevents@2.3.3:
     resolution: {integrity: sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==}
     engines: {node: ^8.16.0 || ^10.6.0 || >=11.0.0}
@@ -384,6 +391,9 @@ packages:
     peerDependenciesMeta:
       canvas:
         optional: true
+
+  lightweight-charts@5.2.1:
+    resolution: {integrity: sha512-IVwoK1RLFiLPubaKIjNbtjWLnpPMqiABSrTay6whmNa8L1+19292VtHJ+BWyPUuLCwF0tcQlhEWd1CLB2a1nsQ==}
 
   lru-cache@10.4.3:
     resolution: {integrity: sha512-JNAzZcXrCt42VGLuYz0zfAzDfAvJWW6AfYlDBQyDV5DClI2m5sAmK+OIO7s59XfsRsWHp02jAJrRadPRGTt6SQ==}
@@ -746,6 +756,8 @@ snapshots:
       '@esbuild/win32-ia32': 0.21.5
       '@esbuild/win32-x64': 0.21.5
 
+  fancy-canvas@2.1.0: {}
+
   fsevents@2.3.3:
     optional: true
 
@@ -799,6 +811,10 @@ snapshots:
       - bufferutil
       - supports-color
       - utf-8-validate
+
+  lightweight-charts@5.2.1:
+    dependencies:
+      fancy-canvas: 2.1.0
 
   lru-cache@10.4.3: {}
 

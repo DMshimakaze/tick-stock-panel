@@ -108,7 +108,7 @@ export function statistics(summary,buys,watches,index) {
     labelledStocks:[...unique].filter(s=>index.has(s)).length};
 }
 
-export function workbenchLink(symbol,event) {
+export function workbenchLink(symbol,event,path='/lan-kline') {
   const params=new URLSearchParams({symbol,period:'15m'});
   for(const [source,key] of [['confirmed_at','event'],['setup_at','setup']]) if(event?.[source]) params.set(key,event[source].replace(' ','T'));
   if(event?.defense>0) params.set('defense',String(event.defense));
@@ -116,11 +116,21 @@ export function workbenchLink(symbol,event) {
   if (event?.event_id) params.set('event_id', event.event_id);
   if (event?.rule_version) params.set('rule_version', event.rule_version);
   if (event) params.set('source', event.source_id || 'QUANTDASH_LEGACY');
+  else if (path === '/lan-ma55') params.set('source', 'native');
   if (event?.basis_id) params.set('basis_id', event.basis_id);
   if (event?.factor_revision !== undefined) params.set('factor_revision', String(event.factor_revision));
   if (event?.basis_revision !== undefined) params.set('basis_revision', String(event.basis_revision));
   if (event?.risk_text) params.set('risk', event.risk_text);
-  return '/lan-kline?'+params;
+  return path+'?'+params;
+}
+
+export function workbenchRoute(pages) {
+  const available = pages.filter(page => page.enabled && !page.error);
+  if (available.some(page => {
+    const [major, minor] = (page.version || '').split('.').map(Number);
+    return page.managed_by === 'lan.ma55' && (major > 0 || (major === 0 && minor >= 10));
+  })) return '/lan-ma55';
+  return available.some(page => page.path === '/lan-kline' || page.managed_by === 'lan.kline') ? '/lan-kline' : null;
 }
 
 export async function readDay(api,date,summary,historyCache) {

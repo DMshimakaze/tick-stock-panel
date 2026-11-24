@@ -1,4 +1,5 @@
 import sys
+from time import monotonic, sleep
 from types import SimpleNamespace
 
 import httpx
@@ -57,11 +58,14 @@ def test_official_install_start_disable_uninstall_preserve_derived_data(
     assert preview["manifest"]["frontend"] == "frontend/extension.mjs"
     packages.install(archive.read_bytes(), preview["digest"], preview["revision"])
     app, client = boot(folder)
-    for module in list(sys.modules.values()):
-        if getattr(module, "EXTENSION_ID", None)=="lan.ma55" and getattr(module, "worker", None):
-            module.worker.thread.join(20)
-    status = client.get("/api/extensions/lan.ma55/status").json()
-    assert status["phase"] == "CREDENTIAL_REQUIRED"
+    deadline = monotonic() + 5
+    while True:
+        status = client.get("/api/extensions/lan.ma55/status").json()
+        if status["phase"] != "STARTING" or monotonic() >= deadline:
+            break
+        sleep(.02)
+    assert status["phase"] == "SCOPE_PAUSED"
+    assert status["worker_alive"]
     for module in list(sys.modules.values()):
         if getattr(module, "EXTENSION_ID", None)=="lan.ma55" and getattr(module, "worker", None):
             module.worker.close()
@@ -103,6 +107,9 @@ def test_official_install_start_disable_uninstall_preserve_derived_data(
     enabled_response = enabled.get("/api/extensions/lan.ma55/events")
     assert enabled_response.status_code == 200, (enabled_response.text, packages.list_installed({}))
     assert enabled_response.json()["total"] == 1
+    for module in list(sys.modules.values()):
+        if getattr(module, "EXTENSION_ID", None) == "lan.ma55" and getattr(module, "worker", None):
+            module.worker.close()
     packages.manage("lan.ma55", "remove")
     _, removed = boot(folder)
     assert removed.get("/api/extensions/lan.ma55/status").status_code == 404

@@ -103,6 +103,8 @@ class FocusPool:
             conn.execute("CREATE TABLE IF NOT EXISTS focus_scope_v1 ("
                          "id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, payload TEXT NOT NULL)")
             conn.execute("INSERT OR IGNORE INTO focus_scope_v1 VALUES (1, 0, '[]')")
+            conn.execute("CREATE TABLE IF NOT EXISTS focus_scope_history_v1 ("
+                         "revision INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
 
     @staticmethod
     def _read(conn):
@@ -146,12 +148,16 @@ class FocusPool:
                     raise ValueError("Older snapshot cannot replace newer membership")
                 sectors.append(after if after is not None else before)
             members = _union(sectors)
-            revision = old["revision"] + int(sectors != old["sectors"])
+            revision = old["revision"] + int(old["revision"] == 0 or sectors != old["sectors"])
+            payload = json.dumps(sectors, ensure_ascii=False)
             if revision != old["revision"]:
                 conn.execute("UPDATE focus_scope_v1 SET revision=?,payload=? WHERE id=1",
-                             (revision, json.dumps(sectors, ensure_ascii=False)))
+                             (revision, payload))
             before, after = set(old["members"]), set(members)
+            membership_changed = members != old["members"]
+            if membership_changed or keys != list(previous) or old["revision"] == 0:
+                conn.execute("INSERT INTO focus_scope_history_v1 VALUES (?,?)", (revision, payload))
             return dict(revision=revision, sectors=sectors, members=members,
                         added=sorted(after-before), removed=sorted(before-after),
                         retained=sorted(before & after),
-                        membership_changed=members != old["members"])
+                        membership_changed=membership_changed)

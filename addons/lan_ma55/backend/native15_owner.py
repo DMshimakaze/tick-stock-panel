@@ -51,7 +51,8 @@ class NativeOwner(UnifiedStore):
             self.set_meta("universe", overview)
             self.set_meta("sessions", self.market.meta("sessions", []))
 
-    def accept_batch(self, symbols, received, errors, *, sessions, start, end, now, factors, stage, live_after):
+    def accept_batch(self, symbols, received, errors, *, sessions, start, end, now, factors, stage, live_after,
+                     analyze_candidates=True):
         began = perf_counter()
         self.conn.execute("BEGIN IMMEDIATE")
         self.last_lock_wait_ms = (perf_counter()-began)*1000
@@ -82,7 +83,8 @@ class NativeOwner(UnifiedStore):
                     self.conn.execute("UPDATE native15_history_progress SET scanned_before=?,stop_reason=?,next_retry=? WHERE symbol=?",
                                       (start, stop, 0 if not stop else time()+(300 if stop == "GAP" else 86400), symbol))
             written = perf_counter()
-            self.analyze(symbols, sessions, self.meta("target", end), now, live_after, replay=stage == "C")
+            if analyze_candidates:
+                self.analyze(symbols, sessions, self.meta("target", end), now, live_after, replay=stage == "C")
             scanned = perf_counter()
             self.conn.commit()
             committed = perf_counter()
@@ -94,11 +96,12 @@ class NativeOwner(UnifiedStore):
             self.conn.rollback()
             raise
 
-    def accept_factors(self, symbols, factors, *, sessions, target, now, live_after):
+    def accept_factors(self, symbols, factors, *, sessions, target, now, live_after, analyze_candidates=True):
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             changed = [s for s in symbols if self.market.factor_response(s, factors.get(s), now, sessions)]
-            self.analyze(changed, sessions, target, now, live_after, replay=True)
+            if analyze_candidates:
+                self.analyze(changed, sessions, target, now, live_after, replay=True)
             self.market.set_meta("last_factor_check", now)
             if any(factors.get(s) is not None for s in symbols):
                 self.market.set_meta("last_factor_success", now)

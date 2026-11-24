@@ -1,7 +1,6 @@
-import { mountResults } from './results.mjs';
-export { mountResults };
+import { mountWorkbench } from './workbench.mjs';
 export default {
-  id: 'lan.ma55', apiVersion: 1, version: '0.9.8',
-  routes: [{ id: 'observer', path: '/lan-ma55', mount: mountResults }],
-  navigation: [{ id: 'observer', routeId: 'observer', label: 'MA55 原生15m候选', icon: 'Activity' }],
+  id: 'lan.ma55', apiVersion: 1, version: '0.10.0',
+  routes: [{ id: 'observer', path: '/lan-ma55', mount: mountWorkbench }],
+  navigation: [{ id: 'observer', routeId: 'observer', label: 'MA55 板块观察', icon: 'Activity' }],
 };

@@ -3,6 +3,17 @@ import assert from 'node:assert/strict';
 import * as m from '../src/model.mjs';
 import {rows,themes,status,treeRows,summary,date,sdk} from './fixtures.mjs';
 
+test('integrated event link takes precedence and keeps frozen source and time',()=>{
+  const route=m.workbenchRoute([{enabled:true,managed_by:'lan.kline',version:'3.3.0'},
+    {enabled:true,managed_by:'lan.ma55',version:'0.10.0'}]);
+  const url=new URL(m.workbenchLink('300863.SZ',{confirmed_at:'2026-11-06 15:00:00',event_id:'frozen'},route),'http://local');
+  assert.equal(url.pathname,'/lan-ma55');
+  assert.equal(url.searchParams.get('source'),'QUANTDASH_LEGACY');
+  assert.equal(url.searchParams.get('event'),'2026-11-06T15:00:00');
+  assert.equal(url.searchParams.get('event_id'),'frozen');
+  assert.equal(m.workbenchRoute([{enabled:true,managed_by:'lan.ma55',version:'0.9.8'}]),null);
+});
+
 test('double-bank snapshot assembles all parts and rejects truncation',()=>{
   assert.equal(m.assembleThemes(status,[...treeRows,{...treeRows[0],bank:'B',snapshot_id:'old'}]).length,2);
   assert.throws(()=>m.assembleThemes(status,treeRows.slice(1)),/完整/);

@@ -1,6 +1,28 @@
 """Read-only business status from independently committed market and analysis facts."""
 
 from .market_grid import SOURCE, wall
+from .multiframe_core.multiframe import TIMEFRAMES
+
+
+def observation_summary(rows, target, market_day):
+    readiness = dict.fromkeys(TIMEFRAMES, 0)
+    ready_symbols = candidates = 0
+    saved = None
+    for row in rows:
+        ready = any(frame["status"] == "READY" for frame in row["frames"].values())
+        candidate = any(frame["status"] == "READY" and
+                        (frame.get("result") or {}).get("latest", {}).get("event_id")
+                        for frame in row["frames"].values())
+        ready_symbols += ready
+        candidates += candidate
+        reference = row.get("reference")
+        if reference and (not saved or reference["at"] > saved):
+            saved = reference["at"]
+        for period, frame in row["frames"].items():
+            readiness[period] += frame["status"] == "READY"
+    return dict(market_day=market_day, target_15m=target, expected=len(rows), ready_symbols=ready_symbols,
+                candidate_symbols=candidates, blocked_symbols=len(rows) - ready_symbols,
+                ready_by_timeframe=readiness, latest_saved_15m=saved)
 
 
 ERROR_TEXT = {

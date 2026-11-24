@@ -12,6 +12,13 @@ NATIVE_SUMMARY_ID = "lan_ma55_native15_summary_v1"
 NATIVE_DAY_ID = "lan_ma55_native15_day_v1"
 NATIVE_HISTORY_ID = "lan_ma55_native15_history_v1"
 NATIVE_PRICES_ID = "lan_ma55_native15_prices_v1"
+WORKBENCH_ID = "lan_ma55_sector_workbench_v1"
+COMMAND_ID = "lan_ma55_sector_command_v1"
+RECEIPT_ID = "lan_ma55_sector_receipt_v1"
+COMMAND_SLOTS = 16
+COMMAND_LEASE_MS = 90_000
+COMMAND_FIELDS = [("scope", "string"), ("client_id", "string"), ("request_id", "string"),
+                  ("request_ms", "int"), ("payload_json", "string")]
 DAY_FIELDS = [
     ("symbol", "string"),
     ("name", "string"),
@@ -69,6 +76,19 @@ def view_configs():
                           description="NATIVE15_REVIEW_V1，独立候选投影，不写入历史冻结BUY契约。") for config in legacy]
 
 
+def workbench_configs():
+    return [
+        dict(id=table, label=label, mode="snapshot", market_level=True,
+             description="MA55 板块观察工作台；权威范围及行情保存在插件 SQLite。",
+             fields=[dict(name=n, dtype=t, label=n) for n, t in fields])
+        for table, label, fields in [
+            (WORKBENCH_ID, "MA55 板块观察", [("scope", "string"), ("payload_json", "string")]),
+            (COMMAND_ID, "MA55 观察请求", COMMAND_FIELDS),
+            (RECEIPT_ID, "MA55 观察回执", COMMAND_FIELDS),
+        ]
+    ]
+
+
 class Publisher:
     def __init__(self, base_url, token=None, *, session=None, transport=None, native=False):
         self.native = native
@@ -82,17 +102,18 @@ class Publisher:
             transport=transport,
         )
 
-    def prepare(self):
+    def prepare(self, configs=None):
         """Explicit installation step; never edits an unrelated existing table."""
         response = self.http.get("/api/ext-data")
         response.raise_for_status()
         existing = {r["id"]: r for r in response.json()["items"]}
-        for config in view_configs():
+        for config in view_configs() if configs is None else configs:
             if config["id"] in existing:
                 current = existing[config["id"]]
                 wanted = {(f["name"], f["dtype"]) for f in config["fields"]}
                 actual = {(f["name"], f["dtype"]) for f in current["fields"]}
-                if not wanted <= actual or current["mode"] != config["mode"]:
+                if (not wanted <= actual or current["mode"] != config["mode"] or
+                        current.get("market_level", False) != config["market_level"]):
                     raise ValueError("MA55 view ID already has a different schema")
                 continue
             result = self.http.post("/api/ext-data", json=config)
@@ -138,6 +159,11 @@ class Publisher:
         )
         response.raise_for_status()
         return response.json()
+
+    def rows(self, table, limit):
+        response = self.http.get(f"/api/ext-data/{table}/rows", params={"limit": limit})
+        response.raise_for_status()
+        return response.json()["rows"]
 
     def close(self):
         self.http.close()
