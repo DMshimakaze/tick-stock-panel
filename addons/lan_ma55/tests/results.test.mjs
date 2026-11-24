@@ -97,7 +97,7 @@ test('workbench link uses public enabled-page list, original symbol/time, and ke
 test('only the published-results page is registered in the installable manifest',async()=>{
  const extension=(await import('../src/extension.mjs')).default;
  const built=(await import('../dist/extension.js')).default;
- assert.equal(extension.version,'0.10.0');assert.equal(extension.id,'lan.ma55');
+ assert.equal(extension.version,'0.11.0');assert.equal(extension.id,'lan.ma55');
  assert.equal(extension.apiVersion,1);assert.equal(extension.routes[0].path,'/lan-ma55');
  assert.equal(typeof built.routes[0].mount,'function');assert.equal(built.version,extension.version);
  const url=new URL(workbenchUrl('600000.SH',{event_id:'saved-id',rule_version:'saved-rule',confirmed_at:'2026-11-06 10:00:00'}),'http://local');

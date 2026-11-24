@@ -2,13 +2,13 @@ format: tick-extension-package
 format_version: 1
 id: lan.ma55
 display_name: MA55 板块观察
-version: 0.10.0
+version: 0.11.0
 extension_api_version: 1
 author: DMshimakaze
 description: 同花顺关注板块、六周期 MA55 结构与同页 K 线观察。
 backend: backend.extension
 frontend: frontend/extension.mjs
-requires_app: '>=0.3.36,<0.3.37'
+requires_app: '>=0.4.1,<0.4.2'
 requires_python: '>=3.11'
 platforms: [any]
 requires: ['httpx>=0.28,<0.29', 'tickflow>=0.1.25,<0.2']

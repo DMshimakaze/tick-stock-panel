@@ -1,0 +1,12 @@
+# MA55 v0.11.0 development handoff
+
+This branch is a source migration candidate, not a verified Windows release.
+
+- Host: official TSP v0.4.1 commit 49a35c0cf89a9c2a665f9190b8aa347fde63c555.
+- Previous validated source baseline: f22a15f50572e8e3f751ae7acef786682f8b0bb8 (MA55 0.10.0).
+- Only lan.ma55 is an active personal addon in this checkout. Retired personal addon sources and the old QuantDash example are available in the previous branch/Git history. The offline DuckDB importer is moved into lan_ma55 and is not packaged. No installed plugin or user database has been deleted by these Git commits.
+- THS full inventory seed: ths_taxonomy.py stages both index catalogs and reverse membership coverage against a fixed stock universe. The documented reverse API does not guarantee a source timestamp; preserve NULL and record observed time separately. Direct board membership needs its own receipt. Do not label reverse coverage as verified hierarchy, actual source freshness or individually verified direct membership. Caller must prove the authorized source and cross-check sample boards before accepting bulk reverse data; fallback to direct board requests if coverage differs.
+- The seed is not wired into FocusOwner/runtime. The existing v0.10 behavior must not be mistaken for complete inventory integration. Add local selection and background maintenance; preserve the existing focus pool and all old events. No full-market K-line collection.
+- Search is generalized to names, codes, explicit aliases and verified hierarchy paths. Fuzzy or alias matches require explicit selection. Persist user-defined groups/aliases; do not invent hierarchy for index-only rows. The provider's catalog and reverse endpoints return flat identities, not parent IDs. Obtain an authorized hierarchy source or expose the missing coverage explicitly.
+- Current candidate manifest targets v0.4.1 only; test actual package inspection, installation, host SDK Ext Data reads/writes, owner startup, charts and data protection before production activation. Retire installed old personal packages via official managers only after proof. Preserve original plugin ZIPs, configs and databases locally for rollback. Do not disable a provider still used by host without first verifying replacement.
+- Research multiframe core unchanged. No actual market calls or Windows tests were executed by the GitHub seed author. See previous acceptance record for v0.10.0 only.
