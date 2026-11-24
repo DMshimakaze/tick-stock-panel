@@ -9,7 +9,7 @@ CAT = {A: "行业甲", B: "概念甲"}
 
 
 def response(*groups):
-    return {"code": 0, "data": {"timestamp": 100, "item": list(groups)}}
+    return {"code": 0, "data": {"item": list(groups)}}
 
 
 def group(symbol, keys):
@@ -48,23 +48,25 @@ def test_reverse_catalog_drift_rejected():
 def test_resume_and_atomic_visibility(tmp_path):
     store = TaxonomyStore(tmp_path / "state.sqlite3")
     begin(store)
-    store.accept_reverse("r1", [X], response(group(X, [A, B])))
+    store.accept_reverse("r1", [X], response(group(X, [A, B])), observed_ms=101)
     store = TaxonomyStore(store.path)
     begin(store)
     assert store.progress("r1")["pending_stocks"] == [Y]
     assert store.active() is None
     with pytest.raises(ValueError, match="incomplete"):
         store.reverse_candidate("r1")
-    store.accept_reverse("r1", [Y], response(group(Y, [A])))
+    store.accept_reverse("r1", [Y], response(group(Y, [A])), observed_ms=102)
     candidate = store.reverse_candidate("r1")
     assert candidate["boards"] == {A: sorted([X, Y]), B: [X]}
-    store.accept_board("r1", A, [X, Y], source_ms=100, observed_ms=101,
+    store.accept_board("r1", A, [X, Y], source_ms=None, observed_ms=102,
                        proof="BULK_REVERSE_CHECKED")
     with pytest.raises(ValueError, match="coverage"):
         store.publish("r1")
     direct(store, "r1", B, [X])
     store.publish("r1")
     assert store.active()["boards"][A]["symbols"] == sorted([X, Y])
+    assert store.active()["boards"][A]["source_ms"] is None
+    assert store.active()["boards"][A]["observed_ms"] == 102
     begin(store, "r2", 102)
     direct(store, "r2", A, [Y])
     assert store.active()["run"] == "r1"

@@ -9,7 +9,7 @@ import json
 import sqlite3
 from contextlib import closing
 
-from .focus_pool import KEY, KINDS, SYMBOL, _canonical, _items
+from .focus_pool import KEY, KINDS, SYMBOL, _canonical
 
 REVERSE = "/api/a-share-index/constituents/ths-index-list-by-stock"
 
@@ -21,7 +21,16 @@ def decode_reverse(requested, catalog, payload):
         raise ValueError("Reverse request must contain 1..100 unique stocks")
     for symbol in expected:
         _canonical(symbol, SYMBOL)
-    source_ms, items = _items(payload)
+    if not isinstance(payload, dict) or type(payload.get("code")) is not int or payload["code"] != 0:
+        raise ValueError("THS reverse request not successful")
+    data = payload.get("data")
+    if not isinstance(data, dict) or not isinstance(data.get("item"), list):
+        raise ValueError("THS response missing item list")
+    # Documented reverse responses have no source timestamp. Do not invent one.
+    source_ms = data.get("timestamp")
+    if source_ms is not None and (type(source_ms) is not int or source_ms <= 0):
+        raise ValueError("Invalid optional source timestamp")
+    items = data["item"]
     groups = {}
     for row in items:
         if not isinstance(row, dict):
@@ -67,11 +76,11 @@ class TaxonomyStore:
             );
             CREATE TABLE IF NOT EXISTS ths_map_reverse_v1 (
                 run TEXT NOT NULL, symbol TEXT NOT NULL, keys_json TEXT NOT NULL,
-                source_ms INTEGER NOT NULL, PRIMARY KEY(run,symbol)
+                source_ms INTEGER, observed_ms INTEGER NOT NULL, PRIMARY KEY(run,symbol)
             );
             CREATE TABLE IF NOT EXISTS ths_map_board_v1 (
                 run TEXT NOT NULL, board TEXT NOT NULL, symbols_json TEXT NOT NULL,
-                source_ms INTEGER NOT NULL, observed_ms INTEGER NOT NULL,
+                source_ms INTEGER, observed_ms INTEGER NOT NULL,
                 proof TEXT NOT NULL, PRIMARY KEY(run,board)
             );
             CREATE TABLE IF NOT EXISTS ths_map_active_v1 (
@@ -130,7 +139,9 @@ class TaxonomyStore:
                         board_total=len(catalog), board_ready=len(boards),
                         pending_stocks=sorted(stocks - seen), pending_boards=sorted(set(catalog) - boards))
 
-    def accept_reverse(self, run, requested, payload):
+    def accept_reverse(self, run, requested, payload, *, observed_ms):
+        if type(observed_ms) is not int or observed_ms <= 0:
+            raise ValueError("Missing reverse observation time")
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
             catalog, stocks, _ = self._run(db, run, staging=True)
@@ -139,12 +150,12 @@ class TaxonomyStore:
                 raise ValueError("Reverse stock outside fixed universe")
             for symbol, keys in groups.items():
                 prior = db.execute(
-                    "SELECT keys_json,source_ms FROM ths_map_reverse_v1 WHERE run=? AND symbol=?",
+                    "SELECT keys_json,source_ms,observed_ms FROM ths_map_reverse_v1 WHERE run=? AND symbol=?",
                     (run, symbol)).fetchone()
-                value = (_dump(keys), source)
+                value = (_dump(keys), source, observed_ms)
                 if prior is not None and prior != value:
                     raise ValueError("Conflicting reverse retry; start new generation")
-                db.execute("INSERT OR IGNORE INTO ths_map_reverse_v1 VALUES (?,?,?,?)",
+                db.execute("INSERT OR IGNORE INTO ths_map_reverse_v1 VALUES (?,?,?,?,?)",
                            (run, symbol, *value))
 
     def reverse_candidate(self, run):
@@ -157,17 +168,21 @@ class TaxonomyStore:
         """
         with closing(self.connect()) as db:
             catalog, stocks, _ = self._run(db, run)
-            rows = db.execute("SELECT symbol,keys_json,source_ms FROM ths_map_reverse_v1 WHERE run=?",
+            rows = db.execute("SELECT symbol,keys_json,source_ms,observed_ms FROM ths_map_reverse_v1 WHERE run=?",
                               (run,)).fetchall()
             if {row[0] for row in rows} != stocks:
                 raise ValueError("Reverse coverage incomplete")
             boards = {key: [] for key in catalog}
-            for symbol, keys, _ in rows:
+            for symbol, keys, _, _ in rows:
                 for key in json.loads(keys):
                     boards[key].append(symbol)
+            source_times = [row[2] for row in rows if row[2] is not None]
+            full_source_times = len(source_times) == len(rows)
             return dict(boards={key: sorted(v) for key, v in boards.items()},
-                        source_min_ms=min(row[2] for row in rows),
-                        source_max_ms=max(row[2] for row in rows))
+                        source_min_ms=min(source_times) if full_source_times else None,
+                        source_max_ms=max(source_times) if full_source_times else None,
+                        observed_min_ms=min(row[3] for row in rows),
+                        observed_max_ms=max(row[3] for row in rows))
 
     def accept_board(self, run, board, symbols, *, source_ms, observed_ms, proof):
         """Stage verified membership; direct empty response is explicitly marked.
@@ -178,15 +193,21 @@ class TaxonomyStore:
         """
         if proof not in ("DIRECT", "DIRECT_EMPTY", "BULK_REVERSE_CHECKED"):
             raise ValueError("Missing membership proof")
-        if any(type(v) is not int or v <= 0 for v in (source_ms, observed_ms)):
-            raise ValueError("Missing membership receipt")
+        if type(observed_ms) is not int or observed_ms <= 0:
+            raise ValueError("Missing membership observation time")
+        if source_ms is None:
+            if proof != "BULK_REVERSE_CHECKED":
+                raise ValueError("Direct membership needs source timestamp")
+        elif type(source_ms) is not int or source_ms <= 0:
+            raise ValueError("Invalid membership source time")
         members = sorted(set(_canonical(s, SYMBOL) for s in symbols))
         if (not members) != (proof == "DIRECT_EMPTY"):
             raise ValueError("Empty membership requires direct empty proof")
         if proof == "BULK_REVERSE_CHECKED":
             candidate = self.reverse_candidate(run)
             if (candidate["boards"].get(board) != members or
-                    source_ms != candidate["source_max_ms"]):
+                    source_ms != candidate["source_max_ms"] or
+                    observed_ms < candidate["observed_max_ms"]):
                 raise ValueError("Membership differs from complete reverse candidate")
         with closing(self.connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
