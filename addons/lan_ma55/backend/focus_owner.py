@@ -298,3 +298,22 @@ class FocusOwner:
             boards = sorted(boards)
             return dict(ok=True, symbol=symbol, total=len(boards), offset=offset, rows=boards[offset:offset + 50])
         raise ValueError("Invalid membership lookup")
+
+    def view(self, market_day):
+        active = self.taxonomy.active or {}
+        entries = self.catalog.get("entries", {}) or active.get("catalog", {})
+        boards = active.get("boards", {})
+        catalog = []
+        for key, name in {**active.get("catalog", {}), **entries}.items():
+            meta = {k: v for k, v in boards.get(key, {}).items() if k not in ("key", "name")}
+            catalog.append(dict(meta, key=key, name=name, hierarchy_status="UNVERIFIED",
+                                available=self.is_available(key, market_day), removed=key not in entries,
+                                aliases=self.snapshot["aliases"].get(key, [])))
+        taxonomy = self.taxonomy.status()
+        return dict(
+            **self.snapshot, catalog=catalog, taxonomy=taxonomy,
+            catalog_source_ms=self.catalog.get("source_ms") or active.get("source_ms", {}),
+            catalog_checked_day=self.catalog.get("checked_day"),
+            catalog_stale=(self.catalog.get("checked_day") or active.get("market_day")) != market_day,
+            catalog_error=taxonomy["error"], sector_errors=self.sector_errors, market_day=market_day,
+        )

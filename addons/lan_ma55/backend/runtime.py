@@ -12,7 +12,7 @@ import httpx
 from .collector import Collector, SourceError
 from .daily_store import DailyStore
 from .exchange_sessions import frame_schedules, planned_session
-from .focus_owner import FocusOwner
+from .dc_focus_owner import DCFocusOwner
 from .market_grid import (
     CAPACITY,
     now_cn,
@@ -81,11 +81,11 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.11.0", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.12.0", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
-            started_at=str(now_cn()), collection_scope="VERIFIED_THS_FOCUS",
+            started_at=str(now_cn()), collection_scope="VERIFIED_DC_FOCUS",
             minute_request_limit=self.minute_limit, cold_request_limit=self.cold_budget.limit,
         )
         credentials = dict(session=settings.get("api_session"))
@@ -107,7 +107,11 @@ class Worker:
         atexit.register(self.close)
 
     def active_scope(self):
-        return self.focus.snapshot["members"].keys() if self.focus else set()
+        if not self.focus:
+            return set()
+        universe = self.focus.taxonomy.active_scope()
+        scope = self.focus.snapshot["members"].keys() & universe
+        return scope if scope < universe else set()
 
     def report(self, **values):
         with self.lock:
@@ -212,8 +216,12 @@ class Worker:
     def publish(self, sessions, schedules, *, force=False):
         if not force and monotonic() - self.last_publication < 5:
             return
-        master = self.store.universe(self.active_scope())
-        rows = self.observations.rows(self.focus.snapshot, master, schedules)
+        scope = self.active_scope()
+        master = self.store.universe(scope)
+        snapshot = self.focus.snapshot
+        current = {**snapshot, "members": {symbol: boards for symbol, boards in snapshot["members"].items()
+                                           if symbol in scope}}
+        rows = self.observations.rows(current, master, schedules)
         target = schedules["15m"][-1] if schedules["15m"] else None
         market_day = sessions[-1] if sessions else None
         summary = observation_summary(rows, target, market_day)
@@ -246,9 +254,10 @@ class Worker:
             self.store = self.owner.market
             self.daily = DailyStore(self.owner.conn)
             self.observations = Observations(self.store, self.daily)
-            ths_key = (self.settings.get("ths_api_key") or os.environ.get("THS_API_TOKEN")
-                       or os.environ.get("LAN_MA55_THS_API_KEY") or os.environ.get("FUYAO_API_KEY"))
-            self.focus = FocusOwner(self.owner, ths_key, self.stop, int(self.settings.get("ths_requests_per_minute", 12)))
+            self.focus = DCFocusOwner(
+                self.owner, os.environ.get("TUSHARE_RELAY_TOKEN"), os.environ.get("TUSHARE_RELAY_URL"),
+                self.stop, int(self.settings.get("dc_requests_per_minute", 18)),
+            )
             self.bridge = WorkbenchBridge(self.owner, self.focus, self.observations, self.publisher)
             self.report(database_connected=True)
             key = self.settings.get("tickflow_api_key") or os.environ.get("TICKFLOW_API_KEY")

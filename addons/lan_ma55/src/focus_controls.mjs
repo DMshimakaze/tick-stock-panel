@@ -3,10 +3,11 @@ import { beijing } from './chart_model.mjs';
 import { SYMBOL, statusText } from './workbench_data.mjs';
 
 const normalize = value => String(value).normalize('NFKC').trim().toLowerCase();
-const INITIAL_DIRECTIONS = ['消费电子', '物理AI', '端侧', '半导体材料', '光刻胶', '光刻机', '国产算力'];
+const INITIAL_DIRECTIONS = ['端侧AI', '物理AI', '消费电子', '半导体材料', '半导体设备', '光刻胶', '光刻机', '交换机', '超节点'];
 const compact = value => normalize(value).replace(/[\s·/\\_\-]+/g, '');
 const codeOf = entry => entry.key.split(':').at(-1);
-const identity = entry => [entry.name, entry.key, codeOf(entry), codeOf(entry).replace(/\.TI$/, '')];
+const kindOf = entry => entry.kind || entry.key.split(':').at(-2);
+const identity = entry => [entry.name, entry.key, codeOf(entry), codeOf(entry).replace(/\.(TI|DC)$/, '')];
 const orderedMatch = (field, query) => {
   if (query.length < 2) return false;
   let pos = 0;
@@ -17,7 +18,7 @@ export const splitTerms = value => [...new Set(String(value).split(/[、,，;；
 
 export function catalogMatches(catalog, query, kind = 'all') {
   const q = normalize(query), short = compact(query);
-  return catalog.filter(e => kind === 'all' || e.key.startsWith(kind + ':'))
+  return catalog.filter(e => kind === 'all' || kindOf(e) === kind)
     .map(entry => {
       if (!short || identity(entry).some(value => normalize(value) === q)) return { entry, score: 0 };
       const words = [...identity(entry), ...(entry.aliases || []), ...(entry.path || [])].map(compact);
@@ -42,7 +43,7 @@ export function resolveTerms(catalog, query, selected = []) {
   return { selection: [...keys], unresolved };
 }
 
-const kindLabel = key => key.startsWith('industry:') ? '行业' : '概念';
+const kindLabel = entry => kindOf(entry) === 'industry' ? '行业' : kindOf(entry) === 'theme' ? '题材' : '概念';
 const at = ms => Number.isFinite(ms) ? beijing(ms / 1000).slice(0, 16) : '';
 const emptyPrefs = () => ({ groups: [], aliases: {} });
 const PAGE = 12;
@@ -50,12 +51,13 @@ const PAGE = 12;
 export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup }) {
   const doc = el.ownerDocument, node = doc.createElement('section');
   node.className = 'mr-panel mr-taxonomy';
-  node.innerHTML = `<h2>同花顺板块库</h2>
+  node.innerHTML = `<h2>东财板块库</h2>
     <p class="mr-meta" data-role="inventory" aria-live="polite"></p>
-    <div class="mr-tools"><input aria-label="搜索同花顺板块" placeholder="板块名称、指数代码或股票代码" data-role="query">
-      <select aria-label="板块分类" data-role="kind"><option value="all">全部分类</option><option value="industry">行业</option><option value="cn_concept">概念</option></select>
+    <div class="mr-tools"><input aria-label="搜索东财板块" placeholder="板块、代码、别名或组名" data-role="query">
+      <select aria-label="板块分类" data-role="kind"><option value="all">全部</option><option value="industry">行业</option><option value="concept">概念</option><option value="theme">题材</option><option value="groups">我的关注组</option></select>
       <button data-role="add">添加精确匹配</button><button data-role="refresh">更新完整库</button></div>
     <details><summary>首次关注方向</summary><div class="mr-tools" data-role="directions"></div></details>
+    <div class="mr-taxonomy-tree" data-role="tree" hidden></div>
     <p class="mr-meta" data-role="match-count"></p>
     <div class="mr-taxonomy-board-list" data-role="matches"></div>
     <div class="mr-tools"><button data-role="prev" hidden>上一页</button><button data-role="next" hidden>下一页</button></div>
@@ -66,6 +68,9 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
       <div class="mr-tools" data-role="alias"><input data-role="alias-input" aria-label="自定义别名" placeholder="自定义别名，可用顿号分隔">
         <button data-role="alias-save">保存别名到草稿</button></div>
     </section>
+    <details data-role="migration" hidden><summary>旧同花顺关注归档与迁移</summary>
+      <div data-role="migration-rows"></div>
+      <label data-role="migration-confirm" hidden><input type="checkbox" data-role="migration-check">确认按这份差集保存新的东财关注</label></details>
     <h2>当前关注</h2><div class="mr-tools" data-role="selected"></div>
     <details data-role="group-panel"><summary>自定义关注组</summary>
       <div data-role="groups"></div>
@@ -81,6 +86,8 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
   let view, base = [], draft = [], saved = emptyPrefs(), prefs = emptyPrefs(), revision, run;
   let busy = false, disposed = false, page = 0, error = '', delta, detail, lookupId = 0;
   let groupId = null, groupBoards = [];
+  let replacements = {};
+  const expanded = new Set();
   const dirty = () => JSON.stringify([base, saved]) !== JSON.stringify([draft, prefs]);
   const conflict = () => dirty() && (revision !== view?.revision || run !== (view?.taxonomy?.run ?? null));
   const entries = () => new Map([...(view?.sectors || []), ...(view?.catalog || [])]
@@ -91,7 +98,9 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     b.setAttribute('aria-label', label); b.addEventListener('click', action);
     return b;
   }
-  function changed() { delta = null; error = ''; render(); }
+  function changed() {
+    delta = null; error = ''; $('migration-check').checked = false; render();
+  }
   function choose(key) {
     if (!draft.includes(key)) { draft = [...draft, key]; changed(); }
   }
@@ -101,19 +110,123 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     $('group-name').value = group?.name || '';
     render();
   }
+  function joinGroup(group, catalog) {
+    const usable = group.boards.filter(key => catalog.has(key) && catalog.get(key).available !== false);
+    draft = [...new Set([...draft, ...usable])];
+    changed();
+    if (usable.length !== group.boards.length) { error = '组内有暂不可用板块'; render(); }
+  }
+  function boardRow(entry) {
+    const row = doc.createElement('div'), info = doc.createElement('span');
+    const brief = entry.available === false ? '待核实' : Number.isInteger(entry.count) ? `${entry.count} 只` : '';
+    row.className = 'mr-taxonomy-board';
+    info.textContent = [entry.name, codeOf(entry), kindLabel(entry), brief,
+      entry.status === 'STALE' ? '旧快照' : entry.status === 'VERIFIED_EMPTY' ? '核实为空' : ''].filter(Boolean).join(' · ');
+    row.append(info, button('成分', () => void lookup({ board: entry.key }), {
+      label: `查看 ${entry.name} 成分`, disabled: !Number.isInteger(entry.count) || busy,
+    }), button(draft.includes(entry.key) ? '已选' : '添加', () => choose(entry.key), {
+      label: `添加 ${entry.name}`, disabled: draft.includes(entry.key) || entry.available === false || busy,
+    }));
+    return row;
+  }
+  function renderTree(catalog, visible) {
+    const tree = $('tree');
+    const scroll = tree.scrollTop;
+    const entries = [...catalog.values()].filter(entry => entry.level >= 1 && kindOf(entry) === 'industry');
+    tree.hidden = !visible || !entries.length;
+    tree.replaceChildren();
+    if (tree.hidden) return;
+    const children = new Map();
+    for (const entry of entries) {
+      const parent = entry.parent || null;
+      if (!children.has(parent)) children.set(parent, []);
+      children.get(parent).push(entry);
+    }
+    function branch(entry) {
+      const subs = children.get(entry.key);
+      if (!subs?.length) return boardRow(entry);
+      const item = doc.createElement('details'), summary = doc.createElement('summary');
+      const content = doc.createElement('div');
+      summary.textContent = `${entry.name} · ${codeOf(entry)} · ${entry.count} 只`;
+      item.append(summary, content);
+      item.open = expanded.has(entry.key);
+      function fill() {
+        if (item.open) {
+          expanded.add(entry.key);
+          if (!content.hasChildNodes()) content.append(boardRow(entry), ...subs.map(branch));
+        } else {
+          expanded.delete(entry.key);
+          content.replaceChildren();
+        }
+      }
+      if (item.open) fill();
+      item.addEventListener('toggle', fill);
+      return item;
+    }
+    tree.append(...(children.get(null) || []).map(branch));
+    tree.scrollTop = scroll;
+  }
+  function renderMigration(catalog) {
+    const legacy = view?.legacy, section = $('migration'), rows = $('migration-rows');
+    const comparison = new Map((delta?.migration || []).map(row => [row.old_key, row]));
+    section.hidden = !(legacy?.sectors.length || legacy?.groups.length || Object.keys(legacy?.aliases || {}).length);
+    rows.replaceChildren();
+    for (const entry of legacy?.sectors || []) {
+      const row = doc.createElement('div'), identity = doc.createElement('span');
+      row.className = 'mr-tools';
+      identity.textContent = `${entry.name} · ${entry.key} · ${entry.count} 只`;
+      row.append(identity);
+      if (legacy.pending) {
+        const select = doc.createElement('select');
+        select.setAttribute('aria-label', `迁移 ${entry.name}`);
+        const empty = doc.createElement('option'); empty.textContent = '暂不映射'; empty.value = '';
+        select.append(empty);
+        for (const key of draft.filter(key => catalog.has(key))) {
+          const board = catalog.get(key), option = doc.createElement('option');
+          option.value = key; option.textContent = `${board.name} · ${key}`; select.append(option);
+        }
+        select.value = replacements[entry.key] || '';
+        select.addEventListener('change', () => {
+          if (select.value) replacements[entry.key] = select.value;
+          else delete replacements[entry.key];
+          changed();
+        });
+        row.append(select);
+      }
+      const diff = comparison.get(entry.key);
+      if (diff) {
+        const counts = doc.createElement('span');
+        counts.textContent = diff.new_key ?
+          `新名单 ${diff.new_count} · 共有 ${diff.common} · 旧独有 ${diff.old_only} · 新独有 ${diff.new_only}` : '未匹配';
+        row.append(counts);
+      }
+      rows.append(row);
+    }
+    for (const group of legacy?.groups || []) {
+      const groupText = doc.createElement('p'); groupText.className = 'mr-meta';
+      groupText.textContent = `旧组 ${group.name} · ${group.boards.join('、')}`; rows.append(groupText);
+    }
+    for (const [key, values] of Object.entries(legacy?.aliases || {})) {
+      const alias = doc.createElement('p'); alias.className = 'mr-meta';
+      alias.textContent = `旧别名 ${key} · ${values.join('、')}`; rows.append(alias);
+    }
+    $('migration-confirm').hidden = !(legacy?.pending && delta);
+  }
   function render() {
     if (disposed) return;
     const catalog = entries(), selected = $('selected'), matches = $('matches'), t = view?.taxonomy;
-    const progress = t?.progress?.board_total ?
-      `建库 ${t.progress.board_ready}/${t.progress.board_total} 板块 · ${t.progress.stock_seen}/${t.progress.stock_total} 反查` : '';
-    $('inventory').textContent = [t?.complete ? `完整快照 ${at(t.observed_ms)} · ${t.stock_total} 只股票` : '等待完整成分库',
-      progress, view?.catalog_status, t?.queued ? '已安排更新' : '', '层级未核实'].filter(Boolean).join(' · ');
+    const progress = t?.progress?.board_total ? `建库 ${t.progress.board_ready}/${t.progress.board_total} 板块` : '';
+    $('inventory').textContent = [t?.complete ? `${t.stale ? '待更新' : '完整'} ${t.market_day || at(t.observed_ms)} · ${t.stock_total} 只股票` : '等待完整成分库',
+      t?.hierarchy_status === 'DERIVED_FROM_DC_MEMBERSHIP' ? '东财成分关系重建' : '层级未核实',
+      t?.unclassified_count ? `行业未归属 ${t.unclassified_count} 只` : '',
+      progress, t?.error ? statusText(t.error) : '', t?.retry_at ? `下次重试 ${at(t.retry_at * 1000)}` : '',
+      t?.queued ? '已安排更新' : ''].filter(Boolean).join(' · ');
     selected.replaceChildren();
     for (const key of draft) {
       const entry = catalog.get(key), snapshot = view?.sectors.find(s => s.key === key);
       const count = snapshot?.symbols.length ?? entry?.count;
       const stale = entry?.removed || view?.sector_errors?.[key] ||
-        (snapshot?.observed_ms && at(snapshot.observed_ms).slice(0, 10) !== view?.market_day);
+        entry?.status === 'STALE' || (snapshot?.data_day && snapshot.data_day < (t?.market_day || snapshot.data_day));
       selected.append(button(`${entry?.name || key}${Number.isInteger(count) ? ` · ${count}只` : ''}${stale ? ' · 旧快照' : ''} ×`,
         () => { draft = draft.filter(k => k !== key); changed(); },
         { label: `移除 ${entry?.name || key}`, disabled: busy }));
@@ -121,23 +234,17 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     if (!draft.length) selected.textContent = '未选择板块';
     const terms = splitTerms(input.value);
     const query = terms.length === 1 ? terms[0] : '';
-    const hits = terms.length > 1 ? [] : catalogMatches([...catalog.values()], query, $('kind').value);
+    const kind = $('kind').value, treeVisible = !terms.length && ['all', 'industry'].includes(kind);
+    renderTree(catalog, treeVisible);
+    const groupHits = ['all', 'groups'].includes(kind) && terms.length <= 1 ?
+      prefs.groups.filter(group => !query || compact(group.name).includes(compact(query))) : [];
+    const hits = terms.length > 1 || kind === 'groups' ? [] : catalogMatches([...catalog.values()], query, kind)
+      .filter(entry => !(treeVisible && entry.level >= 1));
     const shown = hits.slice(page * PAGE, (page + 1) * PAGE);
-    $('match-count').textContent = `${hits.length} 个匹配${hits.length > PAGE ? ` · 第 ${page + 1}/${Math.ceil(hits.length / PAGE)} 页` : ''}`;
+    $('match-count').textContent = `${hits.length + groupHits.length} 个匹配${hits.length > PAGE ? ` · 第 ${page + 1}/${Math.ceil(hits.length / PAGE)} 页` : ''}`;
     matches.replaceChildren();
-    for (const entry of shown) {
-      const row = doc.createElement('div'), info = doc.createElement('span');
-      const brief = entry.removed ? '目录已移除' : entry.available === false ? '等待核实' :
-        Number.isInteger(entry.count) ? `${entry.count} 只` : '';
-      row.className = 'mr-taxonomy-board';
-      info.textContent = [entry.name, codeOf(entry), kindLabel(entry.key), brief].filter(Boolean).join(' · ');
-      row.append(info, button('成分', () => void lookup({ board: entry.key }), {
-        label: `查看 ${entry.name} 成分`, disabled: !Number.isInteger(entry.count) || busy,
-      }), button(draft.includes(entry.key) ? '已选' : '添加', () => choose(entry.key), {
-        label: `添加 ${entry.name}`, disabled: draft.includes(entry.key) || entry.available === false || busy,
-      }));
-      matches.append(row);
-    }
+    for (const group of groupHits) matches.append(button(`关注组 ${group.name}`, () => joinGroup(group, catalog)));
+    matches.append(...shown.map(boardRow));
     $('prev').hidden = page === 0;
     $('next').hidden = (page + 1) * PAGE >= hits.length;
     $('groups').replaceChildren();
@@ -145,11 +252,8 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
       const row = doc.createElement('div'), name = doc.createElement('span');
       row.className = 'mr-tools';
       name.textContent = `${group.name} · ${group.boards.length} 个板块`;
-      row.append(name, button('加入关注', () => {
-        const usable = group.boards.filter(k => catalog.get(k)?.available !== false && catalog.has(k));
-        draft = [...new Set([...draft, ...usable])]; changed();
-        if (usable.length !== group.boards.length) { error = '组内有暂不可用板块'; render(); }
-      }), button('编辑', () => editGroup(group), { label: `编辑组 ${group.name}` }),
+      row.append(name, button('加入关注', () => joinGroup(group, catalog)),
+      button('编辑', () => editGroup(group), { label: `编辑组 ${group.name}` }),
       button('删除', () => {
         prefs.groups = prefs.groups.filter(g => g.id !== group.id);
         if (groupId === group.id) editGroup(null);
@@ -162,11 +266,13 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     })));
     const count = view ? Object.keys(view.members).length : 0;
     $('summary').textContent = view ? `已保存 ${view.sectors.length} 个板块 · 去重 ${count} 只股票${
-      delta ? ` · 新增 ${delta.added} · 退出 ${delta.removed} · 保留 ${delta.retained}` : dirty() ? ' · 有未保存草稿' : ''}`
+      delta ? ` · 新增 ${delta.added} · 退出 ${delta.removed} · 保留 ${delta.retained}${delta.total != null ? ` · 预览 ${delta.total} 只` : ''}` : dirty() ? ' · 有未保存草稿' : ''}`
       : '正在读取关注池…';
     $('error').textContent = conflict() ? '关注池或映射代已更新，撤销草稿后可重新编辑。' : error;
-    $('apply').disabled = !view || busy || !delta || conflict();
-    $('preview').disabled = !view || busy || !dirty() || conflict();
+    renderMigration(catalog);
+    $('apply').disabled = !view || busy || !delta || conflict() ||
+      (view.legacy?.pending && !$('migration-check').checked);
+    $('preview').disabled = !view || busy || (!dirty() && !view.legacy?.pending) || conflict();
     $('refresh').disabled = !view || busy || Boolean(t?.queued);
     $('reset').disabled = !view || busy || !dirty();
     $('add').textContent = SYMBOL.test(query.toUpperCase()) ? '查股票归属' : '添加精确匹配';
@@ -179,7 +285,7 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
       throw Error('关注池回执无效');
     }
     if (view && next.revision < view.revision) return;
-    const clean = !dirty();
+    const clean = !dirty(), sameGeneration = next.revision === revision && (next.taxonomy?.run ?? null) === run;
     view = next;
     if (clean || reset) {
       base = next.sectors.map(e => e.key);
@@ -188,7 +294,11 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
       prefs = { groups: [...saved.groups], aliases: { ...saved.aliases } };
       revision = next.revision;
       run = next.taxonomy?.run ?? null;
-      delta = null;
+      if (reset || !sameGeneration) {
+        delta = null;
+        replacements = {};
+        $('migration-check').checked = false;
+      }
     }
     render();
   }
@@ -213,10 +323,18 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
       $('detail').hidden = false;
       $('detail-title').textContent = `${next.board?.name || next.symbol} · ${next.total} ${next.board ? '只' : '个板块'}`;
       $('detail-source').textContent = next.board ?
-        `接口时间 ${at(next.board.source_ms) || '供应商未提供'} · 核验 ${at(next.board.observed_ms)} · ${
-          next.board.proof === 'BULK_REVERSE_CHECKED' ? '批量反查、按类抽样正查' : '正向全名单'}` : '';
-      $('detail-rows').textContent = next.board ? next.rows.join(' · ') :
-        next.rows.map(key => entries().get(key)?.name || key).join(' · ');
+        [next.board.data_day, next.board.path?.join(' → '), `核验 ${at(next.board.observed_ms)}`].filter(Boolean).join(' · ') :
+        next.industry_path?.join(' → ') || '';
+      const catalog = entries();
+      const fields = next.board ? next.rows.map(row => typeof row === 'string' ? row :
+        [row.name, row.symbol, row.reason].filter(Boolean).join(' · ')) :
+        next.rows.map(key => {
+          const entry = catalog.get(key);
+          return entry ? [entry.name, codeOf(entry), kindLabel(entry)].join(' · ') : key;
+        });
+      $('detail-rows').replaceChildren(...fields.map(value => {
+        const entry = doc.createElement('div'); entry.textContent = value; return entry;
+      }));
       $('detail-prev').hidden = offset === 0;
       $('detail-next').hidden = offset + next.rows.length >= next.total;
       $('alias').hidden = !next.board;
@@ -230,6 +348,10 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     busy = true; error = ''; render();
     try {
       const args = { expected_revision: revision, run, selection: [...draft], preferences: structuredClone(prefs) };
+      if (view.legacy?.pending) {
+        args.migration = Object.fromEntries(Object.entries(replacements).filter(([, key]) => draft.includes(key)));
+        args.confirm_migration = $('migration-check').checked;
+      }
       if (action === 'preview') delta = await onPreview(args);
       else if (action === 'refresh') update(await onRefresh({ expected_revision: view.revision, run: view.taxonomy?.run ?? null }));
       else update(await onApply(args), true);
@@ -241,6 +363,7 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
   })));
   input.addEventListener('input', () => { page = 0; render(); });
   $('kind').addEventListener('change', () => { page = 0; render(); });
+  $('migration-check').addEventListener('change', render);
   input.addEventListener('keydown', event => {
     if (event.key === 'Enter' && !event.isComposing && event.keyCode !== 229) {
       event.preventDefault();

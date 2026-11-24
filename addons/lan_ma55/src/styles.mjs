@@ -22,6 +22,10 @@ export const WORKBENCH_CSS = `
 .mr-workbench .mr-focus-chip{display:inline-flex;gap:2px}.mr-workbench .mr-focus-chip button{color:var(--mr-muted)}
 .mr-workbench .mr-taxonomy h2:not(:first-child){margin-top:14px}
 .mr-workbench .mr-taxonomy-board-list{max-height:190px;overflow:auto}
+.mr-workbench .mr-taxonomy-tree{max-height:260px;overflow:auto;border-bottom:1px solid var(--mr-line);padding:0 6px}
+.mr-workbench .mr-taxonomy-tree details{padding:4px 0}
+.mr-workbench .mr-taxonomy-tree details>div{padding-inline-start:12px}
+.mr-workbench .mr-taxonomy-tree summary{cursor:pointer;overflow-wrap:anywhere}
 .mr-workbench .mr-taxonomy-board{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--mr-line)}
 .mr-workbench .mr-taxonomy-board span,.mr-workbench .mr-taxonomy-detail{overflow-wrap:anywhere}
 .mr-workbench .mr-taxonomy-detail{padding:9px 0;border-top:1px solid var(--mr-line)}

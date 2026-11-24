@@ -1,4 +1,4 @@
-"""MA55 focus scope: verified THS snapshots, atomic selection and union deltas.
+"""MA55 focus scope: verified snapshots, atomic selection and union deltas.
 
 No network, market requests, algorithm calls or deletion of cached bars/events.
 The caller owns scheduling and exposes refresh failures separately.
@@ -8,6 +8,10 @@ import json
 import re
 import sqlite3
 from contextlib import closing
+from pathlib import Path
+from uuid import UUID
+
+from .dc_taxonomy import DC_KEY
 
 KINDS = ("industry", "cn_concept")
 KEY = re.compile(r"(?:industry|cn_concept):\d{6}\.TI")
@@ -53,19 +57,19 @@ def decode_catalog(kind, payload):
     return {"source_ms": source_ms, "entries": entries}
 
 
-def _snapshot(value):
-    key = _canonical(value["key"], KEY)
+def _snapshot(value, pattern=KEY):
+    key = _canonical(value["key"], pattern)
     name = value["name"]
     if not isinstance(name, str) or not name.strip():
         raise ValueError("Missing sector name")
     source, observed = value["source_ms"], value["observed_ms"]
     proof, run = value.get("proof"), value.get("run")
     if (type(observed) is not int or observed <= 0 or
-            (source is None and proof != "BULK_REVERSE_CHECKED") or
+            (source is None and proof not in ("BULK_REVERSE_CHECKED", "DC_MEMBER", "DC_VERIFIED_EMPTY")) or
             (source is not None and (type(source) is not int or source <= 0))):
         raise ValueError("Missing snapshot time")
     symbols = value["symbols"]
-    if not isinstance(symbols, (tuple, list)) or (not symbols and proof != "DIRECT_EMPTY"):
+    if not isinstance(symbols, (tuple, list)) or (not symbols and proof not in ("DIRECT_EMPTY", "DC_VERIFIED_EMPTY")):
         raise ValueError("Empty/unverified membership cannot replace snapshot")
     snapshot = dict(key=key, name=name.strip(), source_ms=source, observed_ms=observed,
                     symbols=sorted({_canonical(s, SYMBOL) for s in symbols}))
@@ -73,6 +77,8 @@ def _snapshot(value):
         snapshot["proof"] = proof
     if run:
         snapshot["run"] = run
+    if "data_day" in value:
+        snapshot["data_day"] = value["data_day"]
     return snapshot
 
 
@@ -101,35 +107,72 @@ def _union(sectors):
     return {symbol: sorted(keys) for symbol, keys in sorted(members.items())}
 
 
+def validate_preferences(values, catalog, saved):
+    known = set(catalog)
+    groups, aliases, ids, names = [], {}, set(), set()
+    old_groups = {group["id"]: group for group in saved["groups"]}
+    for group in values["groups"]:
+        key = str(UUID(group["id"]))
+        name = group["name"].strip()
+        boards = list(dict.fromkeys(group["boards"]))
+        existing = set(old_groups.get(key, {}).get("boards", []))
+        if not name or len(name) > 80 or key in ids or name.casefold() in names or not boards:
+            raise ValueError("Invalid custom group")
+        if not set(boards) <= known | existing:
+            raise ValueError("Unknown custom group board")
+        groups.append(dict(id=key, name=name, boards=boards))
+        ids.add(key)
+        names.add(name.casefold())
+    for key, texts in values["aliases"].items():
+        if (key not in known and key not in saved["aliases"]) or not isinstance(texts, list):
+            raise ValueError("Invalid alias board")
+        entries = list(dict.fromkeys(value.strip() for value in texts))
+        if any(not entry or len(entry) > 80 for entry in entries):
+            raise ValueError("Invalid alias")
+        if entries:
+            aliases[key] = entries
+    return dict(groups=groups, aliases=aliases)
+
+
 class ScopeConflict(RuntimeError):
     """Caller must reread the current revision before applying edits."""
 
 
 class FocusPool:
-    """One small additive table in the plugin's existing SQLite database."""
+    """Use one scope namespace in the plugin's existing SQLite database."""
 
-    def __init__(self, path):
+    def __init__(self, path, *, dc=False):
         self.path = path
+        self.prefix = "dc_focus" if dc else "focus"
+        self.key = DC_KEY if dc else KEY
         with closing(sqlite3.connect(path)) as conn, conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS focus_scope_v1 ("
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {self.prefix}_scope_v1 ("
                          "id INTEGER PRIMARY KEY CHECK(id=1), revision INTEGER NOT NULL, payload TEXT NOT NULL)")
-            conn.execute("INSERT OR IGNORE INTO focus_scope_v1 VALUES (1, 0, '[]')")
-            conn.execute("CREATE TABLE IF NOT EXISTS focus_scope_history_v1 ("
+            conn.execute(f"INSERT OR IGNORE INTO {self.prefix}_scope_v1 VALUES (1, 0, '[]')")
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {self.prefix}_scope_history_v1 ("
                          "revision INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
-            conn.execute("CREATE TABLE IF NOT EXISTS focus_preferences_v1 ("
+            conn.execute(f"CREATE TABLE IF NOT EXISTS {self.prefix}_preferences_v1 ("
                          "id INTEGER PRIMARY KEY CHECK(id=1), payload TEXT NOT NULL)")
 
     @staticmethod
-    def _read(conn):
-        revision, payload = conn.execute("SELECT revision,payload FROM focus_scope_v1 WHERE id=1").fetchone()
+    def _read(conn, prefix):
+        revision, payload = conn.execute(f"SELECT revision,payload FROM {prefix}_scope_v1 WHERE id=1").fetchone()
         sectors = json.loads(payload)
-        row = conn.execute("SELECT payload FROM focus_preferences_v1 WHERE id=1").fetchone()
+        row = conn.execute(f"SELECT payload FROM {prefix}_preferences_v1 WHERE id=1").fetchone()
         preferences = json.loads(row[0]) if row else dict(groups=[], aliases={})
         return dict(revision=revision, sectors=sectors, members=_union(sectors), **preferences)
 
     def read(self):
         with closing(sqlite3.connect(self.path)) as conn:
-            return self._read(conn)
+            return self._read(conn, self.prefix)
+
+    @staticmethod
+    def legacy(path):
+        uri = Path(path).resolve().as_uri() + "?mode=ro"
+        with closing(sqlite3.connect(uri, uri=True)) as conn:
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='focus_scope_v1'").fetchone():
+                return FocusPool._read(conn, "focus")
+        return dict(revision=0, sectors=[], members={}, groups=[], aliases={})
 
     def apply(self, selection, snapshots, *, expected_revision, preferences=None):
         """Apply an explicit ordered selection and verified fresh snapshots.
@@ -140,16 +183,16 @@ class FocusPool:
         """
         if not isinstance(selection, (list, tuple)):
             raise ValueError("Selection must be explicit")
-        keys = list(dict.fromkeys(_canonical(k, KEY) for k in selection))
+        keys = list(dict.fromkeys(_canonical(k, self.key) for k in selection))
         fresh = {}
         for raw in snapshots:
-            snap = _snapshot(raw)
+            snap = _snapshot(raw, self.key)
             if snap["key"] in fresh or snap["key"] not in keys:
                 raise ValueError("Unexpected or duplicate snapshot")
             fresh[snap["key"]] = snap
         with closing(sqlite3.connect(self.path)) as conn, conn:
             conn.execute("BEGIN IMMEDIATE")
-            old = self._read(conn)
+            old = self._read(conn, self.prefix)
             if type(expected_revision) is not int or old["revision"] != expected_revision:
                 raise ScopeConflict("Focus selection changed; reread before applying")
             previous = {s["key"]: s for s in old["sectors"]}
@@ -169,15 +212,15 @@ class FocusPool:
             revision = old["revision"] + int(old["revision"] == 0 or sectors != old["sectors"] or changed)
             payload = json.dumps(sectors, ensure_ascii=False)
             if revision != old["revision"]:
-                conn.execute("UPDATE focus_scope_v1 SET revision=?,payload=? WHERE id=1",
+                conn.execute(f"UPDATE {self.prefix}_scope_v1 SET revision=?,payload=? WHERE id=1",
                              (revision, payload))
             if changed:
-                conn.execute("INSERT INTO focus_preferences_v1 VALUES (1,?) ON CONFLICT(id) "
+                conn.execute(f"INSERT INTO {self.prefix}_preferences_v1 VALUES (1,?) ON CONFLICT(id) "
                              "DO UPDATE SET payload=excluded.payload", (json.dumps(preferences, ensure_ascii=False),))
             before, after = set(old["members"]), set(members)
             membership_changed = members != old["members"]
             if membership_changed or keys != list(previous) or old["revision"] == 0:
-                conn.execute("INSERT INTO focus_scope_history_v1 VALUES (?,?)", (revision, payload))
+                conn.execute(f"INSERT INTO {self.prefix}_scope_history_v1 VALUES (?,?)", (revision, payload))
             return dict(revision=revision, sectors=sectors, members=members,
                         **(preferences if changed else saved),
                         added=sorted(after-before), removed=sorted(before-after),
