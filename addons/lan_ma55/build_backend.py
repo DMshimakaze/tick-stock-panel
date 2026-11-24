@@ -14,7 +14,10 @@ def build(destination=None):
              'runtime.py','runtime_status.py','result_publisher.py','shared_store.py','worker_lease.py',
              'unified_store.py','market_store.py','market_grid.py','collector.py','request_budget.py',
              'indicator_cache.py','native15_shadow.py','native15_store.py',
-             'native15_signal_adapter.py','native15_scheduler.py','native15_owner.py']
+             'native15_signal_adapter.py','native15_scheduler.py','native15_owner.py',
+             'focus_pool.py','ths_focus.py','ma55_levels.py',
+             'multiframe_core/__init__.py','multiframe_core/features.py',
+             'multiframe_core/structure.py','multiframe_core/multiframe.py']
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.write(root / "extension.yaml", "extension.yaml")
         for name in names:
