@@ -11,6 +11,12 @@
 - 不覆盖工作区已有修改，不虚构测试或审查结果。
 - 以实际验证结果作为完成标准。
 
+## 按任务找现行契约
+
+- 对接已部署的 TSP、选择 MCP 或调用 Open API，先读 [AI 接入指南](docs/ai-integration.md)。
+- 编写可导入的配置、指标、资源或插件，先查 [文档导航](docs/README.md) 和 [统一导入](docs/extension-packages.md)，再读对应契约。
+- 运行策略回测或引擎研究，先核对 [回测证据](docs/backtest-evidence.md) 与 [引擎研究](docs/engine-platform/workbench-research-jobs.md)。配置、包版本和验收结果按目标部署实际返回值记录。
+
 ## 踏踏实实：TSP 本地二次开发约束（Codex 必读）
 
 本段适用于 `E:\tick stock panel`，对应个人 Fork `DMshimakaze/tick-stock-panel`。目标是长期使用官方 TSP 作为可升级的宿主，不维护魔改版宿主。开始任何新一轮工作前先阅读本文件和官方 `docs/secondary-development.md`、`docs/plugin-development.md`，核对**已经实现**的扩展契约。
