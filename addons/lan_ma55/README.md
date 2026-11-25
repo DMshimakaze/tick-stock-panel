@@ -17,6 +17,8 @@
 
 ## 构建和恢复
 
-在现有 `nga` 环境中运行定向 pytest，使用 pnpm 构建页面，再运行 `build_backend.py` 生成官方扩展包。产物由「设置 → 导入与备份」预检和安装，生效需要正常重启。`0.12.0` 是候选版本，生产安装需用户单独批准。新版使用宿主主题和个股详情。历史链接使用 `/lan-ma55`，保留 `symbol`、`period`、`event` 和 `event_id`。旧原生 15m 候选使用 `source=native`，冻结 BUY 使用 `source=archive`。
+2026-11-25，TSP v0.4.1 正式启用 `lan.ma55 0.12.0`，加载 2026-11-24 的东财完整分类。生产关注池为空，冻结历史可从工作台打开。`0.11.0` 可通过官方扩展管理回退。 [正式安装与清理验收](DC_PRODUCTION_INSTALL_CLEANUP_20261124.md)
+
+在现有 `nga` 环境中运行定向 pytest，使用 pnpm 构建页面，再运行 `build_backend.py` 生成官方扩展包。产物由「设置 → 导入与备份」预检和安装，生效需要正常重启。新版使用宿主主题和个股详情。历史链接使用 `/lan-ma55`，保留 `symbol`、`period`、`event` 和 `event_id`。旧原生 15m 候选使用 `source=native`，冻结 BUY 使用 `source=archive`。
 
 需要回退时，停掉宿主并保存现场，核对版本相符的旧包、安装状态、配置和 SQLite 一致性备份，再通过官方扩展管理回退并重启。需要从 ZIP 恢复时，先用官方扩展管理卸载候选并重启，再导入旧包。验证旧关注和冻结历史后再恢复日常使用。 [同花顺归档验收](V041_TAXONOMY_HANDOFF.md) · [六周期整合验收](SECTOR_MULTIFRAME_INTEGRATION.md)
