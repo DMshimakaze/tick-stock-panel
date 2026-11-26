@@ -7,7 +7,7 @@ from time import perf_counter, time
 from .unified_store import UnifiedStore
 from .shared_store import SharedStore
 from .market_store import encoded, reader
-from .market_grid import now_cn, history_capacity, project
+from .market_grid import now_cn, history_capacity, points, project
 from .native15_store import NativeStore
 from .native15_signal_adapter import scan, FAMILY
 from .native15_shadow import SOURCE
@@ -36,6 +36,9 @@ class NativeOwner(UnifiedStore):
               period TEXT,quota_headers TEXT);
         """)
         with self.conn:
+            columns = {row["name"] for row in self.conn.execute("PRAGMA table_info(native15_request_receipt)")}
+            if "batch_metrics" not in columns:
+                self.conn.execute("ALTER TABLE native15_request_receipt ADD COLUMN batch_metrics TEXT")
             self.set_meta("data_mode", FAMILY)
 
     def meta(self, key, default=None):
@@ -56,10 +59,12 @@ class NativeOwner(UnifiedStore):
         began = perf_counter()
         self.conn.execute("BEGIN IMMEDIATE")
         self.last_lock_wait_ms = (perf_counter()-began)*1000
+        expected = set(points(sessions, start, end, step=15))
         try:
             for symbol in symbols:
                 if symbol in factors:
-                    self.market.factor_response(symbol, factors[symbol], now, sessions)
+                    self.market.factor_response(symbol, factors[symbol], now, sessions,
+                                                update_indicators=analyze_candidates)
                 error = errors.get(symbol)
                 code = error["code"] if error and error["timestamps"] is None else None
                 if code:
@@ -67,7 +72,7 @@ class NativeOwner(UnifiedStore):
                     continue
                 try:
                     self.market.accept(symbol, received.get(symbol, {}), sessions=sessions, start=start, end=end, now=now,
-                                       stage=stage)
+                                       stage=stage, expected=expected, update_indicators=analyze_candidates)
                 except ValueError as exc:
                     if str(exc) not in ("NATIVE15_PROVENANCE_REQUIRED", "NATIVE15_NON_TRADING_POINT"):
                         raise
@@ -99,7 +104,8 @@ class NativeOwner(UnifiedStore):
     def accept_factors(self, symbols, factors, *, sessions, target, now, live_after, analyze_candidates=True):
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
-            changed = [s for s in symbols if self.market.factor_response(s, factors.get(s), now, sessions)]
+            changed = [s for s in symbols if self.market.factor_response(
+                s, factors.get(s), now, sessions, update_indicators=analyze_candidates)]
             if analyze_candidates:
                 self.analyze(changed, sessions, target, now, live_after, replay=True)
             self.market.set_meta("last_factor_check", now)
@@ -229,10 +235,11 @@ class NativeOwner(UnifiedStore):
                     universe=self.market.meta("universe", {}), signal_family=FAMILY)
 
     def save_requests(self, rows, stage):
-        self.conn.executemany("INSERT INTO native15_request_receipt(at,endpoint,capability,status,latency_ms,symbol_count,stage,retries,period,quota_headers) "
-                              "VALUES(?,?,?,?,?,?,?,?,?,?)",
+        self.conn.executemany("INSERT INTO native15_request_receipt(at,endpoint,capability,status,latency_ms,symbol_count,stage,retries,period,quota_headers,batch_metrics) "
+                              "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                               [(r["at"], r["endpoint"], r["capability"], r["status"], r["latency_ms"], r["symbol_count"], stage,
-                                r["retries"], r.get("period"), encoded(r.get("quota_headers", {}))) for r in rows])
+                               r["retries"], r.get("period"), encoded(r.get("quota_headers", {})),
+                               encoded(r["batch_metrics"]) if "batch_metrics" in r else None) for r in rows])
         self.conn.execute("DELETE FROM native15_request_receipt WHERE id<(SELECT max(id)-10000 FROM native15_request_receipt)")
 
     def status_snapshot(self, *, scope=None, target=None):

@@ -13,7 +13,7 @@ from addons.lan_ma55.backend.focus_owner import FocusOwner, THSTransport
 from addons.lan_ma55.backend.market_grid import combined, stamp
 from addons.lan_ma55.backend.multiframe_input import DAILY_SOURCE, frame_bars
 from addons.lan_ma55.backend.native15_owner import NativeOwner
-from addons.lan_ma55.backend.native15_shadow import SOURCE
+from addons.lan_ma55.backend.native15_shadow import PROOF, SOURCE
 from addons.lan_ma55.backend.observations import Observations
 from addons.lan_ma55.backend.ths_focus import CATALOG, MEMBERS, THSUnavailable
 from addons.lan_ma55.backend.ths_taxonomy import REVERSE
@@ -183,3 +183,43 @@ def test_fixed_origin_restart_gap_and_independent_periods(tmp_path):
         saved = observations.saved(SYMBOL)["15m"]
         assert saved["replay_start"] == origin
         assert json.loads(saved["payload"])["status"] == "GAP_IN_REPLAY_WINDOW"
+
+
+def test_required_history_is_planned_from_each_completed_frame(tmp_path):
+    from addons.lan_ma55.backend.multiframe_input import MIN_HISTORY, replay_input, source_window
+    from addons.lan_ma55.backend.native15_scheduler import task
+
+    dates = [date(2026, 7, 1) + timedelta(days=i) for i in range(140)]
+    sessions = [str(day) for day in dates if planned_session(str(day))]
+    now = sessions[-1] + " 15:02:00"
+    schedules, weeks = frame_schedules(sessions, now)
+    grid = schedules["15m"]
+    for frame, length in (("15m", 150), ("30m", 300), ("60m", 600), ("120m", 1200)):
+        required = source_window(frame, schedules[frame], grid, weeks, None, None)
+        assert len(required) == length
+    assert replay_input([bar(at) for at in grid[-MIN_HISTORY+1:]], grid, None)[1] == "INSUFFICIENT_HISTORY"
+    assert replay_input([bar(at) for at in grid[-MIN_HISTORY:]], grid, None)[1] is None
+    with NativeOwner(tmp_path / "needed.sqlite3") as owner:
+        symbol = SYMBOL
+        owner.refresh_master([dict(symbol=symbol, name="测试", eligible=True, source_type="stock", raw_tick=.01)],
+                             {"expected": 1}, sessions)
+        market = owner.market
+        gap = grid[-100:-64]
+        partial = {at: dict(bar(at), source_proof=PROOF) for at in grid[-1200:] if at not in gap}
+        with owner.conn:
+            market.factor_response(symbol, [], now, sessions, update_indicators=False)
+        owner.accept_batch([symbol], {symbol: partial}, {}, sessions=sessions, start=grid[-1200], end=grid[-1],
+                           now=now, factors={}, stage="A", live_after=now, analyze_candidates=False)
+        obs = Observations(market, DailyStore(owner.conn))
+        obs.refresh([symbol], sessions, schedules, weeks, now, now)
+        assert obs.needs[symbol, "15m"] == [gap[0], gap[-1]]
+        assert task(market, market.universe(), sessions, grid[-1], now, needs=obs.needs, grid=grid) == (
+            gap[0], gap[-1], "B", [symbol], len(gap),
+        )
+        repaired = {at: dict(bar(at), source_proof=PROOF) for at in gap}
+        owner.accept_batch([symbol], {symbol: repaired}, {}, sessions=sessions, start=gap[0], end=gap[-1],
+                           now=now, factors={}, stage="B", live_after=now, analyze_candidates=False)
+        obs.refresh([symbol], sessions, schedules, weeks, now, now, frames=("15m", "30m", "60m", "120m"))
+        saved = {frame:json.loads(row["payload"]) for frame, row in obs.saved(symbol).items()}
+        assert all(saved[frame]["status"] == "READY" for frame in ("15m", "30m", "60m", "120m"))
+        assert saved["weekly"]["status"] != "READY" and obs.needs[symbol, "15m"] is None

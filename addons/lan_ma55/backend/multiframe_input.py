@@ -1,15 +1,60 @@
 """Source normalization and completed QFQ input for the research replay."""
 
-from datetime import datetime
+from bisect import bisect_left, bisect_right
+from datetime import datetime, timedelta
 from itertools import takewhile
 from math import isfinite
 
-from .market_grid import BEIJING, FIELDS, combined, derived, project_bar, stamp, valid_five
+from .market_grid import BEIJING, FIELDS, combined, derived, project_bar, stamp, valid_five, wall
 from .native15_shadow import SOURCE
 
 DAILY_SOURCE = "TICKFLOW_RAW_1D"
 MIN_HISTORY = 150
 DAILY_HISTORY = 1000
+MAX_NATIVE_BARS = 1280
+MAX_BATCH_SYMBOLS = 100
+# Bound the number of requested points as well as the SDK's symbol count.
+MAX_DAILY_BATCH_POINTS = 32000
+
+
+def source_window(timeframe, schedule, source_grid, weeks, start, listing):
+    if not schedule:
+        return ()
+    origin = start or schedule[max(0, len(schedule) - MIN_HISTORY)]
+    if timeframe.endswith("m"):
+        origin = str(wall(origin) - timedelta(minutes=int(timeframe[:-1]) - 15))
+    elif timeframe == "weekly":
+        origin = next((stamp(week[0], 900) for week in weeks if week[-1] == origin[:10]), origin)
+    low = max(origin, listing) if listing else origin
+    return source_grid[bisect_left(source_grid, low):bisect_right(source_grid, schedule[-1])]
+
+
+def missing_window(required, available):
+    holes = (at for at in required if at not in available)
+    first = next(holes, None)
+    return [first, next((at for at in reversed(required) if at not in available), first)] if first else None
+
+
+def window_batch(grid, candidates, *, max_count, max_points):
+    """Pack adjacent or overlapping required slots into one source request."""
+    first = last = None
+    symbols = []
+    for _, symbol, start, end in sorted(candidates):
+        hi = bisect_right(grid, end) - 1
+        lo = max(bisect_left(grid, start), hi - max_count + 1)
+        if lo > hi:
+            continue
+        if symbols and (lo > last + 1 or hi < first - 1):
+            continue
+        low, high = (min(first, lo), max(last, hi)) if symbols else (lo, hi)
+        count = high - low + 1
+        if count > max_count or count * (len(symbols) + 1) > max_points:
+            continue
+        first, last = low, high
+        symbols.append(symbol)
+        if len(symbols) == MAX_BATCH_SYMBOLS:
+            break
+    return (grid[first], grid[last], last - first + 1, symbols) if symbols else None
 
 
 def normalize_daily(data, start, end):
@@ -51,7 +96,7 @@ def frame_bars(raw, timeframe, sessions, weeks, target, events, basis_at):
         and bar["timestamp"][:10] in trading_days
     ]
     if timeframe.endswith("m"):
-        return [project_bar(bar, events, basis_at) for bar in derived(available, timeframe, sessions, target)]
+        return [project_bar(bar, events, basis_at) for bar in derived(available, timeframe, trading_days, target)]
     daily = [project_bar(bar, events, basis_at) for bar in available]
     if timeframe == "daily":
         return daily
@@ -75,15 +120,19 @@ def replay_input(bars, schedule, start):
     if not schedule:
         return [], "CALENDAR_PENDING"
     by_end = {row["timestamp"]: row for row in bars if row["volume"] > 0}
+    zero = {row["timestamp"] for row in bars if row["volume"] == 0}
     if schedule[-1] not in by_end:
-        return [], "MISSING_COMPLETED_BAR"
+        return [], "ZERO_VOLUME_BAR" if schedule[-1] in zero else "MISSING_COMPLETED_BAR"
     if start:
         required = [at for at in schedule if at >= start]
         if not required or required[0] != start or any(at not in by_end for at in required):
-            return [], "GAP_IN_REPLAY_WINDOW"
+            missing = set(required) - by_end.keys()
+            return [], "ZERO_VOLUME_BAR" if missing and missing <= zero else "GAP_IN_REPLAY_WINDOW"
     else:
         required = list(reversed(list(takewhile(by_end.__contains__, reversed(schedule)))))
         if len(required) < MIN_HISTORY:
             prior = any(at < required[0] for at in by_end)
+            if prior and (set(schedule[-MIN_HISTORY:]) - by_end.keys()) <= zero:
+                return [], "ZERO_VOLUME_BAR"
             return [], "GAP_IN_REPLAY_WINDOW" if prior else "INSUFFICIENT_HISTORY"
     return [by_end[at] for at in required], None

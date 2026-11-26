@@ -1,5 +1,6 @@
 import { beijing } from './chart_model.mjs';
 import { codeOf, escapeHtml as esc, icon, kindBadge, kindOf, KINDS, quantity } from './presentation.mjs';
+import { statusText } from './workbench_data.mjs';
 
 const verifiedAt = value => Number.isFinite(value) ? beijing(value / 1000).slice(0, 16) : '—';
 const facts = pairs => pairs.map(([label, value]) => `<div><dt>${label}</dt><dd>${esc(value)}</dd></div>`).join('');
@@ -62,6 +63,8 @@ export function paintFocusDetail(section, detail, catalog, aliases) {
   role('detail-source').hidden = !path.length;
   role('detail-facts').innerHTML = facts(board ? [
     ['成分股', quantity(total)], ['快照日期', board.data_day || '—'], ['核验时间', verifiedAt(board.observed_ms)],
+    ...(board.target_day && board.target_day > board.data_day ? [['复核目标', board.target_day]] : []),
+    ...(board.review_error ? [['复核状态', statusText(board.review_error)]] : []),
   ] : [['归属板块', quantity(total)]]);
   role('detail-rows').innerHTML = board ? constituents(rows, kind === 'theme' || rows.some(row => row.reason))
     : memberships(rows, catalog);

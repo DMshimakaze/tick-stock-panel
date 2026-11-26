@@ -98,7 +98,7 @@ class NativeStore(Store):
                                   "last_attempt=excluded.last_attempt,next_eligible=excluded.next_eligible,error_type=excluded.error_type",
                                   (symbol, attempts, now, time()+wait, error))
 
-    def factor_response(self, symbol, events, now, sessions):
+    def factor_response(self, symbol, events, now, sessions, *, update_indicators=True):
         info = self.instrument(symbol)
         if events is None:
             self.factor_failed([symbol], now, "MISSING_RESPONSE")
@@ -117,9 +117,10 @@ class NativeStore(Store):
         info["updated_at"] = now
         self._put(info)
         if changed:
-            raw = self.raw_rows(symbol, limit=history_capacity())
-            if raw:
-                self.update_cache(symbol, info, raw, self.events(symbol), sessions, rebuild=True)
+            if update_indicators:
+                raw = self.raw_rows(symbol, limit=history_capacity())
+                if raw:
+                    self.update_cache(symbol, info, raw, self.events(symbol), sessions, rebuild=True)
             self.set_meta("data_revision", self.meta("data_revision", 0)+1)
         return changed
 
@@ -157,14 +158,15 @@ class NativeStore(Store):
                 self._put(info)
 
     def accept(self, symbol, received, *, sessions, start, end, now, events=None,
-               factor_response=False, rebuild=False, stage="A"):
+               factor_response=False, rebuild=False, stage="A", expected=None, update_indicators=True):
         if factor_response:
             self.factor_response(symbol, events, now, sessions)
         info = self.instrument(symbol)
         incoming = [b for t, b in sorted(received.items()) if start <= t <= end]
         if any(b.get("source_id") != SOURCE or b.get("source_count") != 1 or b.get("source_proof") != PROOF for b in incoming):
             raise ValueError("NATIVE15_PROVENANCE_REQUIRED")
-        if any(b["timestamp"] not in points(sessions, start, end, step=15) for b in incoming):
+        expected = set(points(sessions, start, end, step=15)) if expected is None else expected
+        if any(b["timestamp"] not in expected for b in incoming):
             raise ValueError("NATIVE15_NON_TRADING_POINT")
         if not incoming:
             self.failed([symbol], end, now, "EMPTY_NATIVE15", stage=stage)
@@ -174,14 +176,19 @@ class NativeStore(Store):
         if old and incoming[0]["timestamp"] < old[0]["timestamp"]:
             earlier = self.raw_rows(symbol, old[0]["timestamp"], start=incoming[0]["timestamp"], limit=-1)
             prior.update({bar["timestamp"]: bar for bar in earlier})
-        repaired = bool(old and any(b["timestamp"] not in prior and old[-min(len(old), STRATEGY_CAPACITY)]["timestamp"] <= b["timestamp"] <= old[-1]["timestamp"] for b in incoming))
+        inserted = [bar for bar in incoming if bar["timestamp"] not in prior]
+        repair_start = old[-min(len(old), STRATEGY_CAPACITY)]["timestamp"] if old and update_indicators else ""
+        repaired = bool(old and any(repair_start <= bar["timestamp"] <= old[-1]["timestamp"] for bar in inserted))
         correction = any(any(not isclose(b[k], prior[b["timestamp"]][k], rel_tol=1e-12, abs_tol=1e-9)
                              if b.get(k) is not None and prior[b["timestamp"]].get(k) is not None
                              else b.get(k) != prior[b["timestamp"]].get(k) for k in FIELDS)
                          for b in incoming if b["timestamp"] in prior)
         info["basis_revision"] += int(correction or repaired)
-        self._write(symbol, incoming)
-        raw = self.raw_rows(symbol, limit=history_capacity())
+        if correction or inserted:
+            self._write(symbol, incoming)
+        combined = {b["timestamp"]: b for b in old}
+        combined.update((b["timestamp"], b) for b in incoming)
+        raw = [combined[at] for at in sorted(combined)[-history_capacity():]]
         actual = {b["timestamp"] for b in raw}
         # Only the causal strategy window blocks candidates, not deeper MA233 history.
         tail = raw[-STRATEGY_CAPACITY:]
@@ -194,7 +201,7 @@ class NativeStore(Store):
                 break
             contiguous += 1
         state = "READY" if contiguous >= 56 else "GAP" if gaps else "WARMUP"
-        modified = correction or any(t not in prior for t in received) or info["state"] != state
+        modified = correction or bool(inserted) or info["state"] != state
         info.update(state=state, source_id=SOURCE, latest_completed15=raw[-1]["timestamp"],
                     latest_source5=None, correction=correction, gaps=gaps[-250:],
                     rebuild_from=gaps[-1] if gaps and contiguous < 56 else None,
@@ -204,12 +211,15 @@ class NativeStore(Store):
         self.conn.execute("UPDATE native15_history_progress SET first_gap=?,stop_reason=CASE WHEN ? IS NOT NULL THEN 'GAP' "
                           "WHEN stop_reason='GAP' THEN NULL ELSE stop_reason END WHERE symbol=?",
                           (history_gaps[-1] if history_gaps else None, history_gaps[-1] if history_gaps else None, symbol))
-        self.update_cache(symbol, info, raw, self.events(symbol), sessions,
-                          rebuild=correction or stage == "C", append_only=True)
+        if update_indicators:
+            self.update_cache(symbol, info, raw, self.events(symbol), sessions,
+                              rebuild=correction or stage == "C", append_only=True)
         self.set_meta("data_revision", self.meta("data_revision", 0)+int(modified))
         self.set_meta("last_commit", now)
         self.set_meta("last_success_"+("history" if stage == "C" else "live"), dict(at=now, stage=stage, symbol=symbol))
-        if state == "READY" and raw[-1]["timestamp"] >= end:
+        if not update_indicators and stage in ("B", "C") and not (correction or inserted):
+            self.failed([symbol], end, now, "NO_NEW_NATIVE15", stage=stage)
+        elif (state == "READY" or not update_indicators) and raw[-1]["timestamp"] >= end:
             self.conn.execute("UPDATE native15_retry SET error_type=NULL,attempts=0,retry_after=0,last_success=?,next_eligible=0 WHERE symbol=?", (now, symbol))
         else:
             self.conn.execute("UPDATE native15_retry SET last_success=? WHERE symbol=?", (now, symbol))

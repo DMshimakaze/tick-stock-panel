@@ -46,7 +46,9 @@ class DCTransport:
                 self.auth_error = "DC_AUTHORIZATION"
                 raise DCUnavailable(self.auth_error)
             if status == 429:
-                raise DCUnavailable("DC_RATE_LIMIT", time() + max(60, retry_seconds(header=response.headers.get("Retry-After"))))
+                delay = max(60, retry_seconds(header=response.headers.get("Retry-After")))
+                self.budget.defer(delay)
+                raise DCUnavailable("DC_RATE_LIMIT", time() + delay)
             if status != 200:
                 raise DCUnavailable(f"DC_HTTP_{status}", time() + 60)
             try:
@@ -62,6 +64,7 @@ class DCTransport:
                     self.auth_error = "DC_AUTHORIZATION"
                     raise DCUnavailable(self.auth_error)
                 if any(word in message for word in ("频次", "频率", "限流", "rate limit")):
+                    self.budget.defer(60)
                     raise DCUnavailable("DC_RATE_LIMIT", time() + 60)
                 raise DCStructureError(f"DC_BUSINESS_{code}")
             data = payload.get("data")

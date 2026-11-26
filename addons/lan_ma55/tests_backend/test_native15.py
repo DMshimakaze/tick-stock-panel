@@ -200,7 +200,7 @@ def test_five_minute_same_target_retry_survives_restart_then_advances(tmp_path, 
         assert task(owner.market, owner.market.universe(), sessions, target, target) is None
         clock[0] += 2
         selected = task(owner.market, owner.market.universe(), sessions, target, target)
-        assert selected[1:] == (target, "A", ["000000.SZ"])
+        assert selected == (target, target, "A", ["000000.SZ"], 1)
         accept(owner, {target:bars[target]}, sessions, factors={}, stage="A")
         status = owner.status_snapshot(target=target)
         assert status["today_native15_saved"] == status["today_analyzed_candidates"] == 1
@@ -228,7 +228,7 @@ def test_same_day_unknown_factor_recovers_after_restart_without_refetching_bars(
     clock[0] += 301
     with NativeOwner(path) as owner:
         selected = task(owner.market,owner.market.universe(),case['sessions'],target,target)
-        assert selected[2:] == ('F',[symbol])
+        assert selected[2:] == ('F',[symbol],0)
         owner.market.factor_attempt([symbol],target)
         owner.accept_factors([symbol],{symbol:[]},sessions=case['sessions'],target=target,now=target,live_after=target)
         info = owner.market.instrument(symbol)
@@ -257,7 +257,7 @@ def test_factor_cooldown_does_not_block_new_market_target_and_backoff_is_persist
         prepare(owner,sessions)
         accept(owner,bars,sessions,factors={symbol:None})
         selected = task(owner.market,owner.market.universe(),sessions,next_target,next_target)
-        assert selected[2:] == ('A',[symbol])
+        assert selected[2:] == ('A',[symbol],1)
         accept(owner,{next_target:dict(bars[target],timestamp=next_target)},sessions,factors={},stage='A')
         assert owner.market.instrument(symbol)['latest_completed15']==next_target
         assert owner.status_snapshot(target=next_target)['today_analyzed_candidates']==0

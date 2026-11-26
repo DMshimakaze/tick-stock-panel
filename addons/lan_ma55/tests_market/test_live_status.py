@@ -327,13 +327,15 @@ def test_worker_scope_and_runtime_stage_at_the_sdk_http_boundary(tmp_path, monke
     states = []
     if phase in ("D", "W"):
         previous_close = "2026-11-12 15:00:00"
-        monkeypatch.setattr(runtime, "native_task", lambda *_: None)
-        monkeypatch.setattr(runtime.DailyStore, "task", lambda *_: (
+        monkeypatch.setattr(runtime, "native_task", lambda *_, **_kwargs: None)
+        monkeypatch.setattr(runtime.DailyStore, "task", lambda *_, **_kwargs: (
             previous_close, previous_close, 1, [a], phase == "W",
         ))
     elif phase:
-        monkeypatch.setattr(runtime.DailyStore, "task", lambda *_: None)
-        monkeypatch.setattr(runtime, "native_task", lambda *_: (day + " 09:45:00", target, phase, [a]))
+        monkeypatch.setattr(runtime.DailyStore, "task", lambda *_, **_kwargs: None)
+        monkeypatch.setattr(runtime, "native_task", lambda *_, **_kwargs: (
+            day + " 09:45:00", target, phase, [a], 16,
+        ))
 
     def vendor(request):
         body = json.loads(request.content) if request.content else {}

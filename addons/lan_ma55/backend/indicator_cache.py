@@ -135,6 +135,8 @@ def read(conn, symbol, tf, asof, limit, info, calendar_revision, events, *, tabl
     row = conn.execute(f"SELECT * FROM {table} WHERE symbol=? AND timeframe=?", (symbol, tf)).fetchone()
     if not matches(row, info, calendar_revision):
         return None
+    if row["raw_last"] < min(asof, info["latest_completed15"] or asof):
+        return None
     bars = [b for b in unpack(row["bars"]) if b["timestamp"] <= asof]
     # A requested earlier full window can extend beyond this bounded snapshot.
     # Let the caller reconstruct that historical window from bounded raw facts.

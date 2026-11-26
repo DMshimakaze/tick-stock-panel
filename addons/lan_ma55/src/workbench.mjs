@@ -5,7 +5,7 @@ import { escapeHtml as esc, icon, price, quantity, signed } from './presentation
 import { filterRows, newest, savedScopes, scopeButtons, short, stockRows } from './stock_matrix.mjs';
 import { paintRuntime } from './status_view.mjs';
 import { CSS, WORKBENCH_CSS } from './styles.mjs';
-import { createWorkbenchIO, deepLink, normalizedTime, PERIOD_LABEL, statusText, TIMEFRAMES } from './workbench_data.mjs';
+import { createWorkbenchIO, currentFocus, deepLink, normalizedTime, PERIOD_LABEL, statusText, TIMEFRAMES } from './workbench_data.mjs';
 import { LAYOUT } from './workbench_layout.mjs';
 
 export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, interval = 5000, ioOptions } = {}) {
@@ -24,6 +24,7 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
   const focus = mountFocusControls($('focus'), {
     onApply: args => edit('save', args),
     onPreview: args => edit('preview', args),
+    onEstimate: args => edit('estimate', args),
     onRefresh: args => edit('refresh', args),
     onLookup: args => io.submit('members', args),
   });
@@ -38,23 +39,25 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     ].filter(Boolean).join(' · ') };
   }
   function updateFocus(data) {
-    const signature = JSON.stringify(data);
-    if (signature !== lastFocus) { focus.update(decorateFocus(data)); lastFocus = signature; }
+    if (data !== lastFocus && currentFocus(data, lastFocus)) {
+      lastFocus = data;
+      focus.update(decorateFocus(data));
+    }
   }
   async function edit(name, args) {
     try {
       const result = await io.submit('edit', { ...args, action: name });
       if (stopped || !result) return null;
-      if (name === 'preview') return result;
-      lastFocus = JSON.stringify(result.focus);
-      if (view && result.focus.revision >= view.focus.revision) {
-        const memberKeys = new Set(Object.keys(result.focus.members));
-        view = { ...view, focus: result.focus, rows: view.rows.filter(row => memberKeys.has(row.symbol)) };
+      if (name === 'preview' || name === 'estimate') return result;
+      if (currentFocus(result.focus, lastFocus)) lastFocus = result.focus;
+      if (view && lastFocus.revision >= view.focus.revision) {
+        const memberKeys = new Set(Object.keys(lastFocus.members));
+        view = { ...view, focus: lastFocus, rows: view.rows.filter(row => memberKeys.has(row.symbol)) };
         renderTable();
         paintRuntime(node, runtime, view, { statusError, viewError });
       }
       void refresh(true);
-      return decorateFocus(result.focus);
+      return decorateFocus(lastFocus);
     } catch (error) {
       if (error.focus) updateFocus(error.focus);
       throw error;
@@ -192,9 +195,9 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
           if (!raw && view) throw Error('观察结果暂不可读');
           if (raw && raw !== lastRaw) {
             const incoming = JSON.parse(raw);
-            if (!view || incoming.focus.revision >= view.focus.revision) {
+            if (!lastFocus || incoming.focus.revision >= lastFocus.revision) {
               updateFocus(incoming.focus);
-              lastRaw = raw; view = incoming;
+              lastRaw = raw; view = { ...incoming, focus: lastFocus };
             }
           }
           viewError = '';

@@ -11,9 +11,9 @@ const state = { focus_revision: 4, taxonomy_run: 'dc-a', result_id: '1', worker_
 
 test('live A/B/C/F/D/W and analysis have their own status without hiding coverage', () => {
   const stages = [
-    ['A', 'COLLECTING_NATIVE15', '更新行情'], ['B', 'COLLECTING_NATIVE15', '补齐历史'],
-    ['C', 'COLLECTING_NATIVE15', '补充历史'], ['F', 'CHECKING_FACTORS', '核验复权'],
-    ['D', 'COLLECTING_DAILY', '更新日线'], ['W', 'COLLECTING_DAILY', '补齐日线'],
+    ['A', 'COLLECTING_NATIVE15', '更新行情'], ['B', 'COLLECTING_NATIVE15', '修复 15m 历史'],
+    ['C', 'COLLECTING_NATIVE15', '补齐长周期'], ['F', 'CHECKING_FACTORS', '核验复权'],
+    ['D', 'COLLECTING_DAILY', '更新日线'], ['W', 'COLLECTING_DAILY', '补齐周线历史'],
   ];
   for (const [phase, active_operation, label] of stages) {
     const live = { ...state, phase, work_stage: phase, active_operation };
@@ -36,7 +36,7 @@ test('idle, quota, host, failure and stale status have no running indicator', ()
     assert.equal(result.label, label);
     assert.equal(result.running, false);
     assert.equal(result.coverage, coverage);
-    if (phase === 'QUOTA_WAIT') assert.equal(result.taskNote, '补充历史');
+    if (phase === 'QUOTA_WAIT') assert.equal(result.taskNote, '补齐长周期');
   }
   const collecting = { ...state, phase: 'A', active_operation: 'COLLECTING_NATIVE15' };
   for (const [options, label] of [[{ now: at + 46_000 }, '状态过期'],

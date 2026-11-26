@@ -1,6 +1,6 @@
 /** Local taxonomy search and the saved focus draft. */
 import { beijing } from './chart_model.mjs';
-import { SYMBOL, statusText } from './workbench_data.mjs';
+import { currentFocus, SYMBOL, statusText } from './workbench_data.mjs';
 import { codeOf, escapeHtml as esc, icon, kindBadge, kindOf, KINDS, quantity } from './presentation.mjs';
 import { DETAIL, paintFocusDetail } from './focus_details.mjs';
 
@@ -45,9 +45,32 @@ export function resolveTerms(catalog, query, selected = []) {
 
 const at = ms => Number.isFinite(ms) ? beijing(ms / 1000).slice(0, 16) : '';
 const emptyPrefs = () => ({ groups: [], aliases: {} });
+const configOf = view => view.config_revision ?? view.revision;
+const boardNote = entry => ({
+  BOARD_REMOVED: '板块已下架', REVIEW_FAILED: '复核失败',
+  REVIEW_PENDING: '待复核', VERIFIED_EMPTY: '暂无成分',
+}[entry?.status] || (entry?.available === false ? '待核实' : ''));
 const PAGE = 12;
 
-export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup }) {
+export function rebaseFocus(base, draft, latest) {
+  const merge = (before, edited, incoming) => {
+    const next = { ...incoming };
+    for (const key of new Set([...Object.keys(before), ...Object.keys(edited)])) {
+      if (JSON.stringify(before[key]) === JSON.stringify(edited[key])) continue;
+      if (key in edited) next[key] = edited[key];
+      else delete next[key];
+    }
+    return next;
+  };
+  const byKey = (rows, key) => Object.fromEntries(rows.map(row => [key(row), row]));
+  return {
+    selection: Object.keys(merge(...[base, draft, latest].map(row => byKey(row.selection, key => key)))),
+    groups: Object.values(merge(...[base, draft, latest].map(row => byKey(row.groups, group => group.id)))),
+    aliases: merge(base.aliases, draft.aliases, latest.aliases),
+  };
+}
+
+export function mountFocusControls(el, { onApply, onPreview, onEstimate, onRefresh, onLookup }) {
   const doc = el.ownerDocument, node = doc.createElement('section');
   node.className = 'mr-taxonomy';
   node.innerHTML = `<div class="mr-manager-grid">
@@ -88,13 +111,14 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     </div>`;
   el.append(node);
   const $ = role => node.querySelector(`[data-role="${role}"]`), input = $('query');
-  let view, base = [], draft = [], saved = emptyPrefs(), prefs = emptyPrefs(), revision, run;
-  let busy = false, disposed = false, page = 0, kind = 'all', error = '', delta, detail, lookupId = 0;
+  let view, base = [], draft = [], saved = emptyPrefs(), prefs = emptyPrefs(), revision;
+  let pending = null, disposed = false, page = 0, kind = 'all', error = '', delta, estimate, detail, lookupId = 0;
+  let draftVersion = 0, estimateTimer, estimateVersion = 0;
   let groupId = null, groupBoards = [];
   let replacements = {};
   const expanded = new Set();
   const dirty = () => JSON.stringify([base, saved]) !== JSON.stringify([draft, prefs]);
-  const conflict = () => dirty() && (revision !== view?.revision || run !== (view?.taxonomy?.run ?? null));
+  const conflict = () => dirty() && revision !== configOf(view);
   const entries = () => new Map([...(view?.sectors || []), ...(view?.catalog || [])]
     .map(e => [e.key, { ...e, aliases: prefs.aliases[e.key] || [] }]));
   function button(text, action, { label = text, disabled = false, glyph, key } = {}) {
@@ -109,7 +133,8 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     return b;
   }
   function changed() {
-    delta = null; error = ''; $('migration-check').checked = false; render();
+    draftVersion++; delta = estimate = null; error = '';
+    $('migration-check').checked = false; scheduleEstimate(); render();
   }
   function choose(key) {
     if (!draft.includes(key)) { draft = [...draft, key]; changed(); }
@@ -129,7 +154,7 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
   function boardRow(entry, expandable = false) {
     const row = doc.createElement(expandable ? 'summary' : 'div');
     const type = kindOf(entry), selected = draft.includes(entry.key);
-    const note = entry.available === false ? '待核实' : entry.status === 'STALE' ? '旧快照' : '';
+    const note = boardNote(entry);
     row.className = 'mr-taxonomy-board';
     if (expandable) row.dataset.focusKey = `tree:${entry.key}`;
     row.innerHTML = `${expandable ? `<span class="mr-tree-chevron">${icon('chevron')}</span>` : ''}
@@ -138,10 +163,10 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
       <b class="mr-count">${quantity(entry.count)}</b>`;
     row.append(button('成分', () => void lookup({ board: entry.key }), {
       glyph: 'list', key: `members:${entry.key}`, label: `查看 ${entry.name} 成分`,
-      disabled: !Number.isInteger(entry.count) || busy,
+      disabled: !Number.isInteger(entry.count) || entry.removed,
     }), button(selected ? '已选' : '添加', () => choose(entry.key), {
       glyph: selected ? 'check' : 'plus', key: `add:${entry.key}`,
-      label: `添加 ${entry.name}`, disabled: selected || entry.available === false || busy,
+      label: `添加 ${entry.name}`, disabled: selected || entry.available === false,
     }));
     return row;
   }
@@ -198,7 +223,6 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
         const select = doc.createElement('select');
         select.setAttribute('aria-label', `迁移 ${entry.name}`);
         select.dataset.focusKey = `migration:${entry.key}`;
-        select.disabled = busy;
         const empty = doc.createElement('option'); empty.textContent = '暂不映射'; empty.value = '';
         select.append(empty);
         for (const key of draft.filter(key => catalog.has(key))) {
@@ -251,16 +275,15 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     selected.replaceChildren();
     for (const key of draft) {
       const entry = catalog.get(key), snapshot = view?.sectors.find(s => s.key === key);
-      const count = snapshot?.symbols.length ?? entry?.count;
-      const stale = entry?.removed || view?.sector_errors?.[key] ||
-        entry?.status === 'STALE' || (snapshot?.data_day && snapshot.data_day < (t?.market_day || snapshot.data_day));
+      const count = dirty() ? entry?.count ?? snapshot?.symbols.length : snapshot?.symbols.length;
+      const note = boardNote(entry) || (entry ? '' : '板块待核实');
       const name = entry?.name || key;
       const chip = doc.createElement('span');
       chip.className = 'mr-chip';
       chip.innerHTML = `${kindBadge(entry ? kindOf(entry) : 'concept')}<b>${esc(name)}</b>
-        <small>${quantity(count)} 只${stale ? ' / 旧快照' : ''}</small>`;
+        <small>${quantity(count)} 只${note ? ` / ${esc(note)}` : ''}</small>`;
       chip.append(button('', () => { draft = draft.filter(k => k !== key); changed(); },
-        { glyph: 'close', label: `移除 ${name}`, disabled: busy }));
+        { glyph: 'close', label: `移除 ${name}` }));
       selected.append(chip);
     }
     if (!draft.length) selected.textContent = '未选择板块';
@@ -279,7 +302,7 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     matches.replaceChildren();
     for (const group of groupHits) {
       const result = button('', () => joinGroup(group, catalog),
-        { label: `关注组 ${group.name}`, key: `group-match:${group.id}`, disabled: busy });
+        { label: `关注组 ${group.name}`, key: `group-match:${group.id}` });
       result.className = 'mr-group-match';
       result.innerHTML = `${kindBadge('groups')}<b>${esc(group.name)}</b><small>${quantity(group.boards.length)} 个板块</small>${icon('plus')}`;
       matches.append(result);
@@ -293,13 +316,13 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
       const row = doc.createElement('div'), name = doc.createElement('span');
       row.className = 'mr-group-entry';
       name.innerHTML = `${kindBadge('groups')}<b>${esc(group.name)}</b><small>${quantity(group.boards.length)} 个板块</small>`;
-      row.append(name, button('加入关注', () => joinGroup(group, catalog), { glyph: 'plus', label: `加入关注组 ${group.name}`, disabled: busy }),
-      button('编辑', () => editGroup(group), { glyph: 'pencil', key: `edit:${group.id}`, label: `编辑组 ${group.name}`, disabled: busy }),
+      row.append(name, button('加入关注', () => joinGroup(group, catalog), { glyph: 'plus', label: `加入关注组 ${group.name}` }),
+      button('编辑', () => editGroup(group), { glyph: 'pencil', key: `edit:${group.id}`, label: `编辑组 ${group.name}` }),
       button('删除', () => {
         prefs.groups = prefs.groups.filter(g => g.id !== group.id);
         if (groupId === group.id) editGroup(null);
         changed();
-      }, { glyph: 'trash', label: `删除组 ${group.name}`, disabled: busy }));
+      }, { glyph: 'trash', label: `删除组 ${group.name}` }));
       $('groups').append(row);
     }
     $('group-entries').replaceChildren(...groupBoards.map(key => {
@@ -308,58 +331,68 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
       chip.className = 'mr-chip';
       chip.innerHTML = `${kindBadge(item ? kindOf(item) : 'concept')}<b>${esc(name)}</b>`;
       chip.append(button('', () => { groupBoards = groupBoards.filter(k => k !== key); render(); },
-        { glyph: 'close', label: `从组移除 ${name}`, disabled: busy }));
+        { glyph: 'close', label: `从组移除 ${name}` }));
       return chip;
     }));
     const deltaCounts = delta ? [['新增', delta.added, 'blue'], ['退出', delta.removed, 'red'],
       ['保留', delta.retained, 'muted'], ['预览', delta.total, 'teal']] : [];
+    const draftCounts = draft.map(key => catalog.get(key)?.count ?? view?.sectors.find(s => s.key === key)?.symbols.length);
+    const combined = dirty() ? estimate?.total_memberships ??
+      (draftCounts.every(Number.isInteger) ? draftCounts.reduce((a, b) => a + b, 0) : null)
+      : view?.total_memberships ?? (view?.sectors || []).reduce((sum, row) => sum + row.symbols.length, 0);
+    const unique = dirty() ? estimate?.unique_symbols : view?.unique_symbols ?? Object.keys(view?.members || {}).length;
     $('summary').innerHTML = view ? `<div class="mr-delta">
       <span>已保存 <b>${quantity(view.sectors.length)}</b> 个板块</span>
+      <span title="各板块有效成分数相加，含重叠">合计 <b>${quantity(combined)}</b> 只</span>
+      <span title="按带交易所后缀的证券代码去重">去重 <b>${quantity(unique)}</b> 只</span>
       ${deltaCounts.filter(([, count]) => Number.isInteger(count)).map(([label, count, tone]) =>
         `<span class="mr-note" data-tone="${tone}">${label} <b>${quantity(count)}</b></span>`).join('')}
       ${!delta && dirty() ? '<span class="mr-note" data-tone="amber">未保存草稿</span>' : ''}</div>`
       : '<span class="mr-meta">正在读取关注池…</span>';
-    $('error').textContent = conflict() ? '关注池或映射代已更新，撤销草稿后可重新编辑。' : error;
+    $('error').textContent = pending === 'save' ? '保存中 · 待生效' : conflict() ? '另一窗口已保存 · 重新预览' : error;
     renderMigration(catalog);
-    $('apply').disabled = !view || busy || !delta || conflict() ||
+    $('apply').disabled = !view || Boolean(pending) || !delta?.preview_id || conflict() ||
       (view.legacy?.pending && !$('migration-check').checked);
-    $('preview').disabled = !view || busy || (!dirty() && !view.legacy?.pending) || conflict();
-    $('refresh').disabled = !view || busy || Boolean(t?.queued);
-    $('reset').disabled = !view || busy || !dirty();
+    $('preview').disabled = !view || Boolean(pending) || (!dirty() && !view.legacy?.pending);
+    $('refresh').disabled = !view || Boolean(pending) || Boolean(t?.queued);
+    $('reset').disabled = !view || pending === 'save' || !dirty();
     $('add').textContent = SYMBOL.test(query.toUpperCase()) ? '查股票归属' : '添加精确匹配';
-    $('add').disabled = !view || busy || !terms.length;
+    $('add').disabled = !view || !terms.length;
     input.disabled = !view;
-    $('migration-check').disabled = busy;
-    $('alias-save').disabled = busy;
-    $('detail-add').disabled = busy || !detail?.board || draft.includes(detail.query.board);
-    $('group-add').disabled = busy || !draft.length;
-    $('group-save').disabled = busy;
-    $('group-reset').disabled = busy;
+    $('migration-check').disabled = pending === 'save';
+    $('detail-add').disabled = !detail?.board || draft.includes(detail.query.board) ||
+      catalog.get(detail.query.board)?.available !== true;
+    $('group-add').disabled = !draft.length;
     if (focused) [...node.querySelectorAll('[data-focus-key]')].find(item =>
       item.dataset.focusKey === focused)?.focus({ preventScroll: true });
   }
+  const config = (selection, values) => ({ selection, groups: values.groups, aliases: values.aliases });
+  function setBase(next) {
+    base = next.sectors.map(e => e.key);
+    saved = { groups: next.groups || [], aliases: next.aliases || {} };
+    revision = configOf(next);
+  }
+  function adoptDraft(next) {
+    draft = [...next.selection];
+    prefs = structuredClone({ groups: next.groups, aliases: next.aliases });
+  }
+  const dataVersion = (value, keys) => JSON.stringify([value?.revision, value?.taxonomy?.run,
+    ...(value?.catalog || []).filter(entry => keys.includes(entry.key))
+      .map(entry => [entry.key, entry.observed_ms, entry.count, entry.available])]);
   function update(next, reset = false) {
     if (disposed || !next) return;
     if (!Number.isInteger(next.revision) || !Array.isArray(next.sectors) || !next.members || !Array.isArray(next.catalog)) {
       throw Error('关注池回执无效');
     }
-    if (view && next.revision < view.revision) return;
-    const clean = !dirty(), sameGeneration = next.revision === revision && (next.taxonomy?.run ?? null) === run;
-    if (view?.taxonomy?.run !== next.taxonomy?.run) closeDetail(false);
+    if (!currentFocus(next, view)) return;
+    const clean = !dirty(), dataChanged = dataVersion(view, draft) !== dataVersion(next, draft);
     view = next;
     if (clean || reset) {
-      base = next.sectors.map(e => e.key);
-      draft = [...base];
-      saved = { groups: next.groups || [], aliases: next.aliases || {} };
-      prefs = { groups: [...saved.groups], aliases: { ...saved.aliases } };
-      revision = next.revision;
-      run = next.taxonomy?.run ?? null;
-      if (reset || !sameGeneration) {
-        delta = null;
-        replacements = {};
-        $('migration-check').checked = false;
-      }
-    }
+      setBase(next);
+      adoptDraft(config(base, saved));
+      delta = estimate = null;
+      if (reset) { replacements = {}; $('migration-check').checked = false; }
+    } else if (dataChanged) { estimate = null; scheduleEstimate(); }
     render();
   }
   function add() {
@@ -396,20 +429,76 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     } catch (e) { if (request === lookupId) error = e.message; }
     render();
   }
-  async function submit(action) {
-    if (busy) return;
-    busy = true; error = ''; render();
-    try {
-      const args = { expected_revision: revision, run, selection: [...draft], preferences: structuredClone(prefs) };
-      if (view.legacy?.pending) {
-        args.migration = Object.fromEntries(Object.entries(replacements).filter(([, key]) => draft.includes(key)));
-        args.confirm_migration = $('migration-check').checked;
+  function editArgs() {
+    const args = { expected_revision: revision, run: view.taxonomy?.run ?? null,
+      selection: [...draft], preferences: structuredClone(prefs), preview_id: delta?.preview_id };
+    if (view.legacy?.pending) {
+      args.migration = Object.fromEntries(Object.entries(replacements).filter(([, key]) => draft.includes(key)));
+      args.confirm_migration = $('migration-check').checked;
+    }
+    return args;
+  }
+  function scheduleEstimate() {
+    clearTimeout(estimateTimer);
+    const sequence = ++estimateVersion;
+    if (!onEstimate || !view || !dirty() || pending || conflict()) return;
+    estimateTimer = setTimeout(async () => {
+      try {
+        const next = await onEstimate(editArgs());
+        if (disposed || sequence !== estimateVersion || !next) return;
+        estimate = next;
+        if (next.preview_changed) {
+          delta = null;
+          $('migration-check').checked = false;
+          error = '成分已更新 · 重新预览';
+        }
+      } catch (e) {
+        if (!disposed && sequence === estimateVersion) error = editError(e);
       }
-      if (action === 'preview') delta = await onPreview(args);
-      else if (action === 'refresh') update(await onRefresh({ expected_revision: view.revision, run: view.taxonomy?.run ?? null }));
-      else update(await onApply(args), true);
-    } catch (e) { error = statusText(e.message); }
-    finally { busy = false; render(); }
+      if (!disposed) render();
+    }, 300);
+  }
+  const editError = e => e.unavailable?.length
+    ? `板块待核实 ${e.unavailable.map(key => entries().get(key)?.name || key.split(':').at(-1)).join('、')}`
+    : statusText(e.message);
+  async function submit(action) {
+    if (pending) return;
+    if (action === 'preview' && conflict()) {
+      const before = config(base, saved), edited = config(draft, prefs);
+      setBase(view);
+      adoptDraft(rebaseFocus(before, edited, config(base, saved)));
+      delta = estimate = null;
+      $('migration-check').checked = false;
+    }
+    pending = action === 'apply' ? 'save' : action;
+    scheduleEstimate(); error = ''; render();
+    const version = draftVersion, args = editArgs();
+    try {
+      if (action === 'preview') {
+        const next = await onPreview(args);
+        if (version === draftVersion && next && !conflict()) delta = estimate = next;
+      } else if (action === 'refresh') {
+        update(await onRefresh({ expected_revision: configOf(view), run: view.taxonomy?.run ?? null }));
+      } else {
+        const next = await onApply(args);
+        if (!next || disposed) return;
+        if (version === draftVersion) update(next, true);
+        else {
+          const edited = config(draft, prefs);
+          update(next, true);
+          adoptDraft(rebaseFocus(config(args.selection, args.preferences), edited, config(base, saved)));
+        }
+      }
+    } catch (e) {
+      if (e.focus) update(e.focus);
+      if (version === draftVersion) {
+        if (e.preview) {
+          delta = estimate = e.preview;
+          $('migration-check').checked = false;
+        }
+        error = editError(e);
+      }
+    } finally { pending = null; scheduleEstimate(); render(); }
   }
   $('directions').replaceChildren(...INITIAL_DIRECTIONS.map(term => button(term, () => {
     input.value = term; page = 0; render(); input.focus();
@@ -454,7 +543,11 @@ export function mountFocusControls(el, { onApply, onPreview, onRefresh, onLookup
     editGroup(null); changed();
   });
   for (const action of ['preview', 'apply', 'refresh']) $(action).addEventListener('click', () => void submit(action));
-  $('reset').addEventListener('click', () => { error = ''; editGroup(null); update(view, true); });
+  $('reset').addEventListener('click', () => {
+    draftVersion++; error = ''; editGroup(null); update(view, true); scheduleEstimate();
+  });
   render();
-  return { update, inspect: key => lookup({ board: key }), dispose: () => { disposed = true; node.remove(); } };
+  return { update, inspect: key => lookup({ board: key }), dispose: () => {
+    disposed = true; clearTimeout(estimateTimer); node.remove();
+  } };
 }

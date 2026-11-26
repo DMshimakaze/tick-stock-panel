@@ -102,8 +102,6 @@ class DCMaintenance:
         self.record(queued=False, error=None, retry_at=0, blocked_day=None, restarts=0, batch_issue=None)
 
     def latest_catalog(self, day):
-        if self.daily.get("day") != day:
-            self.record_daily(dict(day=day, parts={}, checked={}, scope_checked=False))
         parts = self.daily["parts"]
         for kind in KINDS:
             if kind not in parts:
@@ -113,7 +111,7 @@ class DCMaintenance:
                 return None
         return {key: node for group in parts.values() for key, node in group.items()}
 
-    def review_day(self, day, stockmaster, selected):
+    def review_day(self, day, stockmaster, _selected):
         catalog = self.latest_catalog(day)
         if catalog is None:
             return
@@ -128,16 +126,30 @@ class DCMaintenance:
                 self.record(queued=True)
                 return
             self.record_daily({**self.daily, "scope_checked": True})
+    def review_focus(self, day, selected):
+        if self.daily.get("day") != day:
+            verified = {key: item for key in self.verified_boards()
+                        if (item := self.board_check(key))}
+            self.record_daily(dict(day=day, parts={}, checked={}, verified=verified, scope_checked=False))
         scope = self.active_scope()
         known = scope | set(self.active["excluded"])
         checks = self.daily["checked"]
         for key in selected:
-            if key not in self.boards or key in checks:
+            if key not in self.boards or (checks.get(key, {}).get("run") == self.active["run"] and
+                    time() < checks[key].get("retry_at", float("inf"))):
                 continue
             board = self.boards[key]
             call = member_request(board["kind"], [key], day)
-            data = self.request(self.active["run"], day, call)
-            members = decode_members(board["kind"], [key], day, data)[key]
+            try:
+                data = self.request(self.active["run"], day, call)
+                members = decode_members(board["kind"], [key], day, data)[key]
+                if not members:
+                    raise DCStructureError("DC_NO_DATED_MEMBERS")
+            except (DCUnavailable, DCStructureError) as exc:
+                self.record_daily({**self.daily, "checked": {**checks, key: dict(
+                    error=str(exc), day=day, run=self.active["run"],
+                    retry_at=max(time() + 300, getattr(exc, "retry_at", 0) or 0))}})
+                return True
             incoming = set(members)
             outside = incoming - known
             issue = None
@@ -148,30 +160,51 @@ class DCMaintenance:
                 elif board["kind"] == "industry" and incoming != previous:
                     issue = "DC_INDUSTRY_AWAITING_TREE"
             if issue:
-                self.record_daily({**self.daily, "checked": {**checks, key: {"error": issue}}})
+                self.record_daily({**self.daily, "checked": {**checks, key: dict(
+                    error=issue, day=day, run=self.active["run"])}})
                 self.record(queued=True)
             else:
                 today_members = {symbol: val for symbol, val in members.items() if symbol in scope}
-                self.record_daily({**self.daily, "checked": {**checks, key: {
+                item = {
                     "observed_ms": self.source.last_receipt["observed_ms"], "day": day,
                     "run": self.active["run"], "rows": today_members,
-                }}})
-            return
+                }
+                self.record_daily({**self.daily, "checked": {**checks, key: item}})
+            return True
+        return False
 
     def active_scope(self):
         return set(self.active["scope"]) if self.active else set()
 
     def board_check(self, key):
+        for tag in ("checked", "verified"):
+            item = self.daily.get(tag, {}).get(key, {})
+            if self.active and item.get("run") == self.active["run"] and "rows" in item:
+                return item
+        return {}
+
+    def board_issue(self, key):
         item = self.daily.get("checked", {}).get(key, {})
-        return item if self.active and item.get("run") == self.active["run"] else {}
+        if item.get("day") == self.target_day and self.active and item.get("run") == self.active["run"]:
+            return item.get("error")
+        return None
+
+    def verified_boards(self):
+        return self.daily.get("checked", {}).keys() | self.daily.get("verified", {}).keys()
 
     def step(self, sessions, stockmaster, selected):
         day = self.target_day = source_day(sessions, now_cn())
-        if not day or self.source.auth_error or time() < self.state.get("retry_at", 0):
+        if not day or self.source.auth_error:
             return
-        if self.source.budget.delay() > 0 or self.state.get("blocked_day") == day:
+        if self.source.budget.delay() > 0:
             return
         try:
+            # A directory change can require a complete generation. Keep verifying
+            # unchanged selected IDs while that separate generation is being built.
+            if self.active and self.active["day"] < day and self.review_focus(day, selected):
+                return
+            if time() < self.state.get("retry_at", 0) or self.state.get("blocked_day") == day:
+                return
             if self.staging:
                 self.build(stockmaster)
             elif stockmaster and (not self.active or self.state.get("queued") or (

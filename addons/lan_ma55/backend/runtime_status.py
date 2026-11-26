@@ -20,8 +20,11 @@ def observation_summary(rows, targets, market_day, *, latest_saved=None, latest_
     readiness = {period: 0 if not total or targets[period] else None for period in TIMEFRAMES}
     reasons = {period: {} for period in TIMEFRAMES}
     ready_symbols = ready_all = candidates = 0
+    arrivals = 0 if targets["15m"] else None
     saved, analyzed = latest_saved, latest_analyzed
     for row in rows:
+        if arrivals is not None and row.get("raw_15m_end") == targets["15m"]:
+            arrivals += 1
         ready = 0
         candidate = False
         reference = row.get("reference")
@@ -58,6 +61,7 @@ def observation_summary(rows, targets, market_day, *, latest_saved=None, latest_
         blocked_symbols=total - ready_symbols, candidate_symbols=candidates if any(
             value is not None for value in readiness.values()) else None,
         ready_15m=minute, unready_15m=total - minute if minute is not None else None,
+        arrived_15m=arrivals,
         ready_all=ready_all if all(value is not None for value in readiness.values()) else None,
         ready_by_timeframe=readiness, blocking_by_timeframe=reasons,
         latest_saved_15m=saved, latest_analyzed_15m=analyzed,

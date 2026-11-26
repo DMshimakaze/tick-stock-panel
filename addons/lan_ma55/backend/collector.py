@@ -11,7 +11,7 @@ import httpx
 from tickflow import TickFlow, TickFlowError
 
 from .market_grid import BEIJING, as_ms, latest_point, normalize_five, now_cn, wall
-from .multiframe_input import DAILY_HISTORY, normalize_daily
+from .multiframe_input import DAILY_HISTORY, MAX_BATCH_SYMBOLS, MAX_DAILY_BATCH_POINTS, MAX_NATIVE_BARS, normalize_daily
 from .native15_shadow import normalize_native
 from .request_budget import (
     CollectionStopped,
@@ -95,6 +95,7 @@ class Collector:
             budgets.append(self.cold_budget)
         delay = max(b.delay() for b in budgets)
         if delay > 0:
+            self.metrics["budget_deferrals"] += 1
             self.report(phase="QUOTA_WAIT", wait_seconds=round(delay, 2))
             raise RequestDeferred(monotonic() + delay, reason="QUOTA_WAIT")
         began = monotonic()
@@ -243,12 +244,15 @@ class Collector:
         )
 
     def fetch_daily(self, symbols, start, end, *, count, cold=False):
-        if not 1 <= len(symbols) <= (16 if cold else 100) or not 1 <= count <= DAILY_HISTORY:
+        if (not 1 <= len(symbols) <= MAX_BATCH_SYMBOLS or not 1 <= count <= DAILY_HISTORY
+                or len(symbols) * count > MAX_DAILY_BATCH_POINTS):
             raise ValueError("Daily batch exceeds the scheduled request window")
+        began = monotonic()
         data = self.request(lambda: self.tf.klines.batch(
             symbols, period="1d", adjust="none", start_time=as_ms(start[:10]),
             end_time=as_ms(end), count=count, as_dataframe=False, batch_size=100, max_workers=1,
         ), cold=cold)
+        decoded = monotonic()
         if set(data) - set(symbols):
             raise ValueError("UNREQUESTED_SYMBOL")
         bars, errors = {}, {}
@@ -262,7 +266,19 @@ class Collector:
                     errors[symbol] = "DAILY_SOURCE_PENDING"
             except (KeyError, TypeError, ValueError, OverflowError):
                 errors[symbol] = "INVALID_DAILY_SCHEMA"
+        self.record_bars("1d", count, bars, errors, began, decoded)
         return bars, errors
+
+    def record_bars(self, period, count, bars, errors, began, decoded):
+        valid = sum(bool(rows) for rows in bars.values())
+        total = sum(len(rows) for rows in bars.values())
+        self.metrics[f"processed_symbols_{period}"] += valid
+        self.metrics[f"valid_rows_{period}"] += total
+        if self.observations and self.observations[-1]["period"] == period:
+            self.observations[-1]["batch_metrics"] = dict(
+                valid_symbols=valid, valid_rows=total, errors=len(errors), requested_count=count,
+                sdk_ms=round((decoded - began) * 1000, 1), normalize_ms=round((monotonic() - decoded) * 1000, 1),
+            )
 
     def session_evidence(self, now):
         """Confirm today with completed native15; no 5m session probe."""
@@ -349,16 +365,18 @@ class Collector:
                 errors[symbol] = dict(code=str(exc), timestamps=None)
         return valid, errors
 
-    def fetch(self, symbols, start, end, *, cold=False, count=1280):
+    def fetch(self, symbols, start, end, *, cold=False, count=MAX_NATIVE_BARS):
         """One production native15 HTTP, isolated validation per security."""
-        if not 1 <= len(symbols) <= 100 or not 1 <= count <= 1280:
+        if not 1 <= len(symbols) <= MAX_BATCH_SYMBOLS or not 1 <= count <= MAX_NATIVE_BARS:
             raise ValueError("Native15 batch limited to 100 symbols / 1280 bars")
         cutoff = min(end, str(now_cn() - timedelta(seconds=75)))
+        began = monotonic()
         data = self.request(lambda: self.tf.klines.batch(
             symbols, period="15m", adjust="none", start_time=as_ms(start),
             end_time=as_ms(end), count=count, as_dataframe=False,
             batch_size=100, max_workers=1, show_progress=False,
         ), cold=cold)
+        decoded = monotonic()
         if set(data) - set(symbols):
             raise ValueError("UNREQUESTED_SYMBOL")
         valid, errors = {}, {}
@@ -375,6 +393,7 @@ class Collector:
                     self.metrics["invalid_native15_rows"] += len(diagnostic["invalid"])
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 errors[symbol] = dict(code=str(exc) if isinstance(exc, ValueError) else "INVALID_NATIVE15_SCHEMA", timestamps=None)
+        self.record_bars("15m", count, valid, errors, began, decoded)
         return valid, errors
 
     def close(self):

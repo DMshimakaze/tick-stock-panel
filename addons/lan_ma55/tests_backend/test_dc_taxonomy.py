@@ -128,21 +128,24 @@ def test_legacy_preview_requires_explicit_confirmation_and_leaves_legacy_read_on
             assert focus.migration_pending and not focus.snapshot["members"]
             assert focus.edit("save", 0, RUN, DAY, selection=[THEME])["error"] == "DC_MIGRATION_CONFIRM"
             assert focus.edit("save", 0, RUN, DAY, selection=[LEGACY])["error"] == "INVALID_SELECTION"
-            delta = focus.edit("preview", 0, RUN, DAY, selection=[THEME, CONCEPT], migration={LEGACY: THEME})
+            prefs = {"groups": [dict(id=str(uuid4()), name="对照组", boards=[THEME])],
+                     "aliases": {THEME: ["例"]}}
+            delta = focus.edit("preview", 0, RUN, DAY, selection=[THEME, CONCEPT],
+                               migration={LEGACY: THEME}, preferences=prefs)
             assert (delta["added"], delta["removed"], delta["retained"], delta["total"]) == (1, 1, 1, 2)
             row, = delta["migration"]
             assert (row["common"], row["old_only"], row["new_only"]) == (1, 1, 0)
-            prefs = {"groups": [dict(id=str(uuid4()), name="对照组", boards=[THEME])],
-                     "aliases": {THEME: ["例"]}}
             saved = focus.edit("save", 0, RUN, DAY, selection=[THEME, CONCEPT, THEME],
-                               migration={LEGACY: THEME}, confirm_migration=True, preferences=prefs)
+                               migration={LEGACY: THEME}, confirm_migration=True, preferences=prefs,
+                               confirmation=delta["_confirmation"])
             assert saved["ok"] and saved["total"] == 2 and old.read() == original
             assert focus.lookup(dict(run=RUN, board=THEME))["rows"] == [dict(symbol=A, name="甲", reason="解释")]
             reverse = focus.lookup(dict(run=RUN, symbol=A))
             assert reverse["industry_path"] == [ROOT, MID, LEAF]
             assert reverse["name"] == "甲"
-            assert focus.edit("save", 1, "old", DAY, selection=[])["error"] == "SCOPE_CONFLICT"
-            assert focus.edit("save", 1, RUN, DAY, selection=[])["ok"]
+            assert focus.edit("save", 0, "old", DAY, selection=[])["error"] == "SCOPE_CONFLICT"
+            pause = focus.edit("preview", 1, "old", DAY, selection=[])
+            assert focus.edit("save", 1, RUN, DAY, selection=[], confirmation=pause["_confirmation"])["ok"]
         finally:
             focus.source.close()
         restarted = DCFocusOwner(owner, None, None, Event())
@@ -150,8 +153,10 @@ def test_legacy_preview_requires_explicit_confirmation_and_leaves_legacy_read_on
             assert not restarted.snapshot["members"] and restarted.snapshot["groups"] == prefs["groups"]
             assert restarted.snapshot["aliases"] == prefs["aliases"] and old.read() == original
             restarted.taxonomy.target_day = "20261210"
-            assert all(x["status"] == "STALE" for x in restarted.view(DAY)["catalog"])
-            assert restarted.edit("save", 2, RUN, DAY, selection=[THEME])["added"] == 1
+            assert all(x["status"] in ("REVIEW_PENDING", "VERIFIED_EMPTY") for x in restarted.view(DAY)["catalog"])
+            preview = restarted.edit("preview", 2, RUN, DAY, selection=[THEME])
+            assert restarted.edit("save", 2, RUN, DAY, selection=[THEME],
+                                  confirmation=preview["_confirmation"])["added"] == 1
         finally:
             restarted.source.close()
 
@@ -179,6 +184,41 @@ def test_pending_failure_retains_generation_and_new_generation_includes_new_dire
         assert store.board_data("next")[new]["count"] == 0
 
 
+def test_focus_preview_counts_and_config_conflicts_are_separate_from_snapshots(tmp_path):
+    with NativeOwner(tmp_path / "state.sqlite3") as owner:
+        publish(owner)
+        focus = DCFocusOwner(owner, None, None, Event())
+        try:
+            focus.apply([THEME], [focus.board_snapshot(THEME)])
+            config = focus.snapshot["config_revision"]
+            choice = [THEME, CONCEPT, THEME]
+            preview = focus.edit("preview", config, RUN, DAY, selection=choice)
+            assert (preview["total_memberships"], preview["unique_symbols"]) == (2, 2)
+            previous = focus.snapshot["revision"]
+            theme = dict(focus.board_snapshot(THEME), observed_ms=500)
+            focus.apply([THEME], [theme])
+            assert focus.snapshot["revision"] > previous and focus.snapshot["config_revision"] == config
+            assert focus.edit("save", config, "prior-run", DAY, selection=choice,
+                              confirmation=preview["_confirmation"])["ok"]
+            assert focus.edit("preview", config, RUN, DAY, selection=[THEME])["error"] == "SCOPE_CONFLICT"
+            config = focus.snapshot["config_revision"]
+            preview = focus.edit("preview", config, RUN, DAY, selection=[THEME])
+            focus.taxonomy.target_day = "20261125"
+            focus.taxonomy.record_daily(dict(day="20261125", checked={THEME: dict(
+                run=RUN, day="20261125", observed_ms=600, rows={A: ("甲", None), B: ("乙", None)},
+            )}))
+            different = focus.edit("save", config, RUN, DAY, selection=[THEME], confirmation=preview["_confirmation"])
+            assert different["error"] == "FOCUS_PREVIEW_CHANGED"
+            assert different["preview"]["unique_symbols"] == 2
+            assert focus.edit("save", config, RUN, DAY, selection=[THEME],
+                              confirmation=different["_confirmation"])["ok"]
+            assert focus.view(DAY)["unique_symbols"] == 2
+            assert focus.edit("preview", focus.snapshot["config_revision"], RUN, DAY,
+                              selection=["dc:theme:123456.DC"])["unavailable"] == ["dc:theme:123456.DC"]
+        finally:
+            focus.source.close()
+
+
 def test_new_daily_source_code_queues_full_recheck_without_overwriting_the_membership(tmp_path, monkeypatch):
     day = "20261125"
     outside = "920305.BJ"
@@ -197,7 +237,8 @@ def test_new_daily_source_code_queues_full_recheck_without_overwriting_the_membe
             nodes, _ = inventory()
             monkeypatch.setattr(focus.taxonomy, "latest_catalog", lambda _: nodes)
             focus.taxonomy.record_daily(dict(day=day, scope_checked=True, checked={}))
-            focus.taxonomy.review_day(day, None, [THEME])
+            focus.taxonomy.target_day = day
+            focus.taxonomy.review_focus(day, [THEME])
             assert focus.taxonomy.status()["queued"]
             assert focus.view(day)["sector_errors"][THEME] == "DC_UNIVERSE_CHANGED"
             assert focus.lookup(dict(run=RUN, board=THEME))["total"] == 1
@@ -232,6 +273,10 @@ def test_rate_limit_and_timeout_keep_a_resumable_generation(tmp_path):
                 assert focus.taxonomy.staging["run"] == "pending"
                 assert focus.run == RUN
                 focus.taxonomy.record(retry_at=0)
+                if expected == "DC_RATE_LIMIT":
+                    assert focus.source.budget.delay() > 70
+                    expiry = focus.source.budget.cooldown
+                    focus.source.budget.clock = lambda: expiry + 1
             focus.taxonomy.step(recent, None, [])
             assert store.progress("pending") == {"board_total": 1, "board_ready": 0}
             assert len(attempts) == 3

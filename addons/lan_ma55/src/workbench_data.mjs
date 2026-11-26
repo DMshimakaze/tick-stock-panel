@@ -9,7 +9,8 @@ export const PERIOD_LABEL = { '15m': '15m', '30m': '30m', '60m': '60m', '120m': 
 export const SYMBOL = /^\d{6}\.(SH|SZ|BJ)$/;
 
 const MESSAGES = {
-  SCOPE_CONFLICT: '关注池已更新，请重读后保存',
+  SCOPE_CONFLICT: '另一窗口已保存 · 重新预览',
+  FOCUS_PREVIEW_CHANGED: '成分已更新 · 请确认最新差集',
   SCOPE_PAUSED: '等待保存关注池',
   CALENDAR_PENDING: '交易日历待核实',
   METADATA_PENDING: '标的类型或证券元数据待核实',
@@ -18,7 +19,8 @@ const MESSAGES = {
   FACTOR_PENDING: '复权因子待核实',
   INSUFFICIENT_HISTORY: '完成历史不足',
   MISSING_COMPLETED_BAR: '目标 K 线尚未到达，或未取得有效成交',
-  GAP_IN_REPLAY_WINDOW: '回放窗口存在缺口或停牌',
+  GAP_IN_REPLAY_WINDOW: '回放窗口存在缺柱',
+  ZERO_VOLUME_BAR: '回放窗口含零成交柱',
   WAITING_INPUT: '等待有效数据',
   WAITING_FOR_COMPLETED_TARGET: '等待最新完成周期',
   WAITING_NEXT_15M: '等待下一根完成 K 线',
@@ -43,6 +45,7 @@ const MESSAGES = {
   DC_TIMEOUT: '东财请求超时',
   DC_MEMBER_PAGE_LIMIT: '东财成分触及行数上限，重新分批',
   DC_MISSING_BATCH_GROUP: '本批次缺少板块，重新分批',
+  DC_NO_DATED_MEMBERS: '暂未取得带来源日期的成分',
   CREDENTIAL_REQUIRED: 'TickFlow 行情凭据不可用',
   SOURCE_UNAVAILABLE: '行情源暂不可用',
   RATE_LIMITED: '行情源要求暂缓请求',
@@ -52,6 +55,8 @@ const MESSAGES = {
 
 export const statusText = status => MESSAGES[status] || status || '等待工作台就绪';
 export const normalizedTime = value => typeof value === 'string' ? value.replace('T', ' ').slice(0, 19) : '';
+export const currentFocus = (incoming, current) => !current || incoming.revision > current.revision ||
+  (incoming.revision === current.revision && (incoming.asof_us ?? 0) >= (current.asof_us ?? 0));
 
 export function deepLink(search) {
   const query = new URLSearchParams(search);
@@ -109,6 +114,9 @@ export function createWorkbenchIO(api, {
         if (result.ok === false) {
           const error = Error(statusText(result.error));
           error.focus = result.focus;
+          error.code = result.error;
+          error.preview = result.preview;
+          error.unavailable = result.unavailable;
           throw error;
         }
         return result;

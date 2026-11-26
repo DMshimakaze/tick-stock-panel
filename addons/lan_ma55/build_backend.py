@@ -1,13 +1,14 @@
 """Build the unified official package; include source and built page only."""
 
+from argparse import ArgumentParser
 from pathlib import Path
 import zipfile
 
 
-def build(destination=None):
+def build(destination=None, page=None):
     root = Path(__file__).resolve().parent
     target = (
-        Path(destination) if destination else root / "dist" / "lan-ma55-0.13.2.zip"
+        Path(destination) if destination else root / "dist" / "lan-ma55-0.13.3.zip"
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     names = ['__init__.py','engine.py','pipeline.py','store.py','extension.py',
@@ -24,9 +25,13 @@ def build(destination=None):
         archive.write(root / "extension.yaml", "extension.yaml")
         for name in names:
             archive.write(root / "backend" / name, "backend/" + name)
-        archive.write(root / "dist" / "extension.js", "frontend/extension.mjs")
+        archive.write(Path(page) if page else root / "dist" / "extension.js", "frontend/extension.mjs")
     return target
 
 
 if __name__ == "__main__":
-    print(build())
+    parser = ArgumentParser(description=__doc__)
+    parser.add_argument("--destination", type=Path)
+    parser.add_argument("--page", type=Path)
+    args = parser.parse_args()
+    print(build(args.destination, args.page))

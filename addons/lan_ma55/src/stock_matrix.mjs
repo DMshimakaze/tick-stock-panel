@@ -10,8 +10,11 @@ export function newest(row) {
 
 function frameLabel(frame) {
   if (frame?.status !== 'READY') {
-    return ['INSUFFICIENT_HISTORY', 'MISSING_COMPLETED_BAR', 'WAITING_FOR_COMPLETED_TARGET', 'WAITING_INPUT']
-      .includes(frame?.status) ? '待补' : frame?.status ? '阻塞' : '—';
+    return ({
+      INSUFFICIENT_HISTORY: '待补', MISSING_COMPLETED_BAR: '待补',
+      WAITING_FOR_COMPLETED_TARGET: '待算', WAITING_INPUT: '待算',
+      FACTOR_PENDING: '复权待核实', GAP_IN_REPLAY_WINDOW: '缺柱', ZERO_VOLUME_BAR: '零成交',
+    }[frame?.status] || (frame?.status ? '阻塞' : '—'));
   }
   const decision = frame.result?.latest;
   if (decision?.event_id) return '候选';
@@ -65,7 +68,8 @@ export function stockRows(rows, selected, empty) {
         ? [short(frame.expected_end), frame.latest_candidate?.at ? `最近确认 ${short(frame.latest_candidate.at)}` : ''].filter(Boolean).join(' / ')
         : statusText(frame?.status);
       return `<td data-column="${tf}"><button class="mr-frame" data-stock="${symbol}" data-tf="${tf}"
-        data-state="${label}" title="${esc(title)}" aria-label="${name} ${PERIOD_LABEL[tf]} ${label}">${label}</button></td>`;
+        data-state="${['待算', '待补'].includes(label) ? '待补' : frame?.status === 'READY' ? label : '阻塞'}"
+        title="${esc(title)}" aria-label="${name} ${PERIOD_LABEL[tf]} ${label}">${label}</button></td>`;
     }).join('');
     return `<tr class="${selected === row.symbol ? 'selected' : ''}">
       <td><button class="mr-stock-name" data-stock="${symbol}" title="${name}">${name}</button>${name === symbol ? '' : `<span class="mr-code">${symbol}</span>`}</td>

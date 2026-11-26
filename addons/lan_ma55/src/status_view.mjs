@@ -6,11 +6,12 @@ const STALE_MS = 45_000;
 const STAGES = {
   STARTING: ['启动中', 'muted', 'clock'],
   A: ['更新行情', 'blue', 'refresh'],
-  B: ['补齐历史', 'amber', 'archive'],
-  C: ['补充历史', 'amber', 'archive'],
+  B: ['修复 15m 历史', 'amber', 'archive'],
+  C: ['补齐长周期', 'amber', 'archive'],
   F: ['核验复权', 'violet', 'check'],
   D: ['更新日线', 'blue', 'refresh'],
-  W: ['补齐日线', 'amber', 'archive'],
+  W: ['补齐周线历史', 'amber', 'archive'],
+  ANALYZING: ['待算', 'violet', 'activity'],
   QUOTA_WAIT: ['等待额度', 'amber', 'clock'],
   RATE_LIMITED: ['限流等待', 'amber', 'clock'],
   HOST_BUSY: ['等待宿主', 'muted', 'clock'],
@@ -77,7 +78,7 @@ function periods(coverage) {
 }
 
 const BLOCK_GROUPS = [
-  ['目标缺口', ['MISSING_COMPLETED_BAR', 'WAITING_FOR_COMPLETED_TARGET', 'GAP_IN_REPLAY_WINDOW']],
+  ['行情与回放', ['MISSING_COMPLETED_BAR', 'WAITING_FOR_COMPLETED_TARGET', 'GAP_IN_REPLAY_WINDOW', 'ZERO_VOLUME_BAR']],
   ['历史深度', ['INSUFFICIENT_HISTORY']],
   ['复权', ['FACTOR_PENDING']],
   ['输入核实', ['TICK_UNAVAILABLE', 'METADATA_PENDING', 'WAITING_INPUT']],
@@ -141,11 +142,12 @@ export function paintRuntime(root, status, view, errors) {
   role('notice').textContent = model.notice;
   role('period-coverage').innerHTML = periods(coverage);
   role('runtime-facts').innerHTML = [
-    pair('全周期齐套', quantity(coverage?.ready_all)),
+    pair('15m 行情到达', Number.isInteger(coverage?.arrived_15m) ?
+      `${quantity(coverage.arrived_15m)} / ${quantity(denominator)}` : '—'),
     pair('行情水位', printableTime(model.sameFocus && s.latest_saved_15m)),
     pair('分析水位', printableTime(model.sameFocus && s.latest_analyzed_15m)),
     pair('后台心跳', epochTime(s.status_at_ms)),
-    pair('关注修订', quantity(s.focus_revision)),
+    pair('全周期齐套', quantity(coverage?.ready_all)),
     pair('当前批次', Number.isInteger(s.active_symbols) && model.running ? `${quantity(s.active_symbols)} 只` : '—'),
   ].join('');
   const reasons = blocking(coverage);

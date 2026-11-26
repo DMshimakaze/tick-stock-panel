@@ -2,7 +2,7 @@
 
 import json
 import re
-from time import time
+from time import time, time_ns
 from uuid import UUID
 
 from .focus_pool import SYMBOL
@@ -30,7 +30,7 @@ def _identity(value):
 
 
 def focus_view(focus, market_day):
-    return focus.view(market_day)
+    return dict(focus.view(market_day), asof_us=time_ns() // 1000)
 
 
 class WorkbenchBridge:
@@ -38,6 +38,7 @@ class WorkbenchBridge:
         self.owner, self.focus, self.observations = owner, focus, observations
         self.publisher = publisher
         self.published = {}
+        self.previews = {}
         self.last_view = None
 
     def publish(self, payload):
@@ -73,13 +74,20 @@ class WorkbenchBridge:
                     raise ValueError("INVALID_COMMAND")
                 if kind == "edit":
                     action = args.get("action")
-                    if action not in ("save", "refresh", "preview"):
+                    if action not in ("save", "refresh", "preview", "estimate"):
                         raise ValueError("INVALID_COMMAND")
                     migration = {key: args[key] for key in ("migration", "confirm_migration") if key in args}
+                    preview = self.previews.get(scope)
+                    confirmation = (preview[2] if preview and preview[:2] ==
+                                    (identity[0], args.get("preview_id")) else None)
                     result = self.focus.edit(action, args.get("expected_revision"), args.get("run"), market_day,
                                              selection=args.get("selection"), preferences=args.get("preferences"),
-                                             **migration)
-                    if action != "preview" or not result["ok"]:
+                                             confirmation=confirmation, **migration)
+                    updated = result.pop("_confirmation", None)
+                    if updated is not None:
+                        self.previews[scope] = (identity[0], identity[1], updated)
+                        result.get("preview", result)["preview_id"] = identity[1]
+                    if (action in ("save", "refresh") and result["ok"]) or result.get("error") == "SCOPE_CONFLICT":
                         result["focus"] = focus_view(self.focus, market_day)
                 elif kind == "members":
                     result = self.focus.lookup(args, market_day)

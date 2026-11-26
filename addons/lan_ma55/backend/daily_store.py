@@ -4,8 +4,8 @@ from collections import defaultdict
 import json
 from time import time
 
-from .market_grid import FIELDS, stamp
-from .multiframe_input import DAILY_HISTORY, DAILY_SOURCE
+from .market_grid import FIELDS
+from .multiframe_input import DAILY_HISTORY, DAILY_SOURCE, MAX_DAILY_BATCH_POINTS, window_batch
 
 
 class DailyStore:
@@ -34,17 +34,16 @@ class DailyStore:
         row = self.conn.execute("SELECT * FROM ma55_daily_progress_v1 WHERE symbol=?", (symbol,)).fetchone()
         return dict(row) if row else {}
 
-    def frame_revision(self, symbol, target):
+    def frame_revision(self, symbol, target, *, start=""):
         return self.conn.execute(
-            "SELECT coalesce(sum(revision),0) FROM ma55_daily_bar_v1 WHERE symbol=? AND bar_end<=?",
-            (symbol, target),
+            "SELECT coalesce(sum(revision),0) FROM ma55_daily_bar_v1 WHERE symbol=? AND bar_end BETWEEN ? AND ?",
+            (symbol, start, target),
         ).fetchone()[0]
 
-    def task(self, master, schedule):
+    def task(self, master, schedule, needs, *, cold_allowed=True):
         if not schedule or not master:
             return None
         target = schedule[-1]
-        history = schedule[-DAILY_HISTORY:]
         progress = {
             row["symbol"]: row for row in self.conn.execute(
                 "SELECT * FROM ma55_daily_progress_v1 JOIN json_each(?) ON value=symbol",
@@ -57,23 +56,19 @@ class DailyStore:
             if not info["eligible"]:
                 continue
             prior = progress.get(symbol)
-            if prior and prior["target"] == target:
-                if prior["first_gap"] and prior["next_retry"] <= now and prior["first_gap"] >= history[0]:
-                    gap = prior["first_gap"]
-                    groups[(False, gap, gap, 1)].append(symbol)
+            if prior and prior["target"] == target and prior["next_retry"] > now:
                 continue
-            # Use the available window for new members. Existing members only
-            # fetch the new dates or their earliest still-missing date.
-            need_from = max(history[0], stamp(info["listing_date"], 900)) if info["listing_date"] else history[0]
-            if prior and prior["target"] < target:
-                need_from = next(at for at in history if at > prior["target"])
-            count = sum(need_from <= at <= target for at in history)
-            if count:
-                groups[(count > 64, need_from, target, count)].append(symbol)
-        if not groups:
-            return None
-        cold, start, end, count = min(groups, key=lambda key: (key[0], key[2] != target, key[1]))
-        return start, end, count, groups[(cold, start, end, count)][:16 if cold else 100], cold
+            for cold, frame in ((False, "daily"), (True, "weekly")):
+                window = needs.get((symbol, frame))
+                if window and (not cold or cold_allowed):
+                    groups[cold].append((prior["target"] if prior else "", symbol, *window))
+                    break
+        if groups:
+            cold = min(groups)
+            batch = window_batch(schedule, groups[cold], max_count=DAILY_HISTORY,
+                                 max_points=MAX_DAILY_BATCH_POINTS)
+            if batch:
+                return *batch, cold
 
     def accept(self, symbols, received, errors, schedule, master, *, retry=300):
         if not schedule:
@@ -108,6 +103,7 @@ class DailyStore:
                 )}
                 gap = next((at for at in schedule if at >= earliest and (not listing or at[:10] >= listing)
                             and at not in actual), None)
+                error = errors.get(symbol)
+                delay = time() + retry if error or not changed else 0
                 self.conn.execute("INSERT OR REPLACE INTO ma55_daily_progress_v1 VALUES (?,?,?,?,?,?)",
-                                  (symbol, target, existing.get("revision", 0) + changed, gap, time() + retry,
-                                   errors.get(symbol) if gap else None))
+                                  (symbol, target, existing.get("revision", 0) + changed, gap, delay, error))

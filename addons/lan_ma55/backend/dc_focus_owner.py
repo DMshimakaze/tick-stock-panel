@@ -5,6 +5,11 @@ from .dc_transport import DCTransport
 from .focus_pool import FocusPool, ScopeConflict, SYMBOL, _union, validate_preferences
 
 
+def coverage(sectors, universe):
+    scoped = [dict(row, symbols=[s for s in row["symbols"] if s in universe]) for row in sectors]
+    return scoped, _union(scoped), sum(len(row["symbols"]) for row in scoped)
+
+
 class DCFocusOwner:
     def __init__(self, owner, token, endpoint, stop, limit=18, *, transport=None):
         self.source = DCTransport(token, endpoint, stop, limit, transport=transport)
@@ -59,17 +64,19 @@ class DCFocusOwner:
     def apply(self, selection, snapshots, preferences=None):
         result = self.pool.apply(selection, snapshots, expected_revision=self.snapshot["revision"],
                                  preferences=preferences)
-        self.snapshot = {key: result[key] for key in ("revision", "sectors", "members", "groups", "aliases")}
+        self.snapshot = {key: result[key] for key in
+                         ("revision", "config_revision", "sectors", "members", "groups", "aliases")}
         return result
 
     def edit(self, action, expected, run, market_day, *, selection=None, preferences=None,
-             migration=None, confirm_migration=False):
+             migration=None, confirm_migration=False, confirmation=None):
         revision = self.snapshot["revision"]
-        if type(expected) is not int or expected != revision or run != self.run:
-            return dict(ok=False, error="SCOPE_CONFLICT", revision=revision)
+        config_revision = self.snapshot["config_revision"]
         if action == "refresh":
             self.taxonomy.request_refresh()
             return dict(ok=True, queued=True, revision=revision)
+        if type(expected) is not int or expected != config_revision:
+            return dict(ok=False, error="SCOPE_CONFLICT", revision=revision)
         if not isinstance(selection, list) or any(
             not isinstance(key, str) or not DC_KEY.fullmatch(key) for key in selection
         ):
@@ -78,28 +85,42 @@ class DCFocusOwner:
             return dict(ok=False, error="DC_MAPPING_PENDING", revision=revision)
         keys = list(dict.fromkeys(selection))
         saved = {sector["key"]: sector for sector in self.snapshot["sectors"]}
-        if set(keys) - self.taxonomy.boards.keys() - saved.keys():
-            return dict(ok=False, error="DC_BOARD_UNAVAILABLE", revision=revision)
+        unavailable = [key for key in keys if key not in self.taxonomy.boards and key not in saved]
+        if unavailable:
+            return dict(ok=False, error="DC_BOARD_UNAVAILABLE", revision=revision, unavailable=unavailable)
         fresh = {key: self.board_snapshot(key) for key in keys if key in self.taxonomy.boards}
+        fresh = {key: row for key, row in fresh.items()
+                 if key not in saved or row["observed_ms"] >= saved[key]["observed_ms"]}
         chosen = [fresh[key] if key in fresh else saved[key] for key in keys]
-        wanted = set(_union(chosen))
-        if self.run and set(keys) - saved.keys() and wanted >= self.taxonomy.active_scope():
+        scope = self.taxonomy.active_scope()
+        _, members, total_memberships = coverage(chosen, scope)
+        wanted = set(members)
+        if scope and wanted >= scope:
             return dict(ok=False, error="MARKET_WIDE_SELECTION", revision=revision)
-        before = set(self.legacy["members"] if self.migration_pending else self.snapshot["members"])
-        delta = dict(added=len(wanted - before), removed=len(before - wanted),
-                     retained=len(before & wanted), total=len(wanted))
+        actual = set(self.snapshot["members"]) & scope
+        before = set(self.legacy["members"]) if self.migration_pending else actual if actual < scope else set()
+        added, removed, retained = wanted - before, before - wanted, before & wanted
+        delta = dict(added=len(added), removed=len(removed), retained=len(retained), total=len(wanted),
+                     total_memberships=total_memberships, unique_symbols=len(wanted))
         try:
             comparison = self.migration_comparison(migration or {}, fresh) if self.migration_pending else []
             validated = (validate_preferences(preferences, self.taxonomy.boards, self.snapshot)
                          if preferences is not None else None)
         except (AttributeError, KeyError, TypeError, ValueError):
             return dict(ok=False, error="INVALID_PREFERENCES", revision=revision)
+        plan = (config_revision, keys, validated, migration or {}, added, removed, retained, total_memberships)
+        preview = dict(ok=True, revision=revision, migration=comparison, **delta)
+        if action == "estimate":
+            return dict(preview, preview_changed=confirmation is not None and confirmation != plan)
         if action == "preview":
-            return dict(ok=True, revision=revision, migration=comparison, **delta)
+            return dict(preview, _confirmation=plan)
         if action != "save":
             return dict(ok=False, error="INVALID_COMMAND", revision=revision)
         if self.migration_pending and confirm_migration is not True:
             return dict(ok=False, error="DC_MIGRATION_CONFIRM", revision=revision)
+        if confirmation != plan:
+            return dict(ok=False, error="FOCUS_PREVIEW_CHANGED", revision=revision,
+                        preview=preview, _confirmation=plan)
         try:
             result = self.apply(keys, list(fresh.values()), validated)
         except ScopeConflict:
@@ -137,34 +158,40 @@ class DCFocusOwner:
         status = self.taxonomy.status()
         catalog = []
         errors = {}
+        target_day = iso_day(self.taxonomy.target_day)
         for key, board in self.taxonomy.boards.items():
             check = self.taxonomy.board_check(key)
             count = len(check["rows"]) if check else board["count"]
             data_day = iso_day(check["day"]) if check else status["market_day"]
-            target_day = iso_day(self.taxonomy.target_day)
-            stale = bool(target_day and data_day < target_day)
-            state = "STALE" if stale else "VERIFIED_EMPTY" if count == 0 else "READY"
-            catalog.append(dict(board, count=count, status=state, data_day=data_day,
+            marked = self.taxonomy.board_issue(key)
+            state = ("REVIEW_FAILED" if marked else "VERIFIED_EMPTY" if count == 0 else
+                     "REVIEW_PENDING" if target_day and data_day < target_day else "READY")
+            catalog.append(dict(board, count=count, status=state, data_day=data_day, target_day=target_day,
+                                observed_ms=check.get("observed_ms", board["observed_ms"]),
                                 available=True, aliases=self.snapshot["aliases"].get(key, [])))
-            marked = self.taxonomy.daily.get("checked", {}).get(key, {}).get("error")
             if marked:
                 errors[key] = marked
         universe = self.taxonomy.active_scope()
+        sectors, members, total = coverage(self.snapshot["sectors"], universe)
         selected = self.snapshot["members"].keys()
         catalog_error = status["error"]
         if selected - universe:
             catalog_error = catalog_error or "DC_SCOPE_OUTDATED"
-        if universe and selected >= universe:
+        if universe and members.keys() >= universe:
             catalog_error = "MARKET_WIDE_SELECTION"
+        sectors = [dict(row, **({} if row["key"] in self.taxonomy.boards else
+                        dict(removed=True, available=False, status="BOARD_REMOVED"))) for row in sectors]
         return dict(
-            **self.snapshot, catalog=catalog, taxonomy=status, legacy=self.legacy_view(),
+            self.snapshot, sectors=sectors, members=members if members.keys() < universe else {},
+            total_memberships=total, unique_symbols=len(members),
+            catalog=catalog, taxonomy=status, legacy=self.legacy_view(),
             catalog_checked_day=status["market_day"], catalog_stale=status["stale"],
             catalog_error=catalog_error, sector_errors=errors, market_day=market_day,
         )
 
     def lookup(self, args, _market_day=None):
-        if not self.run or args.get("run") != self.run:
-            return dict(ok=False, error="SCOPE_CONFLICT")
+        if not self.run:
+            return dict(ok=False, error="DC_MAPPING_PENDING")
         offset = args.get("offset", 0)
         if type(offset) is not int or offset < 0:
             raise ValueError("Invalid membership offset")
@@ -181,6 +208,8 @@ class DCFocusOwner:
                 total = meta["count"]
             return dict(ok=True, board=dict(meta, count=total, source_ms=None,
                         data_day=iso_day(check.get("day") or self.taxonomy.active["day"]),
+                        target_day=iso_day(self.taxonomy.target_day),
+                        review_error=self.taxonomy.board_issue(board),
                         observed_ms=check.get("observed_ms", meta["observed_ms"])),
                         rows=rows, total=total, offset=offset)
         if isinstance(symbol, str) and SYMBOL.fullmatch(symbol):
@@ -189,7 +218,7 @@ class DCFocusOwner:
             memberships = self.taxonomy.store.stock_memberships(self.run, symbol)
             names = {board for board, _ in memberships}
             name = next((name for _, name in memberships if name), None)
-            for key in self.taxonomy.daily.get("checked", {}):
+            for key in self.taxonomy.boards.keys() & self.taxonomy.verified_boards():
                 check = self.taxonomy.board_check(key)
                 if check:
                     if symbol in check["rows"]:

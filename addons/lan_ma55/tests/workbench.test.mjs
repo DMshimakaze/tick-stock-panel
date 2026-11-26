@@ -36,7 +36,8 @@ test('confirmed focus handles the draft and offers explicit local alias matches 
       assert.equal(id, COMMAND);
       const command = rows[0], args = JSON.parse(command.payload_json);
       calls.push(args); commands.set(command.scope, command);
-      const payload = args.action === 'preview' ? { ok: true, added: 1, removed: 0, retained: 0 }
+      const payload = args.action === 'preview' ? { ok: true, added: 1, removed: 0, retained: 0,
+        total_memberships: 1, unique_symbols: 1, preview_id: command.request_id }
         : { ok: true, focus: (focus = saved) };
       replies.push({ ...command, payload_json: JSON.stringify(payload) });
     },
@@ -69,6 +70,7 @@ test('confirmed focus handles the draft and offers explicit local alias matches 
       [action, expected_revision, run, selection]), [
       ['preview', 0, 'verified', [board.key]], ['save', 0, 'verified', [board.key]],
     ]);
+    assert.equal(calls[1].preview_id, replies[0].request_id);
     assert.match(document.querySelector('[data-role="summary"]').textContent, /已保存 1 个板块/);
   } finally { dispose(); dom.window.close(); }
 });

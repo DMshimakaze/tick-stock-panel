@@ -2,7 +2,9 @@
 
 import atexit
 import os
+from collections import OrderedDict, defaultdict
 from datetime import timedelta
+from itertools import islice
 from pathlib import Path
 from threading import Event, Lock, Thread
 from time import monotonic, time
@@ -11,7 +13,7 @@ import httpx
 
 from .collector import Collector, SourceError
 from .daily_store import DailyStore
-from .exchange_sessions import frame_schedules, planned_session
+from .exchange_sessions import INTRADAY, frame_schedules, planned_session
 from .dc_focus_owner import DCFocusOwner
 from .market_grid import (
     CAPACITY,
@@ -19,7 +21,7 @@ from .market_grid import (
     wall,
 )
 from .market_store import encoded
-from .multiframe_core.multiframe import VERSION
+from .multiframe_core.multiframe import TIMEFRAMES, VERSION
 from .native15_owner import NativeOwner
 from .native15_scheduler import task as native_task
 from .native15_shadow import SOURCE as NATIVE_SOURCE
@@ -29,6 +31,10 @@ from .result_publisher import Publisher, RUNTIME_ID, workbench_configs
 from .runtime_status import completed_targets, observation_summary, runtime_projection
 from .workbench_bridge import WorkbenchBridge, focus_view
 from .worker_lease import ProcessLease
+
+
+ANALYSIS_BATCH = 12
+WRITE_BATCH = 16
 
 
 def classify(items, day):
@@ -82,7 +88,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.13.2", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.3", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -105,6 +111,10 @@ class Worker:
         self.view_input, self.published_view = None, None
         self.view_dirty, self.view_sequence = True, 0
         self.last_runtime, self.last_heartbeat, self.runtime_retry = None, 0, 0
+        self.analyze_queue = OrderedDict()
+        self.analysis_scope, self.analysis_targets = set(), {}
+        self.analysis_calendar = None
+        self.repair_turn = 0
 
     def start(self):
         self.lease = ProcessLease(self.folder / "worker.lock")
@@ -288,10 +298,60 @@ class Worker:
                     error=None, waiting_for=None)
         self.publish_runtime()
 
-    def refresh_observations(self, symbols, sessions, schedules, weeks, now, *, live=False):
-        self.view_dirty |= self.observations.refresh(
-            symbols, sessions, schedules, weeks, now, self.state["started_at"], live=live,
-        )
+    def service_commands(self, sessions, schedules, weeks):
+        if not self.bridge_prepared or monotonic() - self.last_commands < 0.8:
+            return
+        self.last_commands = monotonic()
+        try:
+            self.bridge.consume(self.market_day, sessions, schedules, weeks)
+        except (httpx.HTTPError, ValueError):
+            self.report(command_error="工作台请求或回执暂不可用")
+        else:
+            self.report(command_error=None)
+
+    def enqueue_analysis(self, symbols, frames=TIMEFRAMES, *, live=False, priority=False):
+        for symbol in symbols:
+            queued = self.analyze_queue.setdefault(symbol, {})
+            queued.update({frame: live or queued.get(frame, False) for frame in frames})
+            if priority:
+                self.analyze_queue.move_to_end(symbol, last=False)
+
+    def sync_analysis(self, scope):
+        calendar = self.store.meta("calendar_revision", 0)
+        removed = self.analysis_scope - scope
+        for symbol in removed:
+            self.analyze_queue.pop(symbol, None)
+            for frame in TIMEFRAMES:
+                self.observations.needs.pop((symbol, frame), None)
+        changed = tuple(frame for frame in TIMEFRAMES if self.targets[frame] != self.analysis_targets.get(frame))
+        if calendar != self.analysis_calendar:
+            changed = TIMEFRAMES
+        if changed:
+            self.enqueue_analysis(scope, changed)
+        self.enqueue_analysis(scope - self.analysis_scope, priority=True)
+        self.analysis_scope, self.analysis_targets, self.analysis_calendar = scope, self.targets, calendar
+
+    def analyze_next(self, sessions, schedules, weeks, now, *, stage="ANALYZING"):
+        if not self.analyze_queue:
+            return
+        symbols = list(islice(self.analyze_queue, ANALYSIS_BATCH))
+        grouped = defaultdict(list)
+        for symbol in symbols:
+            wanted = self.analyze_queue.pop(symbol)
+            for live in (True, False):
+                frames = tuple(frame for frame in TIMEFRAMES if wanted.get(frame) is live)
+                if frames:
+                    grouped[frames, live].append(symbol)
+        began = monotonic()
+        self.mark_task(stage, "ANALYZING_MA55", symbols)
+        for (frames, live), batch in grouped.items():
+            self.view_dirty |= self.observations.refresh(
+                batch, sessions, schedules, weeks, now, self.state["started_at"], live=live, frames=frames,
+            )
+        with self.owner.conn:
+            self.owner.conn.execute("INSERT INTO native15_timing(at,stage,symbols,scan_ms) VALUES(?,?,?,?)",
+                                    (now, "ANALYSIS", len(symbols), (monotonic() - began) * 1000))
+        self.service_commands(sessions, schedules, weeks)
 
     def update_metadata(self, scope, now, market_day):
         saved = self.store.meta("focus_metadata_checks", {})
@@ -302,7 +362,8 @@ class Worker:
                 self.store.put_metadata([row for row in rows if row["symbol"] in missing])
                 self.store.set_meta("focus_metadata_checks", dict(saved, **dict.fromkeys(missing, market_day)))
             self.view_dirty = True
-        return self.store.universe(scope)
+            self.enqueue_analysis((row["symbol"] for row in rows if row["symbol"] in missing), priority=True)
+        return bool(missing)
 
     def run(self):
         try:
@@ -324,7 +385,6 @@ class Worker:
                     scope=self.active_scope,
                 )
                 self.restore_budgets(str(now_cn()))
-            last_input = None
             while not self.stop.is_set():
                 now = str(now_cn())
                 sessions = self.sessions(now)
@@ -336,14 +396,9 @@ class Worker:
                     self.prepare_bridge()
                     if self.last_runtime is None:
                         self.publish_runtime()
-                    if self.bridge_prepared and monotonic() - self.last_commands >= 2:
-                        self.last_commands = monotonic()
-                        try:
-                            self.bridge.consume(self.market_day, sessions, schedules, weeks)
-                        except (httpx.HTTPError, ValueError):
-                            self.report(command_error="工作台请求或回执暂不可用")
-                        else:
-                            self.report(command_error=None)
+                    self.service_commands(sessions, schedules, weeks)
+                    self.sync_analysis(self.active_scope())
+                    self.analyze_next(sessions, schedules, weeks, now)
                     scope = self.active_scope()
                     if not scope:
                         phase = "SCOPE_PAUSED"
@@ -356,39 +411,50 @@ class Worker:
                         schedules, weeks = frame_schedules(sessions, now)
                         self.targets, self.market_day = completed_targets(schedules), sessions[-1] if sessions else None
                         target = self.targets["15m"]
-                        master = self.update_metadata(scope, now, sessions[-1]) if sessions else {}
-                        input_key = (scope, self.targets,
-                                     self.store.meta("calendar_revision", 0))
-                        if last_input != input_key:
-                            self.mark_task("ANALYZING", "ANALYZING_MA55", master)
-                            self.refresh_observations(master, sessions, schedules, weeks, now)
-                            last_input = input_key
+                        self.service_commands(sessions, schedules, weeks)
+                        scope = self.active_scope()
+                        self.sync_analysis(scope)
+                        master = self.store.universe(scope)
+                        needs = self.observations.needs
+                        cold_allowed = self.cold_budget.delay() == 0
                         if target:
-                            work = native_task(self.store, master, sessions, target, now)
-                        daily = self.daily.task(master, schedules["daily"]) if not work or work[2] == "C" else None
-                        if daily and (not daily[-1] or self.cold_budget.delay() == 0):
+                            work = native_task(self.store, master, sessions, target, now,
+                                               needs=needs, grid=schedules["15m"], cold_allowed=cold_allowed)
+                        metadata = bool(sessions and (not work or work[2] != "A")
+                                        and self.update_metadata(scope, now, sessions[-1]))
+                        if metadata:
+                            work = None
+                        daily = (self.daily.task(master, schedules["daily"], needs, cold_allowed=cold_allowed)
+                                 if not metadata and (not work or work[2] == "C") else None)
+                        if daily and (not work or self.repair_turn % 2 == 0):
                             start, end, count, symbols, cold = daily
                             stage = "W" if cold else "D"
                             self.mark_task(stage, "COLLECTING_DAILY", symbols)
                             received, errors = self.collector.fetch_daily(symbols, start, end, count=count, cold=cold)
-                            self.daily.accept(symbols, received, errors, schedules["daily"], master)
-                            self.mark_task(stage, "ANALYZING_MA55", symbols)
-                            self.refresh_observations(symbols, sessions, schedules, weeks, str(now_cn()), live=not cold)
-                        elif work and (work[2] != "C" or self.cold_budget.delay() == 0):
+                            self.flush_requests(stage)
+                            for offset in range(0, len(symbols), WRITE_BATCH):
+                                batch = symbols[offset:offset + WRITE_BATCH]
+                                self.daily.accept(batch, received, errors, schedules["daily"], master)
+                                self.service_commands(sessions, schedules, weeks)
+                            scope = self.active_scope()
+                            active = [symbol for symbol in symbols if symbol in scope]
+                            self.queue_received(active, ("daily", "weekly"), live=start == end == self.targets["daily"])
+                            self.repair_turn += 1
+                        elif work:
                             stage = work[2]
                             self.collect_work(work, sessions, schedules, weeks, now, target)
+                            if stage == "C":
+                                self.repair_turn += 1
                         elif not target:
                             phase = "CALENDAR_PENDING"
-                        elif work or daily:
-                            phase = "QUOTA_WAIT"
-                            waiting_stage = "W" if daily else work[2]
+                        elif self.analyze_queue:
+                            phase = "ANALYZING"
+                    if stage is not None:
+                        self.sync_analysis(self.active_scope())
+                        self.analyze_next(sessions, schedules, weeks, str(now_cn()), stage=stage)
                     self.report(phase=phase, active_operation="IDLE", active_symbols=None,
                                 backend_scanning=bool(scope and self.collector and not self.market_rejected),
                                 work_stage=waiting_stage, error=None, waiting_for=None)
-                    if not stage or not "09:30:00" <= now[11:19] < "15:00:00":
-                        self.focus.schedule(sessions[-1] if sessions else None, sessions,
-                                            self.collector.taxonomy_universe
-                                            if self.collector and not self.market_rejected else None)
                 except RequestDeferred as exc:
                     if exc.status_code == 429 and not (exc.reason or "").startswith("HOST_"):
                         with self.owner.conn:
@@ -411,10 +477,17 @@ class Worker:
                                 active_operation="BLOCKED", active_symbols=None, work_stage=stage,
                                 waiting_for=None, error=str(exc))
                 self.flush_requests(stage or "METADATA")
+                self.service_commands(sessions, schedules, weeks)
+                # Classification uses a separate provider and can progress
+                # during a TickFlow cooldown. Service edits before a new call.
+                if not stage or self.state["phase"] in ("QUOTA_WAIT", "RATE_LIMITED"):
+                    self.focus.schedule(self.market_day, sessions,
+                                        self.collector.taxonomy_universe
+                                        if self.collector and not self.market_rejected else None)
                 self.publish_runtime()
                 self.publish(schedules)
                 self.publish_runtime()
-                self.stop.wait(2)
+                self.stop.wait(0.4 if self.analyze_queue else 0.8)
         except CollectionStopped:
             self.report(phase="STOPPED", active_operation="IDLE", active_symbols=None)
         except Exception as exc:
@@ -436,8 +509,14 @@ class Worker:
             self.lease.close()
             self.report(database_connected=False, backend_scanning=False)
 
+    def queue_received(self, symbols, frames, *, live=False):
+        for symbol in symbols:
+            for frame in frames:
+                self.observations.needs.pop((symbol, frame), None)
+        self.enqueue_analysis(symbols, frames, live=live, priority=True)
+
     def collect_work(self, work, sessions, schedules, weeks, now, target):
-        start, end, stage, symbols = work
+        start, end, stage, symbols, count = work
         live_after = self.state["started_at"]
         with self.owner.conn:
             self.owner.set_meta("target", target)
@@ -445,17 +524,26 @@ class Worker:
             self.mark_task(stage, "CHECKING_FACTORS", symbols)
             self.store.factor_attempt(symbols, now)
             factors = self.collector.factors(symbols)
-            self.owner.accept_factors(symbols, factors, sessions=sessions, target=target,
-                                      now=str(now_cn()), live_after=live_after, analyze_candidates=False)
+            self.flush_requests(stage)
+            for offset in range(0, len(symbols), WRITE_BATCH):
+                self.owner.accept_factors(symbols[offset:offset + WRITE_BATCH], factors, sessions=sessions,
+                                          target=target, now=str(now_cn()), live_after=live_after,
+                                          analyze_candidates=False)
+                self.service_commands(sessions, schedules, weeks)
         else:
             self.mark_task(stage, "COLLECTING_NATIVE15", symbols)
+            received, errors = self.collector.fetch(symbols, start, end, cold=stage == "C", count=count)
             self.store.attempt(symbols, end, now, stage)
-            received, errors = self.collector.fetch(symbols, start, end, cold=stage == "C")
-            self.owner.accept_batch(symbols, received, errors, sessions=sessions, start=start, end=end,
-                                    now=str(now_cn()), factors={}, stage=stage, live_after=live_after,
-                                    analyze_candidates=False)
-        self.mark_task(stage, "ANALYZING_MA55", symbols)
-        self.refresh_observations(symbols, sessions, schedules, weeks, str(now_cn()), live=stage == "A")
+            self.flush_requests(stage)
+            for offset in range(0, len(symbols), WRITE_BATCH):
+                self.owner.accept_batch(symbols[offset:offset + WRITE_BATCH], received, errors,
+                                        sessions=sessions, start=start, end=end, now=str(now_cn()), factors={},
+                                        stage=stage, live_after=live_after, analyze_candidates=False)
+                self.service_commands(sessions, schedules, weeks)
+        scope = self.active_scope()
+        self.queue_received([symbol for symbol in symbols if symbol in scope],
+                            TIMEFRAMES if stage == "F" else INTRADAY,
+                            live=stage == "A" and start == end == target)
 
     def flush_requests(self, stage):
         if self.collector:

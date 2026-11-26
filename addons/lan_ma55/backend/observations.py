@@ -10,14 +10,16 @@ from .ma55_levels import project_levels
 from .market_grid import history_capacity, wall, with_averages
 from .market_store import encoded
 from .multiframe_core.multiframe import TIMEFRAMES, VERSION, analyze_timeframe
-from .multiframe_input import DAILY_HISTORY, frame_bars, replay_input
+from .multiframe_input import DAILY_HISTORY, frame_bars, missing_window, replay_input, source_window
 
 CHART_LIMIT = 250
+INPUT_KEY_VERSION = 2
 
 
 class Observations:
     def __init__(self, market, daily):
         self.market, self.daily, self.conn = market, daily, market.conn
+        self.needs = {}
         self.conn.executescript("""
             CREATE TABLE IF NOT EXISTS ma55_observation_v1(
                 rule_version TEXT, symbol TEXT, timeframe TEXT,
@@ -45,9 +47,10 @@ class Observations:
         last = effective[-1]["day"] if effective else "NONE"
         return effective, f"TickFlow:QFQ:{symbol}:{info['factor_revision']}:{last}"
 
-    def refresh(self, symbols, sessions, schedules, weeks, now, live_after, *, live=False):
+    def refresh(self, symbols, sessions, schedules, weeks, now, live_after, *, live=False, frames=TIMEFRAMES):
         target = schedules["15m"][-1] if schedules["15m"] else None
         changed = False
+        market_revision = self.market.meta("calendar_revision", 0)
         with self.conn:
             for symbol in symbols:
                 info = self.market.instrument(symbol)
@@ -56,45 +59,52 @@ class Observations:
                 saved = self.saved(symbol)
                 factors, basis = self.reference_basis(symbol, info, target)
                 tick = info["raw_tick"]
-                market_revision = self.market.meta("calendar_revision", 0)
                 latest_minute = {}
-                raw = {}
-                for timeframe in TIMEFRAMES:
+                raw, available = {}, {}
+                for timeframe in frames:
                     schedule = schedules[timeframe]
                     end = schedule[-1] if schedule else None
                     previous = saved.get(timeframe)
-                    prior = json.loads(previous["payload"]) if previous else {}
                     start = previous["replay_start"] if previous else None
                     minute = timeframe in INTRADAY
-                    revision = info["basis_revision"] if minute else self.daily.frame_revision(symbol, end)
+                    source_grid = schedules["15m" if minute else "daily"]
+                    recent = source_grid[-(history_capacity() if minute else DAILY_HISTORY):]
+                    origins = [str(wall(r["replay_start"]) - (
+                        timedelta(hours=2) if minute else timedelta(days=7)))
+                        for tf, r in saved.items() if (tf in INTRADAY) == minute and r["replay_start"]]
+                    lower = min([*origins, recent[0]]) if recent else ""
+                    revision = info["basis_revision"] if minute else self.daily.frame_revision(symbol, end, start=lower)
                     # A forming 30/60/120m bucket leaves its completed input alone.
                     # A change in the covered row count also detects completed repairs.
                     if minute and end and end not in latest_minute:
                         latest_minute[end] = self.conn.execute(
-                            "SELECT count(*) FROM native15_bar WHERE symbol=? AND bar_end<=?", (symbol, end)
+                            "SELECT count(*) FROM native15_bar WHERE symbol=? AND bar_end BETWEEN ? AND ?",
+                            (symbol, lower, end),
                         ).fetchone()[0]
-                    key = encoded([end, basis, tick, revision, market_revision, latest_minute.get(end) if minute else None])
+                    key = encoded([INPUT_KEY_VERSION, end, basis, tick, revision, market_revision,
+                                   latest_minute.get(end) if minute else None, info["listing_date"]])
+                    fact = (symbol, timeframe)
+                    prior = json.loads(previous["payload"]) if previous else {}
                     if previous and key == previous["input_key"]:
+                        self.needs[fact] = prior.get("missing_raw")
                         continue
                     if end and minute not in raw:
                         if minute:
-                            origins = [str(wall(r["replay_start"]) - timedelta(hours=2))
-                                       for tf, r in saved.items() if tf in INTRADAY and r["replay_start"]]
-                            recent = schedules["15m"][-history_capacity():]
-                            lower = min([*origins, recent[0]]) if recent else ""
                             raw[minute] = self.market.raw_rows(symbol, target, start=lower, limit=-1)
                         else:
-                            origins = [str(wall(r["replay_start"]) - timedelta(days=7))
-                                       for tf, r in saved.items() if tf not in INTRADAY and r["replay_start"]]
-                            recent = schedules["daily"][-DAILY_HISTORY:]
-                            lower = min([*origins, recent[0]]) if recent else ""
                             raw[minute] = self.daily.raw_rows(symbol, schedules["daily"][-1], start=lower)
-                    bars = frame_bars(raw.get(minute, ()), timeframe, sessions, weeks, end, factors, target)
-                    inputs, reason = replay_input(bars, schedule, start)
+                        available[minute] = {bar["timestamp"] for bar in raw[minute]}
+                    required = source_window(timeframe, schedule, source_grid, weeks, start, info["listing_date"])
+                    missing = missing_window(required, available.get(minute, ()))
+                    self.needs[fact] = missing
+                    bars = (frame_bars(raw.get(minute, ()), timeframe, sessions, weeks, end, factors, target)
+                            if basis or timeframe == "15m" else [])
                     if not basis:
                         reason = "FACTOR_PENDING"
                     elif not tick or not isfinite(tick) or tick <= 0:
                         reason = "TICK_UNAVAILABLE"
+                    else:
+                        inputs, reason = replay_input(bars, schedule, start)
                     result, candidate = None, None
                     reference = self.price_reference(bars) if timeframe == "15m" else None
                     if not reason:
@@ -103,6 +113,7 @@ class Observations:
                         candidate = self.save_events(result.pop("events"), prior, end, now, live_after, live, basis, revision)
                     payload = dict(status=reason or "READY", basis=basis, expected_end=end, result=result,
                                    latest_candidate=candidate, reference=reference, replay_start=start,
+                                   missing_raw=missing,
                                    source_revision=revision, asset_type=info["source_type"], raw_tick=tick)
                     self.conn.execute("INSERT OR REPLACE INTO ma55_observation_v1 VALUES(?,?,?,?,?,?)",
                                       (VERSION, symbol, timeframe, start, key, encoded(payload)))
@@ -172,6 +183,7 @@ class Observations:
                                      asof=target, basis=minute["basis"])
                       if target and ref and ref["price_basis"] == "QFQ" and minute.get("basis") else None)
             rows.append(dict(symbol=symbol, name=info.get("name") or symbol, raw_tick=info.get("raw_tick"),
+                             raw_15m_end=info.get("latest_completed15"),
                              sectors=keys, frames=frames, reference=ref, levels=levels))
         return rows
 

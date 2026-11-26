@@ -85,3 +85,50 @@ test('EastMoney tree opens two levels and searches day themes without consulting
   ui.dispose();
   dom.window.close();
 });
+
+test('editing while a preview is pending preserves the draft across member and directory updates', async () => {
+  const dom = new JSDOM('<main></main>');
+  const node = dom.window.document.querySelector('main');
+  const [a, b, c] = catalog.map(board => ({ ...board, available: true, count: 3 }));
+  const aSaved = { ...a, symbols: ['000001.SZ', '000002.SZ', '600000.SH'] };
+  const published = { revision: 1, config_revision: 1, asof_us: 1, sectors: [aSaved],
+    catalog: [a, b, c], members: Object.fromEntries(aSaved.symbols.map(symbol => [symbol, [a.key]])),
+    taxonomy: { run: 'first' } };
+  const requests = [];
+  const ui = mountFocusControls(node, {
+    onPreview: args => new Promise(resolve => requests.push({ args, resolve })),
+    onEstimate: async () => ({ total_memberships: 9, unique_symbols: 6 }),
+  });
+  const role = name => node.querySelector('[data-role="' + name + '"]');
+  const add = key => node.querySelector('[data-focus-key="add:' + key + '"]').click();
+  try {
+    ui.update(published);
+    assert.match(role('summary').textContent, /合计 3 只\s+去重 3 只/);
+    add(b.key);
+    role('preview').click();
+    add(c.key);
+    const next = { ...published, revision: 2, asof_us: 2, taxonomy: { run: 'next' } };
+    ui.update(next);
+    requests[0].resolve({ preview_id: 'obsolete', total_memberships: 6, unique_symbols: 4 });
+    await new Promise(resolve => setTimeout(resolve, 340));
+    assert.equal(role('selected').querySelectorAll('.mr-chip').length, 3);
+    assert.match(role('summary').textContent, /合计 9 只\s+去重 6 只/);
+    assert.equal(role('apply').disabled, true);
+    assert.equal(role('preview').disabled, false);
+    role('preview').click();
+    assert.deepEqual(requests[1].args.selection, [a.key, b.key, c.key]);
+    assert.equal(requests[1].args.expected_revision, 1);
+    assert.equal(requests[1].args.run, 'next');
+    requests[1].resolve({ preview_id: 'current', total_memberships: 9, unique_symbols: 6 });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(role('apply').disabled, false);
+    ui.update({ ...next, asof_us: 3, revision: 3, config_revision: 2,
+      sectors: [aSaved, { ...c, symbols: ['600000.SH'] }] });
+    assert.equal(role('apply').disabled, true);
+    assert.match(role('error').textContent, /另一窗口已保存/);
+    role('preview').click();
+    assert.deepEqual(requests[2].args.selection, [a.key, c.key, b.key]);
+    assert.equal(requests[2].args.expected_revision, 2);
+    requests[2].resolve({ preview_id: 'merged', total_memberships: 9, unique_symbols: 6 });
+  } finally { ui.dispose(); dom.window.close(); }
+});

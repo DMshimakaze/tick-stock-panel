@@ -160,6 +160,8 @@ class FocusPool:
         sectors = json.loads(payload)
         row = conn.execute(f"SELECT payload FROM {prefix}_preferences_v1 WHERE id=1").fetchone()
         preferences = json.loads(row[0]) if row else dict(groups=[], aliases={})
+        if prefix == "dc_focus":
+            preferences.setdefault("config_revision", revision)
         return dict(revision=revision, sectors=sectors, members=_union(sectors), **preferences)
 
     def read(self):
@@ -209,20 +211,26 @@ class FocusPool:
             members = _union(sectors)
             saved = {key: old[key] for key in ("groups", "aliases")}
             changed = preferences is not None and preferences != saved
+            selection_changed = keys != list(previous)
             revision = old["revision"] + int(old["revision"] == 0 or sectors != old["sectors"] or changed)
+            config = dict(preferences if changed else saved)
+            if self.prefix == "dc_focus":
+                config["config_revision"] = old["config_revision"] + int(
+                    changed or selection_changed or old["revision"] == 0
+                )
             payload = json.dumps(sectors, ensure_ascii=False)
             if revision != old["revision"]:
                 conn.execute(f"UPDATE {self.prefix}_scope_v1 SET revision=?,payload=? WHERE id=1",
                              (revision, payload))
-            if changed:
+            if changed or ("config_revision" in config and revision != old["revision"]):
                 conn.execute(f"INSERT INTO {self.prefix}_preferences_v1 VALUES (1,?) ON CONFLICT(id) "
-                             "DO UPDATE SET payload=excluded.payload", (json.dumps(preferences, ensure_ascii=False),))
+                             "DO UPDATE SET payload=excluded.payload", (json.dumps(config, ensure_ascii=False),))
             before, after = set(old["members"]), set(members)
             membership_changed = members != old["members"]
-            if membership_changed or keys != list(previous) or old["revision"] == 0:
+            if membership_changed or selection_changed or old["revision"] == 0:
                 conn.execute(f"INSERT INTO {self.prefix}_scope_history_v1 VALUES (?,?)", (revision, payload))
             return dict(revision=revision, sectors=sectors, members=members,
-                        **(preferences if changed else saved),
+                        **config,
                         added=sorted(after-before), removed=sorted(before-after),
                         retained=sorted(before & after),
                         membership_changed=membership_changed)
