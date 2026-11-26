@@ -4,11 +4,53 @@ import pytest
 from addons.lan_ma55.backend.focus_pool import FocusPool, ScopeConflict
 from addons.lan_ma55.backend.ths_focus import CATALOG, MEMBERS, load_catalog, refresh_selection
 from addons.lan_ma55.backend.ma55_levels import project_levels
-from addons.lan_ma55.backend.multiframe_core.multiframe import VERSION
+from addons.lan_ma55.backend.multiframe_core.multiframe import TIMEFRAMES, VERSION
+from addons.lan_ma55.backend.runtime_status import observation_summary, runtime_projection
 
 A, B = "industry:881001.TI", "cn_concept:886001.TI"
 X, Y = "600001.SH", "000001.SZ"
 AT = "2026-11-24 15:00:00"
+
+
+def test_coverage_uses_each_completed_target_and_counts_candidates_once():
+    targets = dict.fromkeys(TIMEFRAMES, AT)
+    prior = "2026-11-24 14:45:00"
+    live = dict(status="READY", expected_end=AT, result={"latest": {"event_id": "candidate", "timestamp": AT}})
+    stale = dict(status="READY", expected_end=prior, result={"latest": {"event_id": "old", "timestamp": prior}})
+    mixed = {"15m": stale, "daily": live, "60m": dict(status="FACTOR_PENDING", expected_end=AT)}
+    full = dict.fromkeys(TIMEFRAMES, live)
+    rows = [{"frames": mixed, "reference": {"at": prior}}, {"frames": full}]
+    summary = observation_summary(rows, targets, AT[:10])
+    assert (summary["expected"], summary["ready_15m"], summary["unready_15m"], summary["ready_all"]) == (2, 1, 1, 1)
+    assert summary["ready_by_timeframe"]["daily"] == 2 and summary["candidate_symbols"] == 2
+    assert summary["blocking_by_timeframe"]["15m"] == {"WAITING_FOR_COMPLETED_TARGET": 1}
+    assert summary["blocking_by_timeframe"]["60m"] == {"FACTOR_PENDING": 1}
+    assert (summary["latest_saved_15m"], summary["latest_analyzed_15m"]) == (prior, AT)
+    no_target = dict.fromkeys(TIMEFRAMES)
+    unknown = observation_summary(rows, no_target, None)
+    assert all(unknown[key] is None for key in ("ready_15m", "unready_15m", "ready_all", "candidate_symbols"))
+    assert observation_summary([], no_target, None)["ready_15m"] == 0
+
+
+def test_runtime_coverage_holds_until_a_matching_scope_and_target_are_published():
+    from types import SimpleNamespace
+
+    focus = SimpleNamespace(snapshot=dict(revision=5, sectors=[A]), run="dc-a")
+    targets = dict.fromkeys(TIMEFRAMES, AT)
+    summary = {"ready_15m": 1, "latest_saved_15m": AT, "latest_analyzed_15m": AT}
+    published = dict(scope=(5, focus.run, 2), targets=targets, coverage=summary, id="one", published_ms=1)
+
+    def status(current_targets):
+        return runtime_projection(dict(phase="A"), focus=focus, scope_count=2,
+            targets=current_targets, market_day=AT[:10], published=published, worker_alive=True)
+
+    assert status(targets)["coverage"] == summary
+    next_bar = status({**targets, "15m": "2026-11-25 09:45:00"})
+    assert next_bar["coverage"] is None and next_bar["latest_saved_15m"] == AT
+    assert next_bar["result_id"] == "one" and next_bar["phase"] == "A"
+    focus.snapshot["revision"] = 6
+    revised = status(targets)
+    assert revised["coverage"] is None and not revised.get("latest_saved_15m")
 
 
 def response(items, source=100):

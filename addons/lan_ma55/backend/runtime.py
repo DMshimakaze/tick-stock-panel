@@ -1,4 +1,4 @@
-"""Single-owner scheduler for verified THS focus and completed TickFlow bars."""
+"""Single-owner scheduler for verified EastMoney focus and completed TickFlow bars."""
 
 import atexit
 import os
@@ -18,14 +18,15 @@ from .market_grid import (
     now_cn,
     wall,
 )
+from .market_store import encoded
 from .multiframe_core.multiframe import VERSION
 from .native15_owner import NativeOwner
 from .native15_scheduler import task as native_task
 from .native15_shadow import SOURCE as NATIVE_SOURCE
 from .observations import Observations
 from .request_budget import CollectionStopped, RequestDeferred, RollingBudget
-from .result_publisher import Publisher, workbench_configs
-from .runtime_status import observation_summary
+from .result_publisher import Publisher, RUNTIME_ID, workbench_configs
+from .runtime_status import completed_targets, observation_summary, runtime_projection
 from .workbench_bridge import WorkbenchBridge, focus_view
 from .worker_lease import ProcessLease
 
@@ -81,7 +82,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.12.0", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.2", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -100,6 +101,10 @@ class Worker:
         self.host_failure_reason = None
         self.bridge_prepared = False
         self.bridge_retry = 0
+        self.targets, self.market_day = {}, None
+        self.view_input, self.published_view = None, None
+        self.view_dirty, self.view_sequence = True, 0
+        self.last_runtime, self.last_heartbeat, self.runtime_retry = None, 0, 0
 
     def start(self):
         self.lease = ProcessLease(self.folder / "worker.lock")
@@ -213,30 +218,80 @@ class Worker:
                 self.bridge_prepared = True
                 self.report(publisher_error=None)
 
-    def publish(self, sessions, schedules, *, force=False):
-        if not force and monotonic() - self.last_publication < 5:
+    def publish(self, schedules):
+        if monotonic() - self.last_publication < 5:
             return
-        scope = self.active_scope()
-        master = self.store.universe(scope)
-        snapshot = self.focus.snapshot
-        current = {**snapshot, "members": {symbol: boards for symbol, boards in snapshot["members"].items()
-                                           if symbol in scope}}
-        rows = self.observations.rows(current, master, schedules)
-        target = schedules["15m"][-1] if schedules["15m"] else None
-        market_day = sessions[-1] if sessions else None
-        summary = observation_summary(rows, target, market_day)
-        view = dict(focus=focus_view(self.focus, market_day), rows=rows, summary=summary,
-                    state={k: self.state.get(k) for k in ("phase", "error", "waiting_for",
-                           "calendar", "active_operation", "publisher_error")}, rule_version=VERSION)
-        with self.lock:
-            self.view = view
-        if self.bridge_prepared:
-            try:
-                self.bridge.publish(view)
-                self.report(publisher_error=None)
-            except (httpx.HTTPError, ValueError):
-                self.report(publisher_error="工作台发布失败，保留上次结果")
         self.last_publication = monotonic()
+        scope = self.active_scope()
+        snapshot = self.focus.snapshot
+        view_input = (snapshot["revision"], self.targets, self.market_day, self.store.meta("data_revision", 0),
+                      self.focus.taxonomy.status(), self.focus.taxonomy.daily)
+        if self.view_dirty or self.view_input != view_input:
+            current = {**snapshot, "members": {symbol: snapshot["members"][symbol]
+                                               for symbol in snapshot["members"] if symbol in scope}}
+            master = self.store.universe(scope)
+            rows = self.observations.rows(current, master, schedules)
+            latest_saved = max((info["latest_completed15"] for info in master.values()
+                                if info.get("latest_completed15")), default=None)
+            prior_analysis = None
+            if self.view and (snapshot["revision"], self.focus.run) == (
+                self.view["focus"]["revision"], self.view["focus"]["taxonomy"]["run"],
+            ):
+                prior_analysis = self.view["summary"]["latest_analyzed_15m"]
+            self.view_sequence += 1
+            view = dict(
+                result_id=f"{self.state['started_at']}/{self.view_sequence}",
+                focus=focus_view(self.focus, self.market_day), rows=rows,
+                summary=observation_summary(rows, self.targets, self.market_day, latest_saved=latest_saved,
+                                            latest_analyzed=prior_analysis),
+                state={key: self.state.get(key) for key in ("phase", "error", "waiting_for",
+                       "calendar", "active_operation", "publisher_error")}, rule_version=VERSION,
+            )
+            with self.lock:
+                self.view = view
+            self.view_input, self.view_dirty = view_input, False
+        if not self.bridge_prepared or (self.published_view and self.published_view["id"] == self.view["result_id"]):
+            return
+        try:
+            self.bridge.publish(self.view)
+        except (httpx.HTTPError, ValueError):
+            self.report(publisher_error="工作台发布失败，保留上次结果")
+        else:
+            self.published_view = dict(
+                id=self.view["result_id"], published_ms=int(time() * 1000),
+                scope=(snapshot["revision"], self.focus.run, len(scope)), targets=self.targets,
+                coverage=self.view["summary"],
+            )
+            self.report(publisher_error=None)
+
+    def publish_runtime(self, *, alive=True):
+        now = monotonic()
+        if not self.bridge_prepared or now < self.runtime_retry:
+            return
+        status = runtime_projection(
+            self.state, focus=self.focus, scope_count=len(self.active_scope()) if self.focus else None,
+            targets=self.targets, market_day=self.market_day, published=self.published_view, worker_alive=alive,
+        )
+        if status == self.last_runtime and now - self.last_heartbeat < 10:
+            return
+        row = dict(scope="lan.ma55", payload_json=encoded(dict(status, status_at_ms=int(time() * 1000))))
+        try:
+            self.publisher.ingest(RUNTIME_ID, [row], timeout=2)
+        except (httpx.HTTPError, ValueError):
+            self.runtime_retry = now + 5
+        else:
+            self.last_runtime, self.last_heartbeat = status, now
+
+    def mark_task(self, phase, operation, symbols):
+        self.report(phase=phase, work_stage=None if phase == "ANALYZING" else phase,
+                    active_operation=operation, active_symbols=len(symbols) if symbols is not None else None,
+                    error=None, waiting_for=None)
+        self.publish_runtime()
+
+    def refresh_observations(self, symbols, sessions, schedules, weeks, now, *, live=False):
+        self.view_dirty |= self.observations.refresh(
+            symbols, sessions, schedules, weeks, now, self.state["started_at"], live=live,
+        )
 
     def update_metadata(self, scope, now, market_day):
         saved = self.store.meta("focus_metadata_checks", {})
@@ -246,6 +301,7 @@ class Worker:
             with self.owner.conn:
                 self.store.put_metadata([row for row in rows if row["symbol"] in missing])
                 self.store.set_meta("focus_metadata_checks", dict(saved, **dict.fromkeys(missing, market_day)))
+            self.view_dirty = True
         return self.store.universe(scope)
 
     def run(self):
@@ -273,17 +329,21 @@ class Worker:
                 now = str(now_cn())
                 sessions = self.sessions(now)
                 schedules, weeks = frame_schedules(sessions, now)
+                self.targets, self.market_day = completed_targets(schedules), sessions[-1] if sessions else None
                 work = None
-                phase, stage = "WAITING_NEXT_15M", None
+                phase, stage, waiting_stage = "WAITING_NEXT_15M", None, None
                 try:
                     self.prepare_bridge()
-                    market_day = sessions[-1] if sessions else None
+                    if self.last_runtime is None:
+                        self.publish_runtime()
                     if self.bridge_prepared and monotonic() - self.last_commands >= 2:
                         self.last_commands = monotonic()
                         try:
-                            self.bridge.consume(market_day, sessions, schedules, weeks)
+                            self.bridge.consume(self.market_day, sessions, schedules, weeks)
                         except (httpx.HTTPError, ValueError):
-                            self.report(publisher_error="工作台请求或回执暂不可用")
+                            self.report(command_error="工作台请求或回执暂不可用")
+                        else:
+                            self.report(command_error=None)
                     scope = self.active_scope()
                     if not scope:
                         phase = "SCOPE_PAUSED"
@@ -294,12 +354,14 @@ class Worker:
                     else:
                         sessions = self.refresh_calendar(now)
                         schedules, weeks = frame_schedules(sessions, now)
-                        target = schedules["15m"][-1] if schedules["15m"] else None
+                        self.targets, self.market_day = completed_targets(schedules), sessions[-1] if sessions else None
+                        target = self.targets["15m"]
                         master = self.update_metadata(scope, now, sessions[-1]) if sessions else {}
-                        input_key = (tuple(scope), tuple((values[-1] if values else None) for values in schedules.values()),
+                        input_key = (scope, self.targets,
                                      self.store.meta("calendar_revision", 0))
                         if last_input != input_key:
-                            self.observations.refresh(master, sessions, schedules, weeks, now, self.state["started_at"])
+                            self.mark_task("ANALYZING", "ANALYZING_MA55", master)
+                            self.refresh_observations(master, sessions, schedules, weeks, now)
                             last_input = input_key
                         if target:
                             work = native_task(self.store, master, sessions, target, now)
@@ -307,11 +369,11 @@ class Worker:
                         if daily and (not daily[-1] or self.cold_budget.delay() == 0):
                             start, end, count, symbols, cold = daily
                             stage = "W" if cold else "D"
-                            self.report(phase=stage, active_operation="COLLECTING_DAILY", active_symbols=len(symbols))
+                            self.mark_task(stage, "COLLECTING_DAILY", symbols)
                             received, errors = self.collector.fetch_daily(symbols, start, end, count=count, cold=cold)
                             self.daily.accept(symbols, received, errors, schedules["daily"], master)
-                            self.observations.refresh(symbols, sessions, schedules, weeks, str(now_cn()),
-                                                      self.state["started_at"], live=not cold)
+                            self.mark_task(stage, "ANALYZING_MA55", symbols)
+                            self.refresh_observations(symbols, sessions, schedules, weeks, str(now_cn()), live=not cold)
                         elif work and (work[2] != "C" or self.cold_budget.delay() == 0):
                             stage = work[2]
                             self.collect_work(work, sessions, schedules, weeks, now, target)
@@ -319,8 +381,10 @@ class Worker:
                             phase = "CALENDAR_PENDING"
                         elif work or daily:
                             phase = "QUOTA_WAIT"
-                    self.report(phase=phase, active_operation="IDLE", backend_scanning=bool(scope and self.collector and not self.market_rejected),
-                                work_stage=stage, error=None, waiting_for=None)
+                            waiting_stage = "W" if daily else work[2]
+                    self.report(phase=phase, active_operation="IDLE", active_symbols=None,
+                                backend_scanning=bool(scope and self.collector and not self.market_rejected),
+                                work_stage=waiting_stage, error=None, waiting_for=None)
                     if not stage or not "09:30:00" <= now[11:19] < "15:00:00":
                         self.focus.schedule(sessions[-1] if sessions else None, sessions,
                                             self.collector.taxonomy_universe
@@ -331,7 +395,8 @@ class Worker:
                             self.owner.set_meta("quota_until", time()+max(0, exc.until-monotonic()))
                     phase = "HOST_STATUS_UNAVAILABLE" if (exc.reason or "").startswith("HOST_") else (
                         "RATE_LIMITED" if exc.status_code == 429 else "QUOTA_WAIT")
-                    self.report(phase=phase, active_operation="IDLE", waiting_for=exc.reason)
+                    self.report(phase=phase, active_operation="IDLE", active_symbols=None,
+                                work_stage=stage, waiting_for=exc.reason, error=None)
                 except (SourceError, ValueError) as exc:
                     credential = getattr(exc, "status_code", None) in (401, 403)
                     self.market_rejected = self.market_rejected or credential
@@ -343,15 +408,22 @@ class Worker:
                     if stage == "F" and work:
                         self.store.factor_failed(work[3], now, "SOURCE_UNAVAILABLE")
                     self.report(phase="CREDENTIAL_REQUIRED" if credential else "SOURCE_UNAVAILABLE",
-                                active_operation="BLOCKED", error=str(exc))
+                                active_operation="BLOCKED", active_symbols=None, work_stage=stage,
+                                waiting_for=None, error=str(exc))
                 self.flush_requests(stage or "METADATA")
-                self.publish(sessions, schedules, force=bool(stage))
+                self.publish_runtime()
+                self.publish(schedules)
+                self.publish_runtime()
                 self.stop.wait(2)
         except CollectionStopped:
-            pass
+            self.report(phase="STOPPED", active_operation="IDLE", active_symbols=None)
         except Exception as exc:
-            self.report(phase="ERROR", active_operation="BLOCKED", error=f"{type(exc).__name__}: {exc}")
+            self.report(phase="ERROR", active_operation="BLOCKED", active_symbols=None,
+                        error=f"{type(exc).__name__}: {exc}")
         finally:
+            if self.stop.is_set() and self.state["phase"] != "ERROR":
+                self.report(phase="STOPPED", active_operation="IDLE", active_symbols=None)
+            self.publish_runtime(alive=False)
             if self.collector:
                 self.collector.close()
             if self.focus:
@@ -370,19 +442,20 @@ class Worker:
         with self.owner.conn:
             self.owner.set_meta("target", target)
         if stage == "F":
-            self.report(phase=stage, active_operation="CHECKING_FACTORS", active_symbols=len(symbols))
+            self.mark_task(stage, "CHECKING_FACTORS", symbols)
             self.store.factor_attempt(symbols, now)
             factors = self.collector.factors(symbols)
             self.owner.accept_factors(symbols, factors, sessions=sessions, target=target,
                                       now=str(now_cn()), live_after=live_after, analyze_candidates=False)
         else:
-            self.report(phase=stage, active_operation="COLLECTING_NATIVE15", active_symbols=len(symbols))
+            self.mark_task(stage, "COLLECTING_NATIVE15", symbols)
             self.store.attempt(symbols, end, now, stage)
             received, errors = self.collector.fetch(symbols, start, end, cold=stage == "C")
             self.owner.accept_batch(symbols, received, errors, sessions=sessions, start=start, end=end,
                                     now=str(now_cn()), factors={}, stage=stage, live_after=live_after,
                                     analyze_candidates=False)
-        self.observations.refresh(symbols, sessions, schedules, weeks, str(now_cn()), live_after, live=stage == "A")
+        self.mark_task(stage, "ANALYZING_MA55", symbols)
+        self.refresh_observations(symbols, sessions, schedules, weeks, str(now_cn()), live=stage == "A")
 
     def flush_requests(self, stage):
         if self.collector:

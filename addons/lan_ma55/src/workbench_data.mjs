@@ -1,4 +1,5 @@
 export const WORKBENCH = 'lan_ma55_sector_workbench_v1';
+export const RUNTIME = 'lan_ma55_sector_runtime_v1';
 export const COMMAND = 'lan_ma55_sector_command_v1';
 export const RECEIPT = 'lan_ma55_sector_receipt_v1';
 const SLOTS = 16, COMMAND_ROWS = 4 * SLOTS, LEASE_MS = 90000;
@@ -45,6 +46,7 @@ const MESSAGES = {
   CREDENTIAL_REQUIRED: 'TickFlow 行情凭据不可用',
   SOURCE_UNAVAILABLE: '行情源暂不可用',
   RATE_LIMITED: '行情源要求暂缓请求',
+  ERROR: '后台处理异常',
   LEGACY_PERIOD_UNAVAILABLE: '此历史来源只有 15/30/60 分钟 K 线',
 };
 
@@ -120,6 +122,10 @@ export function createWorkbenchIO(api, {
     async view() {
       const { rows } = await api.extDataRows(WORKBENCH, { limit: 1 });
       return rows[0]?.payload_json || null;
+    },
+    async runtime() {
+      const { rows } = await api.extDataRows(RUNTIME, { limit: 1 });
+      return rows[0]?.payload_json ? JSON.parse(rows[0].payload_json) : null;
     },
     submit,
     dispose() { disposed = true; },

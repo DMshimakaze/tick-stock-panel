@@ -186,7 +186,9 @@ class DCFocusOwner:
         if isinstance(symbol, str) and SYMBOL.fullmatch(symbol):
             if symbol not in self.taxonomy.active_scope():
                 return dict(ok=False, error="DC_STOCK_OUTSIDE_UNIVERSE")
-            names = set(self.taxonomy.store.stock_boards(self.run, symbol))
+            memberships = self.taxonomy.store.stock_memberships(self.run, symbol)
+            names = {board for board, _ in memberships}
+            name = next((name for _, name in memberships if name), None)
             for key in self.taxonomy.daily.get("checked", {}):
                 check = self.taxonomy.board_check(key)
                 if check:
@@ -198,6 +200,6 @@ class DCFocusOwner:
                           key=lambda key: self.taxonomy.boards[key]["level"])
             other = sorted(names - set(path))
             keys = path + other
-            return dict(ok=True, symbol=symbol, industry_path=[self.taxonomy.boards[key]["name"] for key in path],
+            return dict(ok=True, symbol=symbol, name=name, industry_path=[self.taxonomy.boards[key]["name"] for key in path],
                         total=len(keys), rows=keys[offset:offset + 50], offset=offset)
         raise ValueError("Invalid membership lookup")

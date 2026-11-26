@@ -6,7 +6,7 @@ import { JSDOM } from 'jsdom';
 import { chartModel } from '../src/chart_model.mjs';
 import extension from '../src/extension.mjs';
 import { mountWorkbench } from '../src/workbench.mjs';
-import { COMMAND, RECEIPT, WORKBENCH, deepLink, TIMEFRAMES } from '../src/workbench_data.mjs';
+import { COMMAND, RECEIPT, RUNTIME, WORKBENCH, deepLink, TIMEFRAMES } from '../src/workbench_data.mjs';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 20));
 const board = { key: 'cn_concept:886054.TI', name: '光刻机' };
@@ -28,6 +28,7 @@ test('confirmed focus handles the draft and offers explicit local alias matches 
     async extDataRows(id) {
       if (id === COMMAND) return { rows: [...commands.values()] };
       if (id === RECEIPT) return { rows: replies };
+      if (id === RUNTIME) return { rows: [] };
       assert.equal(id, WORKBENCH);
       return { rows: [{ payload_json: JSON.stringify({ focus, rows: [], summary, state: { phase: 'SCOPE_PAUSED' } }) }] };
     },
@@ -44,6 +45,9 @@ test('confirmed focus handles the draft and offers explicit local alias matches 
   try {
     await tick();
     assert.equal(calls.length, 0);
+    const manager = document.querySelector('[data-role="manager"]');
+    assert.equal(manager.open, false);
+    manager.open = true;
     const chip = [...document.querySelectorAll('[data-role="directions"] button')].find(b => b.textContent === '物理AI');
     chip.click();
     const input = document.querySelector('[data-role="query"]');
@@ -57,7 +61,8 @@ test('confirmed focus handles the draft and offers explicit local alias matches 
     assert.equal(document.querySelector('[data-role="apply"]').disabled, true);
     document.querySelector('[data-role="preview"]').click();
     await tick();
-    assert.match(document.querySelector('[data-role="summary"]').textContent, /新增 1 · 退出 0 · 保留 0/);
+    assert.deepEqual([...document.querySelectorAll('[data-role="summary"] .mr-note')].map(node => node.textContent),
+      ['新增 1', '退出 0', '保留 0']);
     document.querySelector('[data-role="apply"]').click();
     await tick();
     assert.deepEqual(calls.map(({ action, expected_revision, run, selection }) =>
@@ -80,8 +85,9 @@ test('publication failure preserves the last data and missing publication begins
   const clickRefresh = () => document.querySelector('[data-act="refresh"]').click();
   try {
     await tick();
-    assert.match(document.querySelector('[data-role="market"]').textContent, /等待后台发布/);
-    assert.equal(document.querySelector('[data-role="coverage"]').textContent, '');
+    assert.match(document.querySelector('[data-role="stocks"]').textContent, /等待后台发布/);
+    assert.equal(document.querySelector('[data-role="coverage"]').textContent, '—');
+    assert.equal(document.querySelector('[data-role="progress"]').hidden, true);
     response = { focus: empty, rows: [row('510300.SH', 'ETF')], summary: { ...summary, expected: 1 },
       state: { phase: 'WAITING_NEXT_15M' } };
     clickRefresh();
@@ -90,8 +96,43 @@ test('publication failure preserves the last data and missing publication begins
     response = new Error('数据暂不可用');
     clickRefresh();
     await tick();
-    assert.match(document.querySelector('[data-role="workbench-error"]').textContent, /数据暂不可用/);
+    assert.equal(document.querySelector('[data-role="task-label"]').textContent, '读取失败');
+    assert.match(document.querySelector('[data-role="notice"]').textContent, /数据暂不可用/);
     assert.match(document.querySelector('[data-role="stocks"]').textContent, /ETF/);
+  } finally { dispose(); dom.window.close(); }
+});
+
+test('a stage change polls status only and a result change preserves the selected cell and table scroll', async () => {
+  const dom = new JSDOM('<div id="mount"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
+  const { document } = dom.window, symbol = '600000.SH';
+  const focus = { ...empty, revision: 1, sectors: [{ ...board, symbols: [symbol] }], members: { [symbol]: [board.key] } };
+  let poll, reads = 0, result = { result_id: 'a', summary, focus, rows: [row(symbol, '甲')] };
+  let state = { result_id: 'a', phase: 'B', worker_alive: true, status_at_ms: Date.now(), focus_revision: 1,
+    taxonomy_run: 'verified', scope_count: 1, active_operation: 'COLLECTING_NATIVE15', active_symbols: 1 };
+  dom.window.setInterval = callback => { poll = callback; };
+  const api = { async extDataRows(id) {
+    if (id === WORKBENCH) reads++;
+    return { rows: [{ payload_json: JSON.stringify(id === RUNTIME ? state : result) }] };
+  } };
+  const dispose = mountWorkbench(document.querySelector('#mount'), { api }, { ioOptions: { uuid: randomUUID } });
+  try {
+    await tick();
+    state = { ...state, phase: 'A' };
+    poll(); await tick();
+    assert.equal(reads, 1);
+    assert.equal(document.querySelector('[data-role="task-label"]').textContent, '更新行情');
+    const select = () => document.querySelector('[data-stock][data-tf="weekly"]');
+    const wrap = document.querySelector('[data-role="table-wrap"]');
+    select().focus();
+    wrap.scrollLeft = 76; wrap.scrollTop = 37;
+    result = { ...result, result_id: 'b', rows: [row(symbol, '甲股份')] };
+    state = { ...state, result_id: 'b' };
+    poll(); await tick();
+    assert.equal(reads, 2);
+    assert.equal(document.activeElement, select());
+    assert.equal(wrap.scrollLeft, 76);
+    assert.equal(wrap.scrollTop, 37);
+    assert.match(select().getAttribute('aria-label'), /甲股份/);
   } finally { dispose(); dom.window.close(); }
 });
 

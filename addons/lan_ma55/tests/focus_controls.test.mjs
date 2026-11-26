@@ -64,17 +64,23 @@ test('EastMoney tree opens two levels and searches day themes without consulting
   });
   const toggle = item => { item.open = true; item.dispatchEvent(new Event('toggle')); };
   const tree = node.querySelector('[data-role="tree"]');
+  assert.equal(node.querySelector('[data-role="match-count"]').textContent, '4 个匹配');
   toggle(tree.querySelector('details'));
   toggle(tree.querySelector('details details'));
   tree.querySelector('[aria-label="查看 材料 成分"]').click();
   await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(requested, [{ board: leaf, offset: 0, run: 'demo' }]);
-  assert.match(node.querySelector('[data-role="detail-rows"]').textContent, /示例 · 600000.SH · 分类解释/);
+  assert.deepEqual([...node.querySelectorAll('[data-role="detail-rows"] td')].map(item => item.textContent),
+    ['示例', '600000.SH', '分类解释']);
+  assert.deepEqual([...node.querySelectorAll('[data-role="detail-source"] span')].map(item => item.textContent),
+    ['电子', '半导体', '材料']);
+  assert.equal(tree.querySelectorAll('summary[title="电子"], [data-focus-key="tree:' + root + '"]').length, 1);
   const search = node.querySelector('[data-role="query"]'), filter = node.querySelector('[data-role="kind"]');
-  filter.value = 'theme';
+  filter.querySelector('[data-kind-value="theme"]').click();
   search.value = '000004';
   search.dispatchEvent(new Event('input'));
-  assert.match(node.querySelector('[data-role="matches"]').textContent, /000004\.DC · 题材/);
+  assert.equal(node.querySelector('[data-role="matches"] code').textContent, '000004.DC');
+  assert.equal(node.querySelector('[data-role="matches"] [data-kind]').dataset.kind, 'theme');
   assert.equal(requested.length, 1);
   ui.dispose();
   dom.window.close();

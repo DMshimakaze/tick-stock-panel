@@ -4,25 +4,85 @@ from .market_grid import SOURCE, wall
 from .multiframe_core.multiframe import TIMEFRAMES
 
 
-def observation_summary(rows, target, market_day):
-    readiness = dict.fromkeys(TIMEFRAMES, 0)
-    ready_symbols = candidates = 0
-    saved = None
+RUNTIME_FIELDS = (
+    "version", "phase", "active_operation", "active_symbols", "work_stage", "waiting_for",
+    "error", "publisher_error", "command_error", "host_job_status", "calendar",
+)
+
+
+def completed_targets(schedules):
+    return {period: values[-1] if values else None for period, values in schedules.items()}
+
+
+def observation_summary(rows, targets, market_day, *, latest_saved=None, latest_analyzed=None):
+    """Count only analyses for each period's own completed exchange target."""
+    total = len(rows)
+    readiness = {period: 0 if not total or targets[period] else None for period in TIMEFRAMES}
+    reasons = {period: {} for period in TIMEFRAMES}
+    ready_symbols = ready_all = candidates = 0
+    saved, analyzed = latest_saved, latest_analyzed
     for row in rows:
-        ready = any(frame["status"] == "READY" for frame in row["frames"].values())
-        candidate = any(frame["status"] == "READY" and
-                        (frame.get("result") or {}).get("latest", {}).get("event_id")
-                        for frame in row["frames"].values())
-        ready_symbols += ready
-        candidates += candidate
+        ready = 0
+        candidate = False
         reference = row.get("reference")
         if reference and (not saved or reference["at"] > saved):
             saved = reference["at"]
-        for period, frame in row["frames"].items():
-            readiness[period] += frame["status"] == "READY"
-    return dict(market_day=market_day, target_15m=target, expected=len(rows), ready_symbols=ready_symbols,
-                candidate_symbols=candidates, blocked_symbols=len(rows) - ready_symbols,
-                ready_by_timeframe=readiness, latest_saved_15m=saved)
+        minute = row["frames"].get("15m") or {}
+        last_analysis = ((minute.get("result") or {}).get("latest") or {}).get("timestamp")
+        if last_analysis:
+            last_analysis = str(wall(last_analysis))
+            if not analyzed or last_analysis > analyzed:
+                analyzed = last_analysis
+        for period in TIMEFRAMES:
+            target = targets[period]
+            if not target:
+                continue
+            frame = row["frames"].get(period, {})
+            status = frame.get("status") or "WAITING_INPUT"
+            if frame.get("expected_end") != target:
+                status = "WAITING_FOR_COMPLETED_TARGET"
+            if status != "READY":
+                counts = reasons[period]
+                counts[status] = counts.get(status, 0) + 1
+                continue
+            readiness[period] += 1
+            ready += 1
+            latest = (frame.get("result") or {}).get("latest") or {}
+            candidate |= bool(latest.get("event_id"))
+        ready_symbols += bool(ready)
+        ready_all += ready == len(TIMEFRAMES)
+        candidates += candidate
+    minute = readiness["15m"]
+    return dict(
+        market_day=market_day, target_15m=targets["15m"], expected=total, ready_symbols=ready_symbols,
+        blocked_symbols=total - ready_symbols, candidate_symbols=candidates if any(
+            value is not None for value in readiness.values()) else None,
+        ready_15m=minute, unready_15m=total - minute if minute is not None else None,
+        ready_all=ready_all if all(value is not None for value in readiness.values()) else None,
+        ready_by_timeframe=readiness, blocking_by_timeframe=reasons,
+        latest_saved_15m=saved, latest_analyzed_15m=analyzed,
+    )
+
+
+def runtime_projection(state, *, focus, scope_count, targets, market_day, published, worker_alive):
+    revision = focus.snapshot["revision"] if focus else None
+    run = focus.run if focus else None
+    coverage = None
+    watermarks = {}
+    if published and (revision, run, scope_count) == published["scope"]:
+        watermarks = {field: published["coverage"][field] for field in ("latest_saved_15m", "latest_analyzed_15m")}
+        if targets == published["targets"]:
+            coverage = published["coverage"]
+    return {
+        **{field: state.get(field) for field in RUNTIME_FIELDS},
+        "market_day": market_day, "target_15m": targets.get("15m"),
+        "focus_revision": revision, "taxonomy_run": run, "scope_count": scope_count,
+        "saved_sectors": len(focus.snapshot["sectors"]) if focus else None,
+        "coverage": coverage, "worker_alive": worker_alive,
+        **watermarks,
+        "result_id": published["id"] if published else None,
+        "result_published_ms": published["published_ms"] if published else None,
+    }
 
 
 ERROR_TEXT = {

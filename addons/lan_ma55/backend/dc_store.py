@@ -190,8 +190,8 @@ class DCStore:
             "SELECT symbol FROM dc_membership_v1 WHERE run=? AND board=?", (run, key),
         )}
 
-    def stock_boards(self, run, symbol):
-        return [row[0] for row in self.conn.execute(
-            "SELECT board FROM dc_membership_v1 WHERE run=? AND symbol=? AND in_scope=1 ORDER BY board",
+    def stock_memberships(self, run, symbol):
+        return self.conn.execute(
+            "SELECT board,name FROM dc_membership_v1 WHERE run=? AND symbol=? AND in_scope=1 ORDER BY board",
             (run, symbol),
-        )]
+        ).fetchall()

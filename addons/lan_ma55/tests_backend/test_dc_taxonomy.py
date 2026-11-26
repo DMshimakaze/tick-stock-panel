@@ -138,7 +138,9 @@ def test_legacy_preview_requires_explicit_confirmation_and_leaves_legacy_read_on
                                migration={LEGACY: THEME}, confirm_migration=True, preferences=prefs)
             assert saved["ok"] and saved["total"] == 2 and old.read() == original
             assert focus.lookup(dict(run=RUN, board=THEME))["rows"] == [dict(symbol=A, name="甲", reason="解释")]
-            assert focus.lookup(dict(run=RUN, symbol=A))["industry_path"] == [ROOT, MID, LEAF]
+            reverse = focus.lookup(dict(run=RUN, symbol=A))
+            assert reverse["industry_path"] == [ROOT, MID, LEAF]
+            assert reverse["name"] == "甲"
             assert focus.edit("save", 1, "old", DAY, selection=[])["error"] == "SCOPE_CONFLICT"
             assert focus.edit("save", 1, RUN, DAY, selection=[])["ok"]
         finally:

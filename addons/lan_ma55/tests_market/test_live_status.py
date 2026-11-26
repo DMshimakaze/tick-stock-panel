@@ -264,8 +264,11 @@ def test_verified_session_target_boundaries(now, expected):
     assert latest_point(["2026-11-12", "2026-11-13"], now) == expected
 
 
-@pytest.mark.parametrize("configured", ["empty", "single", "market"])
-def test_worker_scope_is_enforced_at_the_sdk_http_boundary(tmp_path, monkeypatch, configured):
+@pytest.mark.parametrize(("configured", "forced_stage"), [
+    ("empty", None), ("single", None), ("market", None),
+    *[("single", stage) for stage in ("A", "B", "C", "F", "D", "W", "error")],
+])
+def test_worker_scope_and_runtime_stage_at_the_sdk_http_boundary(tmp_path, monkeypatch, configured, forced_stage):
     import json
     from datetime import datetime
     from threading import Event
@@ -276,7 +279,9 @@ def test_worker_scope_is_enforced_at_the_sdk_http_boundary(tmp_path, monkeypatch
     from addons.lan_ma55.backend.focus_pool import FocusPool
     from addons.lan_ma55.backend.market_grid import BEIJING, points
     from addons.lan_ma55.backend.native15_owner import NativeOwner
-    from addons.lan_ma55.backend.result_publisher import COMMAND_ID, RECEIPT_ID, WORKBENCH_ID, Publisher, workbench_configs
+    from addons.lan_ma55.backend.result_publisher import (
+        COMMAND_ID, RECEIPT_ID, RUNTIME_ID, WORKBENCH_ID, Publisher, workbench_configs,
+    )
 
     day, now, target = "2026-11-13", "2026-11-13 10:52:00", "2026-11-13 10:45:00"
     a, b, board = "600000.SH", "159231.SZ", "dc:theme:000001.DC"
@@ -316,17 +321,38 @@ def test_worker_scope_is_enforced_at_the_sdk_http_boundary(tmp_path, monkeypatch
     requests, published, done = [], {}, Event()
     worker = worker_at(tmp_path, lambda r: httpx.Response(200, json={"active_id": None}))
     worker.settings.update(tickflow_api_key="synthetic", collection_symbols=[a, b])
+    phase = "A" if forced_stage == "error" else forced_stage
+    operation = ("COLLECTING_DAILY" if phase in ("D", "W") else
+                 "CHECKING_FACTORS" if phase == "F" else "COLLECTING_NATIVE15")
+    states = []
+    if phase in ("D", "W"):
+        previous_close = "2026-11-12 15:00:00"
+        monkeypatch.setattr(runtime, "native_task", lambda *_: None)
+        monkeypatch.setattr(runtime.DailyStore, "task", lambda *_: (
+            previous_close, previous_close, 1, [a], phase == "W",
+        ))
+    elif phase:
+        monkeypatch.setattr(runtime.DailyStore, "task", lambda *_: None)
+        monkeypatch.setattr(runtime, "native_task", lambda *_: (day + " 09:45:00", target, phase, [a]))
 
     def vendor(request):
-        period = request.url.params.get("period")
-        codes = (json.loads(request.content).get("symbols") if request.content
-                 else request.url.params["symbols"].split(","))
+        body = json.loads(request.content) if request.content else {}
+        period = request.url.params.get("period") or body.get("period")
+        codes = body["symbols"] if body else request.url.params["symbols"].split(",")
         requests.append((period, codes))
         if period == "1d" and codes == ["000001.SH"]:
             return httpx.Response(200, json={"data": {"000001.SH": {"timestamp": [as_ms(d) for d in sessions]}}})
         assert codes == [a]
+        if forced_stage:
+            running = published[RUNTIME_ID]
+            assert (running["phase"], running["active_operation"], running["active_symbols"]) == (phase, operation, 1)
+        if forced_stage == "error":
+            return httpx.Response(401)
         if "ex-factors" in request.url.path:
             return httpx.Response(200, json={"data": {a: []}})
+        if period == "1d":
+            return httpx.Response(200, json={"data": {a: dict(timestamp=[as_ms("2026-11-12")],
+                open=[10], high=[11], low=[9], close=[10], volume=[100], amount=[100000])}})
         assert period == "15m"
         start = str(datetime.fromtimestamp(int(request.url.params["start_time"])/1000, BEIJING).replace(tzinfo=None))
         stamps = points([*sessions, day], start, target, step=15)
@@ -351,9 +377,11 @@ def test_worker_scope_is_enforced_at_the_sdk_http_boundary(tmp_path, monkeypatch
             return httpx.Response(200, json={"rows": [command]})
         data = json.loads(request.content)["rows"]
         published[table] = json.loads(data[0]["payload_json"])
-        if WORKBENCH_ID in published:
+        if table == RUNTIME_ID:
+            states.append(published[table])
+        if table == WORKBENCH_ID:
             summary = published[WORKBENCH_ID]["summary"]
-            if configured != "single" or summary["latest_saved_15m"] == target:
+            if forced_stage or configured != "single" or summary["latest_saved_15m"] == target:
                 worker.stop.set()
                 done.set()
         return httpx.Response(200, json={"ok": True})
@@ -362,11 +390,22 @@ def test_worker_scope_is_enforced_at_the_sdk_http_boundary(tmp_path, monkeypatch
     worker.start()
     arrived = done.wait(8)
     worker.close()
-    assert arrived, worker.state
+    assert arrived, worker.state.get("error")
     assert published[RECEIPT_ID]["status"] == "OUTSIDE_FOCUS"
     assert published[WORKBENCH_ID]["summary"]["expected"] == (1 if configured == "single" else 0)
     assert [row["symbol"] for row in published[WORKBENCH_ID]["rows"]] == ([a] if configured == "single" else [])
-    if configured == "single":
+    assert states[-1]["phase"] == "STOPPED" and states[-1]["worker_alive"] is False
+    assert states[-1]["active_symbols"] is None
+    if forced_stage == "error":
+        blocked = next(state for state in states if state["phase"] == "CREDENTIAL_REQUIRED")
+        assert blocked["active_operation"] == "BLOCKED" and blocked["active_symbols"] is None
+    elif forced_stage:
+        observed = [(state["phase"], state["active_operation"]) for state in states]
+        assert (phase, operation) in observed
+        assert (phase, "ANALYZING_MA55") in observed
+        settled = next(state for state in states if state["phase"] == "WAITING_NEXT_15M")
+        assert settled["active_operation"] == "IDLE" and settled["active_symbols"] is None
+    elif configured == "single":
         assert ("15m", [a]) in requests
         assert all(period in (None, "15m", "1d") for period, _ in requests)
     else:
@@ -381,6 +420,7 @@ def test_focus_publication_failure_retries_the_same_committed_view(tmp_path):
     from addons.lan_ma55.backend.native15_owner import NativeOwner
     from addons.lan_ma55.backend.observations import Observations
     from addons.lan_ma55.backend.result_publisher import Publisher, WORKBENCH_ID
+    from addons.lan_ma55.backend.runtime_status import completed_targets
     from addons.lan_ma55.backend.workbench_bridge import WorkbenchBridge
 
     worker = worker_at(tmp_path, lambda r: httpx.Response(200, json={"active_id": None}))
@@ -402,14 +442,18 @@ def test_focus_publication_failure_retries_the_same_committed_view(tmp_path):
         worker.bridge_prepared = True
         sessions = ["2026-11-13"]
         schedules, _ = frame_schedules(sessions, "2026-11-13 16:00:00")
+        worker.targets, worker.market_day = completed_targets(schedules), sessions[-1]
         try:
-            worker.publish(sessions, schedules, force=True)
+            worker.publish(schedules)
             assert worker.state["publisher_error"]
             assert not published
+            result_id = worker.view["result_id"]
             failure = False
-            worker.publish(sessions, schedules, force=True)
+            worker.last_publication = 0
+            worker.publish(schedules)
             assert worker.state["publisher_error"] is None
             assert published[0]["focus"]["revision"] == worker.focus.snapshot["revision"] == 0
+            assert published[0]["result_id"] == result_id
         finally:
             worker.focus.source.close()
             worker.http.close()

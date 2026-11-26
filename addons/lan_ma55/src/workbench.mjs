@@ -1,65 +1,26 @@
 import { mountFocusControls } from './focus_controls.mjs';
 import { createWorkbenchChart } from './chart.mjs';
 import { chartModel, beijing } from './chart_model.mjs';
+import { escapeHtml as esc, icon, price, quantity, signed } from './presentation.mjs';
+import { filterRows, newest, savedScopes, scopeButtons, short, stockRows } from './stock_matrix.mjs';
+import { paintRuntime } from './status_view.mjs';
 import { CSS, WORKBENCH_CSS } from './styles.mjs';
 import { createWorkbenchIO, deepLink, normalizedTime, PERIOD_LABEL, statusText, TIMEFRAMES } from './workbench_data.mjs';
-
-const esc = value => String(value ?? '').replace(/[&<>"']/g, char =>
-  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
-const signed = value => Number.isFinite(value) ? `${value > 0 ? '+' : ''}${value.toFixed(2)}%` : '—';
-const price = (value, tick) => Number.isFinite(value) ? value.toFixed(tick === .001 ? 3 : 2) : '—';
-const currentDecision = frame => frame?.status === 'READY' ? frame.result?.latest : null;
-const newest = row => TIMEFRAMES.map(tf => [tf, row.frames[tf]?.latest_candidate?.at || ''])
-  .sort((a, b) => b[1].localeCompare(a[1]))[0];
-const short = value => normalizedTime(value).slice(0, 16) || '—';
-
-function frameLabel(frame) {
-  if (!frame || frame.status !== 'READY') {
-    return ['INSUFFICIENT_HISTORY', 'MISSING_COMPLETED_BAR', 'WAITING_FOR_COMPLETED_TARGET', 'WAITING_INPUT']
-      .includes(frame?.status) ? '待补' : '—';
-  }
-  const decision = currentDecision(frame);
-  if (decision?.event_id) return '候选';
-  if (decision?.pressure_test) return '反压';
-  return decision?.impulse_recent || decision?.support_test_time ? '观察' : '就绪';
-}
+import { LAYOUT } from './workbench_layout.mjs';
 
 export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, interval = 5000, ioOptions } = {}) {
   const doc = el.ownerDocument, win = doc.defaultView, node = doc.createElement('main');
   node.className = 'mr mr-workbench';
-  node.innerHTML = `<style>${CSS}${WORKBENCH_CSS}</style>
-    <header class="mr-header"><div class="mr-heading"><h1>MA55 板块观察</h1><p data-role="market"></p></div>
-      <button type="button" data-act="refresh">刷新</button></header>
-    <div data-role="focus"></div><p class="mr-error" role="status" data-role="workbench-error"></p>
-    <div class="mr-coverage" data-role="coverage"></div>
-    <section aria-label="关注股票"><div class="mr-tabs mr-sector-tabs" data-role="tabs"></div>
-      <div class="mr-tools"><input data-role="search" aria-label="搜索股票" placeholder="名称或代码">
-        <label>状态 <select data-role="filter"><option value="all">全部</option><option value="候选">候选</option><option value="观察">观察</option>
-        <option value="反压">反压</option><option value="blocked">待补 / 阻塞</option></select></label>
-        <label>周期 <select data-role="filter-period"><option value="all">全部</option>${TIMEFRAMES.map(tf => `<option value="${tf}">${PERIOD_LABEL[tf]}</option>`).join('')}</select></label>
-        <label>排序 <select data-role="order"><option value="candidate">最近候选</option><option value="symbol">股票代码</option><option value="change">涨跌幅</option></select></label></div>
-      <div class="mr-table mr-focus-list" data-role="table-wrap"><table><thead><tr><th>股票</th><th>完成价 / 涨跌</th>
-        ${TIMEFRAMES.map(tf => `<th>${PERIOD_LABEL[tf]}</th>`).join('')}<th>最近上方55线</th></tr></thead>
-        <tbody data-role="stocks"></tbody></table></div></section>
-    <section class="mr-panel mr-chart-panel" data-role="chart-panel" aria-label="所选股票图表" hidden>
-      <div class="mr-chart-heading"><div><h2 data-role="selection"></h2><p class="mr-subtitle" data-role="membership"></p></div>
-        <div class="mr-controls"><button data-act="previous">上一只</button><button data-act="next">下一只</button><button data-act="preview">官方详情</button></div></div>
-      <div class="mr-tools"><div class="mr-controls" data-role="periods"></div>
-        <label><input data-role="show-levels" type="checkbox">上方55线</label><button data-act="locate" hidden>定位确认</button></div>
-      <p class="mr-meta" data-role="chart-state" role="status"></p><p class="mr-readout" data-role="readout"></p>
-      <div class="mr-chart-body"><div class="mr-canvas" data-role="chart" hidden></div><div data-role="levels"></div></div>
-    </section>
-    <details class="mr-panel" data-role="archive"><summary>冻结 BUY 历史</summary><div data-role="archive-list"></div>
-      <div class="mr-pager"><button data-act="history-prev">上一页</button><button data-act="history-next">下一页</button></div></details>
-    <details class="mr-diagnostics"><summary>数据诊断</summary><pre data-role="diagnostics"></pre></details>`;
+  node.innerHTML = `<style>${CSS}${WORKBENCH_CSS}</style>${LAYOUT}`;
   el.append(node);
   const $ = role => node.querySelector(`[data-role="${role}"]`);
   const action = name => node.querySelector(`[data-act="${name}"]`);
   const io = createWorkbenchIO(ctx.api, ioOptions);
   let view = null, lastRaw = null, lastFocus = null, board = '';
+  let runtime = null, statusError = '', viewError = '', tableMarkup, scopeMarkup;
   let selection = null, chart = null, chartSignature = null, filtered = [];
   let loadingChart = false, refreshPending = false, stopped = false, chartGeneration = 0;
-  let archiveOffset = 0, archiveRows = [];
+  let archiveOffset = 0, archiveRows = [], managerTrigger;
   const focus = mountFocusControls($('focus'), {
     onApply: args => edit('save', args),
     onPreview: args => edit('preview', args),
@@ -90,8 +51,9 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
         const memberKeys = new Set(Object.keys(result.focus.members));
         view = { ...view, focus: result.focus, rows: view.rows.filter(row => memberKeys.has(row.symbol)) };
         renderTable();
+        paintRuntime(node, runtime, view, { statusError, viewError });
       }
-      void refresh();
+      void refresh(true);
       return decorateFocus(result.focus);
     } catch (error) {
       if (error.focus) updateFocus(error.focus);
@@ -99,44 +61,34 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     }
   }
   function renderTable() {
-    const rows = view?.rows || [], sectors = view?.focus.sectors || [];
-    const groups = (view?.focus.groups || []).map(group => ({
-      key: 'group:' + group.id, name: group.name + ' · 自定义组', boards: group.boards,
-    }));
-    const options = [{ key: '', name: '全部' }, ...sectors, ...groups];
+    const rows = view?.rows || [];
+    const options = savedScopes(view?.focus);
     if (!options.some(item => item.key === board)) board = '';
-    const filterBoards = new Set(options.find(item => item.key === board)?.boards ?? [board]);
-    const wanted = $('search').value.trim().toLowerCase(), state = $('filter').value, period = $('filter-period').value;
-    const oldTab = doc.activeElement?.dataset.board;
-    $('tabs').innerHTML = options.map(item =>
-      `<button type="button" class="${board === item.key ? 'active' : ''}" aria-pressed="${board === item.key}" data-board="${esc(item.key)}">${esc(item.name)}</button>`).join('');
-    if (oldTab !== undefined) [...$('tabs').children].find(item => item.dataset.board === oldTab)?.focus({ preventScroll: true });
-    filtered = rows.filter(row => (!board || row.sectors.some(key => filterBoards.has(key))) &&
-      (!wanted || [row.symbol, row.name].some(value => value.toLowerCase().includes(wanted))) &&
-      (state === 'all' || (period === 'all' ? TIMEFRAMES : [period]).some(tf => state === 'blocked'
-        ? row.frames[tf]?.status !== 'READY' : frameLabel(row.frames[tf]) === state)));
-    const order = $('order').value;
-    filtered.sort((a, b) => (order === 'candidate' ? newest(b)[1].localeCompare(newest(a)[1])
-      : order === 'change' ? (b.reference?.change_pct ?? -Infinity) - (a.reference?.change_pct ?? -Infinity)
-        : 0) || a.symbol.localeCompare(b.symbol));
-    const active = doc.activeElement?.dataset;
-    $('stocks').innerHTML = filtered.map(row => {
-      const top = row.levels?.pressures[0];
-      const cells = TIMEFRAMES.map(tf => {
-        const frame = row.frames[tf], label = frameLabel(frame);
-        const title = frame?.status === 'READY'
-          ? [short(frame.expected_end), frame.latest_candidate?.at ? `最近确认 ${short(frame.latest_candidate.at)}` : ''].filter(Boolean).join(' · ')
-          : statusText(frame?.status);
-        return `<td><button class="mr-frame" data-stock="${row.symbol}" data-tf="${tf}" data-state="${label}" title="${esc(title)}">${label}</button></td>`;
-      }).join('');
-      const ref = row.reference, change = ref?.change_pct;
-      return `<tr class="${selection?.symbol === row.symbol ? 'selected' : ''}"><td><button class="mr-stock-name" data-stock="${row.symbol}">${esc(row.name)}</button>
-        <span class="mr-code">${row.symbol}</span></td><td class="mr-price" title="${esc(ref ? `${ref.at} · ${ref.price_basis}` : '等待完成行情')}">
-        ${price(ref?.price, row.raw_tick)}<span class="mr-code ${change > 0 ? 'mr-rise' : change < 0 ? 'mr-fall' : ''}">${signed(change)}</span></td>
-        ${cells}<td class="mr-price">${top ? `${PERIOD_LABEL[top.timeframe]} · ${price(top.ma55, row.raw_tick)}<span class="mr-code">${signed(top.distance_pct)}</span>` : '—'}</td></tr>`;
-    }).join('') || `<tr><td class="mr-empty" colspan="9">${!view ? '正在读取工作台…' : rows.length ? '没有符合筛选的股票' : '保存已核实板块后显示成分股'}</td></tr>`;
-    if (active?.stock) [...$('stocks').querySelectorAll('button')].find(item =>
-      item.dataset.stock === active.stock && item.dataset.tf === active.tf)?.focus({ preventScroll: true });
+    const scopes = scopeButtons(options, board, $('scope-search').value.trim().toLowerCase());
+    if (scopes !== scopeMarkup) {
+      const { board: current, inspect } = doc.activeElement.dataset;
+      const tabs = $('tabs'), scroll = tabs.scrollTop;
+      tabs.innerHTML = scopes; scopeMarkup = scopes; tabs.scrollTop = scroll;
+      if (current !== undefined || inspect) [...tabs.querySelectorAll('button')].find(item =>
+        item.dataset.board === current && item.dataset.inspect === inspect)?.focus({ preventScroll: true });
+    }
+    const period = $('filter-period').value;
+    $('matrix').dataset.periodLens = period;
+    filtered = filterRows(rows, options.find(item => item.key === board), {
+      query: $('search').value.trim().toLowerCase(), state: $('filter').value, period, order: $('order').value,
+    });
+    $('row-count').textContent = view ? `${quantity(filtered.length)} 只股票` : '';
+    const empty = !view ? (viewError ? '观察结果暂不可读' : '等待后台发布观察结果') : rows.length
+      ? '没有符合筛选的股票' : '在关注管理中保存板块后显示成分股';
+    const markup = stockRows(filtered, selection?.symbol, empty);
+    if (markup !== tableMarkup) {
+      const { stock, tf } = doc.activeElement.dataset;
+      const wrap = $('table-wrap'), { scrollLeft, scrollTop } = wrap;
+      $('stocks').innerHTML = markup; tableMarkup = markup;
+      wrap.scrollLeft = scrollLeft; wrap.scrollTop = scrollTop;
+      if (stock) [...$('stocks').querySelectorAll('button')].find(item =>
+        item.dataset.stock === stock && item.dataset.tf === tf)?.focus({ preventScroll: true });
+    }
   }
   function renderChartHeader() {
     if (!selection) return;
@@ -145,7 +97,10 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     $('selection').textContent = `${row?.name || selection.name || selection.symbol} ${row || selection.name ? selection.symbol : ''}`.trim();
     $('membership').textContent = legacy ? (selection.source === 'archive' ? '冻结 BUY 行情' : '旧版原生15m候选')
       : (row?.sectors || []).map(key => view.focus.sectors.find(item => item.key === key)?.name || key).join(' · ');
-    $('periods').innerHTML = TIMEFRAMES.map((tf, index) => `<button data-period="${tf}" aria-pressed="${tf === selection.timeframe}" ${legacy && index > 2 ? 'disabled' : ''}>${PERIOD_LABEL[tf]}</button>`).join('');
+    for (const [index, button] of [...$('periods').children].entries()) {
+      button.setAttribute('aria-pressed', String(button.dataset.period === selection.timeframe));
+      button.disabled = legacy && index > 2;
+    }
     const index = filtered.findIndex(item => item.symbol === selection.symbol);
     action('previous').disabled = index < 1;
     action('next').disabled = index < 0 || index === filtered.length - 1;
@@ -219,29 +174,37 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     open({ symbol, timeframe, source: 'focus', anchor: candidate?.at || null, eventId: candidate?.id || null });
   }
 
-  async function refresh() {
+  async function refresh(force = false) {
     if (refreshPending || stopped) return;
     refreshPending = true;
+    const before = view, beforeError = viewError;
     try {
-      const raw = await io.view();
+      try {
+        const status = await io.runtime();
+        if (status) runtime = status;
+        statusError = !status && runtime ? '后台状态暂不可读' : '';
+      } catch (error) { statusError = statusText(error.message); }
       if (stopped) return;
-      if (!raw) { $('market').textContent = '等待后台发布工作台'; return; }
-      $('workbench-error').textContent = '';
-      if (raw !== lastRaw) {
-        const incoming = JSON.parse(raw);
-        if (view && incoming.focus.revision < view.focus.revision) return;
-        lastRaw = raw; view = incoming;
-        updateFocus(view.focus);
-        const summary = view.summary;
-        const phase = view.state.phase === 'SCOPE_PAUSED' && view.focus.revision ? '关注池已暂停' : statusText(view.state.phase);
-        $('market').textContent = [summary.market_day, `最新完成目标 ${short(summary.target_15m)}`, phase].filter(Boolean).join(' · ');
-        $('coverage').innerHTML = [['关注板块', view.focus.sectors.length], ['去重股数', summary.expected],
-          ['有周期就绪', summary.ready_symbols], ['结构候选', summary.candidate_symbols], ['待补 / 阻塞', summary.blocked_symbols]]
-          .map(([label, count]) => `<span>${label} <strong>${count}</strong></span>`).join('');
-        $('diagnostics').textContent = JSON.stringify({ ...view.state, coverage: summary.ready_by_timeframe, rule: view.rule_version }, null, 2);
-        renderTable();
+      if (!view || force || (runtime?.result_id && runtime.result_id !== view.result_id)) {
+        try {
+          const raw = await io.view();
+          if (stopped) return;
+          if (!raw && view) throw Error('观察结果暂不可读');
+          if (raw && raw !== lastRaw) {
+            const incoming = JSON.parse(raw);
+            if (!view || incoming.focus.revision >= view.focus.revision) {
+              updateFocus(incoming.focus);
+              lastRaw = raw; view = incoming;
+            }
+          }
+          viewError = '';
+        } catch (error) { viewError = statusText(error.message); }
       }
-      if (selection?.source === 'focus' && !loadingChart) {
+      const market = runtime?.market_day || view?.summary.market_day;
+      $('market').textContent = market ? `交易日 ${market}` : '';
+      paintRuntime(node, runtime, view, { statusError, viewError });
+      if (before !== view || beforeError !== viewError) renderTable();
+      if (view && selection?.source === 'focus' && !loadingChart) {
         const row = view.rows.find(item => item.symbol === selection.symbol);
         const frame = row?.frames[selection.timeframe];
         const signature = JSON.stringify([frame, row?.levels, row?.reference]);
@@ -249,10 +212,10 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
           const prior = chartSignature;
           chartSignature = signature;
           if (prior !== null || !chart) void loadChart(false);
+          else renderChartHeader();
         }
       }
-    } catch (error) { if (!stopped) $('workbench-error').textContent = statusText(error.message); }
-    finally { refreshPending = false; }
+    } finally { refreshPending = false; }
   }
   async function history(offset) {
     $('archive-list').textContent = '正在读取冻结历史…';
@@ -260,27 +223,55 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
       const result = await io.submit('history', { offset });
       if (!result || stopped) return;
       archiveOffset = offset; archiveRows = result.rows || [];
-      $('archive-list').innerHTML = archiveRows.map((row, i) =>
-        `<p><button data-old="${i}">${esc(row.name || row.symbol)} · ${row.symbol}</button> ${esc(short(row.confirmed_at))} · ${esc(row.mode || '历史')}</p>`).join('') || '暂无冻结记录';
+      $('archive-list').innerHTML = archiveRows.length ? `<table class="mr-members"><thead><tr><th>股票</th>
+        <th>代码</th><th>确认时间</th><th>模式</th></tr></thead><tbody>${archiveRows.map((row, i) => {
+        const symbol = esc(row.symbol), name = row.name && row.name !== row.symbol ? esc(row.name) : '';
+        const entry = `<button class="mr-stock-name" data-old="${i}">${name || symbol}</button>`;
+        return `<tr><td>${name ? entry : '—'}</td><td class="mr-code">${name ? symbol : entry}</td>
+          <td class="mr-code">${esc(short(row.confirmed_at))}</td><td>${esc(row.mode || '历史')}</td></tr>`;
+      }).join('')}</tbody></table>` : '暂无冻结记录';
+      $('history-page').textContent = archiveRows.length ? `${offset + 1}–${offset + archiveRows.length} / ${quantity(result.total)}` : '';
       action('history-prev').disabled = offset === 0;
       action('history-next').disabled = offset + archiveRows.length >= result.total;
     } catch (error) { if (!stopped) $('archive-list').textContent = error.message; }
   }
+  function openManager(button, inspect) {
+    const dialog = $('manager');
+    if (!dialog.open) {
+      managerTrigger = button;
+      dialog.showModal();
+      dialog.querySelector('[data-role="query"]:enabled')?.focus();
+    }
+    if (inspect) void focus.inspect(inspect);
+  }
   $('search').addEventListener('input', renderTable);
+  $('scope-search').addEventListener('input', renderTable);
   for (const role of ['filter', 'filter-period', 'order']) $(role).addEventListener('change', renderTable);
   $('show-levels').addEventListener('change', renderChartHeader);
   $('archive').addEventListener('toggle', () => { if ($('archive').open) void history(archiveOffset); });
+  $('manager').addEventListener('close', () => {
+    (managerTrigger?.isConnected ? managerTrigger : action('manage')).focus({ preventScroll: true });
+  });
   node.addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button) return;
-    const { board: sector, stock, tf, period, act, old } = button.dataset;
+    const { board: sector, stock, tf, period, act, old, inspect } = button.dataset;
     if (sector !== undefined) { board = sector; renderTable(); }
+    if (inspect || act === 'manage') openManager(button, inspect);
+    if (act === 'close-manager') $('manager').close();
+    if (act === 'toggle-rail') {
+      const expanded = button.getAttribute('aria-expanded') !== 'true';
+      $('rail').dataset.expanded = String(expanded);
+      button.setAttribute('aria-expanded', String(expanded));
+      const label = expanded ? '折叠当前关注' : '展开当前关注';
+      button.setAttribute('aria-label', label); button.title = label;
+    }
     if (stock) openRow(stock, tf);
     if (period && period !== selection?.timeframe) {
       if (selection.source === 'focus') openRow(selection.symbol, period, false);
       else open({ ...selection, timeframe: period, anchor: period === '15m' ? selection.anchor : null }, false);
     }
-    if (act === 'refresh') { void refresh(); if (selection && !loadingChart) void loadChart(false); }
+    if (act === 'refresh') { void refresh(true); if (selection && !loadingChart) void loadChart(false); }
     if (act === 'locate') chart?.focus();
     if (act === 'preview' && selection) ctx.ui?.openStockPreview({
       symbol: selection.symbol, name: selection.name || view?.rows.find(row => row.symbol === selection.symbol)?.name,
@@ -297,6 +288,8 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     }
     if (act === 'history-prev' || act === 'history-next') void history(Math.max(0, archiveOffset + (act === 'history-next' ? 50 : -50)));
   });
+  $('periods').innerHTML = TIMEFRAMES.map(tf => `<button data-period="${tf}">${PERIOD_LABEL[tf]}</button>`).join('');
+  paintRuntime(node, null, null);
   renderTable();
   const linked = deepLink(win.location.search);
   if (linked) open(linked, false);

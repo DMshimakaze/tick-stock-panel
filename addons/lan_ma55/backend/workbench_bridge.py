@@ -88,6 +88,9 @@ class WorkbenchBridge:
                     if type(offset) is not int or offset < 0:
                         raise ValueError("INVALID_HISTORY_PAGE")
                     result = read_page(self.owner.market.path, "events", limit=50, offset=offset)
+                    names = self.owner.archive_market.universe({row["symbol"] for row in result["rows"]})
+                    for row in result["rows"]:
+                        row["name"] = names.get(row["symbol"], {}).get("name")
                 else:
                     result = self.chart(args, sessions, schedules, weeks)
             except (KeyError, TypeError, ValueError):

@@ -13,6 +13,7 @@ NATIVE_DAY_ID = "lan_ma55_native15_day_v1"
 NATIVE_HISTORY_ID = "lan_ma55_native15_history_v1"
 NATIVE_PRICES_ID = "lan_ma55_native15_prices_v1"
 WORKBENCH_ID = "lan_ma55_sector_workbench_v1"
+RUNTIME_ID = "lan_ma55_sector_runtime_v1"
 COMMAND_ID = "lan_ma55_sector_command_v1"
 RECEIPT_ID = "lan_ma55_sector_receipt_v1"
 COMMAND_SLOTS = 16
@@ -83,6 +84,7 @@ def workbench_configs():
              fields=[dict(name=n, dtype=t, label=n) for n, t in fields])
         for table, label, fields in [
             (WORKBENCH_ID, "MA55 板块观察", [("scope", "string"), ("payload_json", "string")]),
+            (RUNTIME_ID, "MA55 运行状态", [("scope", "string"), ("payload_json", "string")]),
             (COMMAND_ID, "MA55 观察请求", COMMAND_FIELDS),
             (RECEIPT_ID, "MA55 观察回执", COMMAND_FIELDS),
         ]
@@ -153,9 +155,9 @@ class Publisher:
         return self.ingest(NATIVE_PRICES_ID if self.native else PRICES_ID, [dict(scope="lan.ma55", payload_json=json.dumps(
             dict(day=day, rows=rows), ensure_ascii=False, allow_nan=False))])
 
-    def ingest(self, table, rows, day=None):
+    def ingest(self, table, rows, day=None, *, timeout=httpx.USE_CLIENT_DEFAULT):
         response = self.http.post(
-            f"/api/ext-data/{table}/ingest", json=dict(rows=rows, date=day)
+            f"/api/ext-data/{table}/ingest", json=dict(rows=rows, date=day), timeout=timeout
         )
         response.raise_for_status()
         return response.json()
