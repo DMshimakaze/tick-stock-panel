@@ -88,7 +88,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.13.3", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.4", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -282,7 +282,9 @@ class Worker:
             self.state, focus=self.focus, scope_count=len(self.active_scope()) if self.focus else None,
             targets=self.targets, market_day=self.market_day, published=self.published_view, worker_alive=alive,
         )
-        if status == self.last_runtime and now - self.last_heartbeat < 10:
+        host = status.get("host_job_status") or {}
+        comparison = dict(status, host_job_status={k: v for k, v in host.items() if k != "checked_at"})
+        if comparison == self.last_runtime and now - self.last_heartbeat < 10:
             return
         row = dict(scope="lan.ma55", payload_json=encoded(dict(status, status_at_ms=int(time() * 1000))))
         try:
@@ -290,7 +292,7 @@ class Worker:
         except (httpx.HTTPError, ValueError):
             self.runtime_retry = now + 5
         else:
-            self.last_runtime, self.last_heartbeat = status, now
+            self.last_runtime, self.last_heartbeat = comparison, now
 
     def mark_task(self, phase, operation, symbols):
         self.report(phase=phase, work_stage=None if phase == "ANALYZING" else phase,
@@ -426,7 +428,12 @@ class Worker:
                             work = None
                         daily = (self.daily.task(master, schedules["daily"], needs, cold_allowed=cold_allowed)
                                  if not metadata and (not work or work[2] == "C") else None)
-                        if daily and (not work or self.repair_turn % 2 == 0):
+                        use_daily = daily and (not work or self.repair_turn % 2 == 0)
+                        budget = self.collector.budgets["minute"]
+                        if (daily or work) and budget.delay() > 0:
+                            phase = "RATE_LIMITED" if budget.cooldown > monotonic() else "QUOTA_WAIT"
+                            waiting_stage = ("W" if daily[-1] else "D") if use_daily else work[2]
+                        elif use_daily:
                             start, end, count, symbols, cold = daily
                             stage = "W" if cold else "D"
                             self.mark_task(stage, "COLLECTING_DAILY", symbols)
@@ -522,8 +529,8 @@ class Worker:
             self.owner.set_meta("target", target)
         if stage == "F":
             self.mark_task(stage, "CHECKING_FACTORS", symbols)
-            self.store.factor_attempt(symbols, now)
             factors = self.collector.factors(symbols)
+            self.store.factor_attempt(symbols, now)
             self.flush_requests(stage)
             for offset in range(0, len(symbols), WRITE_BATCH):
                 self.owner.accept_factors(symbols[offset:offset + WRITE_BATCH], factors, sessions=sessions,

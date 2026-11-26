@@ -6,7 +6,7 @@ import { JSDOM } from 'jsdom';
 import { chartModel } from '../src/chart_model.mjs';
 import extension from '../src/extension.mjs';
 import { mountWorkbench } from '../src/workbench.mjs';
-import { COMMAND, RECEIPT, RUNTIME, WORKBENCH, deepLink, TIMEFRAMES } from '../src/workbench_data.mjs';
+import { COMMAND, RECEIPT, RUNTIME, WORKBENCH, createWorkbenchIO, deepLink, TIMEFRAMES } from '../src/workbench_data.mjs';
 
 const tick = () => new Promise(resolve => setTimeout(resolve, 20));
 const board = { key: 'cn_concept:886054.TI', name: '光刻机' };
@@ -18,6 +18,29 @@ const row = (symbol, name) => ({ symbol, name, sectors: [board.key], frames });
 const empty = { revision: 0, sectors: [], members: {}, catalog: [board, related],
   aliases: { [related.key]: related.aliases }, groups: [], taxonomy: { run: 'verified' } };
 const summary = { expected: 0, ready_symbols: 0, candidate_symbols: 0, blocked_symbols: 0, target_15m: time };
+
+test('transient Ext Data read while a receipt is written keeps the original command', async () => {
+  let submitted, writes = 0, polls = 0;
+  const api = {
+    async extDataRows(id) {
+      if (id === COMMAND) return { rows: submitted ? [submitted] : [] };
+      if (id !== RECEIPT) throw Error('unexpected table');
+      if (++polls === 1) throw Object.assign(Error('500 Internal Server Error'), { status: 500 });
+      return { rows: [{ ...submitted, payload_json: JSON.stringify({ ok: true, rows: [] }) }] };
+    },
+    async extDataIngest(id, { rows }) {
+      assert.equal(id, COMMAND);
+      writes++;
+      [submitted] = rows;
+    },
+  };
+  const io = createWorkbenchIO(api, { uuid: randomUUID, wait: async () => {} });
+  try {
+    assert.deepEqual(await io.submit('members', { board: board.key }), { ok: true, rows: [] });
+    assert.equal(writes, 1);
+    assert.equal(polls, 2);
+  } finally { io.dispose(); }
+});
 
 test('confirmed focus handles the draft and offers explicit local alias matches for manual confirmation', async () => {
   const dom = new JSDOM('<div id="mount"></div>', { url: 'http://localhost/', pretendToBeVisual: true });

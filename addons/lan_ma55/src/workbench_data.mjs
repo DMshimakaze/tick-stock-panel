@@ -77,6 +77,17 @@ export function createWorkbenchIO(api, {
 } = {}) {
   const client_id = uuid(), pendingWrites = new Map(), generations = new Map();
   let disposed = false;
+  async function readRows(table, limit) {
+    // Ext Data readers can briefly see a Parquet footer during an official ingest.
+    for (const delay of [80, 200, 0]) {
+      try {
+        return await api.extDataRows(table, { limit });
+      } catch (error) {
+        if (disposed || error.status !== 500 || !delay) throw error;
+        await wait(delay);
+      }
+    }
+  }
   async function submit(kind, args) {
     const generation = (generations.get(kind) || 0) + 1;
     generations.set(kind, generation);
@@ -84,7 +95,7 @@ export function createWorkbenchIO(api, {
     const request_id = uuid();
     async function write() {
       for (let attempt = 0; attempt < 3 && current(); attempt++) {
-        const { rows } = await api.extDataRows(COMMAND, { limit: COMMAND_ROWS });
+        const { rows } = await readRows(COMMAND, COMMAND_ROWS);
         if (!current()) return null;
         const active = rows.filter(row => row.scope.startsWith(kind + '-') && clock() - row.request_ms < LEASE_MS);
         const taken = new Set(active.map(row => row.scope));
@@ -94,7 +105,7 @@ export function createWorkbenchIO(api, {
         const request = { scope, client_id, request_id, request_ms: clock(), payload_json: JSON.stringify(args) };
         await api.extDataIngest(COMMAND, { rows: [request] });
         if (!current()) return null;
-        const echo = (await api.extDataRows(COMMAND, { limit: COMMAND_ROWS })).rows.find(row => row.scope === scope);
+        const echo = (await readRows(COMMAND, COMMAND_ROWS)).rows.find(row => row.scope === scope);
         if (echo?.client_id === client_id && echo.request_id === request_id) return request;
       }
       if (current()) throw Error('工作台会话发生竞争，请重试');
@@ -105,7 +116,7 @@ export function createWorkbenchIO(api, {
     const sent = await sending;
     if (!sent) return null;
     while (current() && clock() - sent.request_ms < LEASE_MS) {
-      const { rows } = await api.extDataRows(RECEIPT, { limit: COMMAND_ROWS });
+      const { rows } = await readRows(RECEIPT, COMMAND_ROWS);
       if (!current()) return null;
       const receipt = rows.find(row => row.scope === sent.scope && row.client_id === client_id
         && row.request_id === request_id && row.request_ms === sent.request_ms);
@@ -128,11 +139,11 @@ export function createWorkbenchIO(api, {
   }
   return {
     async view() {
-      const { rows } = await api.extDataRows(WORKBENCH, { limit: 1 });
+      const { rows } = await readRows(WORKBENCH, 1);
       return rows[0]?.payload_json || null;
     },
     async runtime() {
-      const { rows } = await api.extDataRows(RUNTIME, { limit: 1 });
+      const { rows } = await readRows(RUNTIME, 1);
       return rows[0]?.payload_json ? JSON.parse(rows[0].payload_json) : null;
     },
     submit,
