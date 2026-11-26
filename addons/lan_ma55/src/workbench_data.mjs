@@ -74,8 +74,10 @@ export function deepLink(search) {
 export function createWorkbenchIO(api, {
   uuid = () => globalThis.crypto.randomUUID(), clock = Date.now,
   wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
+  locks = globalThis.navigator?.locks,
 } = {}) {
-  const client_id = uuid(), pendingWrites = new Map(), generations = new Map();
+  const client_id = uuid(), generations = new Map();
+  let pendingWrite = Promise.resolve();
   let disposed = false;
   async function readRows(table, limit) {
     // Ext Data readers can briefly see a Parquet footer during an official ingest.
@@ -111,8 +113,11 @@ export function createWorkbenchIO(api, {
       if (current()) throw Error('工作台会话发生竞争，请重试');
       return null;
     }
-    const sending = (pendingWrites.get(kind) || Promise.resolve()).catch(() => {}).then(write);
-    pendingWrites.set(kind, sending);
+    // TSP snapshot ingests share one temporary path per table. Serialize the
+    // read/merge/echo across this origin's tabs, then release it before polling.
+    const sending = pendingWrite.catch(() => {}).then(() =>
+      locks ? locks.request(COMMAND, write) : write());
+    pendingWrite = sending;
     const sent = await sending;
     if (!sent) return null;
     while (current() && clock() - sent.request_ms < LEASE_MS) {

@@ -42,6 +42,40 @@ test('transient Ext Data read while a receipt is written keeps the original comm
   } finally { io.dispose(); }
 });
 
+test('two clients serialize command ingests without locking receipt polling', async () => {
+  const commands = new Map(), replies = new Map();
+  let queue = Promise.resolve(), active = 0, peak = 0;
+  const locks = {
+    request(name, fn) {
+      assert.equal(name, COMMAND);
+      const result = queue.then(fn);
+      queue = result.catch(() => {});
+      return result;
+    },
+  };
+  const api = {
+    async extDataRows(id) {
+      return { rows: [...(id === COMMAND ? commands : replies).values()] };
+    },
+    async extDataIngest(id, { rows: [row] }) {
+      assert.equal(id, COMMAND);
+      peak = Math.max(peak, ++active);
+      await tick();
+      active--;
+      commands.set(row.scope, row);
+      replies.set(row.scope, { ...row, payload_json: row.payload_json });
+    },
+  };
+  const windows = [createWorkbenchIO(api, { uuid: randomUUID, locks }),
+    createWorkbenchIO(api, { uuid: randomUUID, locks })];
+  try {
+    const results = await Promise.all(windows.map((io, i) => io.submit('edit', { draft: i })));
+    assert.deepEqual(results, [{ draft: 0 }, { draft: 1 }]);
+    assert.equal(peak, 1);
+    assert.equal(commands.size, 2);
+  } finally { windows.forEach(io => io.dispose()); }
+});
+
 test('confirmed focus handles the draft and offers explicit local alias matches for manual confirmation', async () => {
   const dom = new JSDOM('<div id="mount"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
   const { document } = dom.window, calls = [], commands = new Map(), replies = [];
