@@ -1,0 +1,14 @@
+format: tick-extension-package
+format_version: 1
+id: market.volpulse
+display_name: 大盘量能
+version: 0.1.0
+extension_api_version: 1
+author: DMshimakaze
+description: 沪深两市和核心指数盘中量能、同期放缩量及异动监控。
+backend: backend.extension
+frontend: frontend/extension.mjs
+requires_app: '>=0.4.1,<0.4.2'
+requires_python: '>=3.11'
+platforms: [any]
+requires: ['httpx>=0.28,<0.29', 'tivelo-market-cn==0.1.0a1']
