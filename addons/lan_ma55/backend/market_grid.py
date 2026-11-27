@@ -182,13 +182,16 @@ def adjustment(events, day, asof):
     return 1 / prod(e["ex_factor"] for e in events if day < e["day"] <= asof[:10])
 
 
-def project(rows, events, asof, *, sessions, timeframe, periods=MAS):
+def project(rows, events, asof, *, sessions, timeframe, periods=MAS, exclude_zero_volume=False):
     schedule = (
         points(sessions, rows[0]["timestamp"][:10], asof, step=int(timeframe[:-1]))
         if rows
         else []
     )
     result = [project_bar(raw, events, asof) for raw in rows]
+    if exclude_zero_volume:
+        for bar in result:
+            bar["valid"] = bar["valid"] and bar["volume"] > 0
     return with_averages(result, schedule, periods)
 
 

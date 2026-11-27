@@ -45,14 +45,21 @@ export const LAYOUT = `<header class="mr-header">
     </div>
   </aside>
   <section class="mr-panel mr-matrix" aria-label="关注股票" data-role="matrix">
+    <section class="mr-activation" aria-label="最新激活">
+      <div class="mr-activation-head"><h3>最新激活</h3>
+        <div class="mr-segments mr-activation-periods" role="group" aria-label="最新激活周期" data-role="result-periods"></div>
+      </div>
+      <div class="mr-activation-controls" data-role="result-controls"></div>
+      <div class="mr-activation-list" data-role="result-list"></div>
+    </section>
     <div class="mr-matrix-top"><header class="mr-panel-head"><h2>六周期观察</h2><span class="mr-meta" data-role="row-count"></span></header>
       <div class="mr-tools">
         <label class="mr-search">${icon('search')}<input data-role="search" aria-label="搜索股票" placeholder="名称或代码"></label>
-        <label class="mr-filter">状态 <select data-role="filter"><option value="all">全部</option><option value="候选">候选</option>
-          <option value="观察">观察</option><option value="反压">反压</option><option value="就绪">就绪</option><option value="blocked">待补 / 阻塞</option></select></label>
+        <label class="mr-filter">状态 <select data-role="filter"><option value="all">全部</option><option value="ACTIVATED">激活</option>
+          <option value="INACTIVE">未激活</option><option value="PENDING">待算</option><option value="MISSING">缺数据</option></select></label>
         <label class="mr-filter">周期 <select data-role="filter-period"><option value="all">全部</option>${TIMEFRAMES.map(tf =>
           `<option value="${tf}">${PERIOD_LABEL[tf]}</option>`).join('')}</select></label>
-        <label class="mr-filter">排序 <select data-role="order"><option value="candidate">最近候选</option>
+        <label class="mr-filter">排序 <select data-role="order"><option value="candidate">最近激活</option>
           <option value="symbol">股票代码</option><option value="change">涨跌幅</option></select></label>
       </div></div>
     <div class="mr-table mr-focus-list" data-role="table-wrap" tabindex="0" aria-label="六周期股票矩阵"><table>
@@ -74,7 +81,9 @@ export const LAYOUT = `<header class="mr-header">
     <label class="mr-check"><input data-role="show-levels" type="checkbox">上方55线</label>
     <button data-act="locate" hidden>${icon('target')}定位确认</button>
   </div>
-  <p class="mr-meta" data-role="chart-state" role="status"></p><p class="mr-readout" data-role="readout"></p>
+  <p class="mr-meta" data-role="chart-state" role="status"></p>
+  <div class="mr-chart-readout"><p class="mr-readout" data-role="readout"></p>
+    <div class="mr-ma-legend" role="group" aria-label="均线显示" data-role="ma-legend"></div></div>
   <div class="mr-chart-body"><div class="mr-canvas" data-role="chart" hidden></div><div data-role="levels"></div></div>
 </section>
 <div class="mr-secondary">

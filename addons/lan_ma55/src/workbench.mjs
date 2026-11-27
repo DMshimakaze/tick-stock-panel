@@ -1,8 +1,9 @@
 import { mountFocusControls } from './focus_controls.mjs';
 import { createWorkbenchChart } from './chart.mjs';
-import { chartModel, beijing } from './chart_model.mjs';
+import { AVERAGE_COLORS, chartModel, beijing } from './chart_model.mjs';
+import { activationAccess, activationResults, matrixSignal, resultsMarkup } from './activation_results.mjs';
 import { escapeHtml as esc, icon, price, quantity, signed } from './presentation.mjs';
-import { filterRows, newest, savedScopes, scopeButtons, short, stockRows } from './stock_matrix.mjs';
+import { filterRows, newest, savedScopes, scopeButtons, scopedRows, short, stockRows } from './stock_matrix.mjs';
 import { paintRuntime } from './status_view.mjs';
 import { CSS, WORKBENCH_CSS } from './styles.mjs';
 import { createWorkbenchIO, currentFocus, deepLink, normalizedTime, PERIOD_LABEL, statusText, TIMEFRAMES } from './workbench_data.mjs';
@@ -18,6 +19,8 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
   const io = createWorkbenchIO(ctx.api, ioOptions);
   let view = null, lastRaw = null, lastFocus = null, board = '';
   let runtime = null, statusError = '', viewError = '', tableMarkup, scopeMarkup;
+  let access = activationAccess(null, null), resultPeriod = '15m', resultToday = false, expanded = false, results = [];
+  const resultParts = new Map(), hiddenAverages = new Set();
   let selection = null, chart = null, chartSignature = null, filtered = [];
   let loadingChart = false, refreshPending = false, stopped = false, chartGeneration = 0;
   let archiveOffset = 0, archiveRows = [], managerTrigger;
@@ -77,13 +80,16 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     }
     const period = $('filter-period').value;
     $('matrix').dataset.periodLens = period;
-    filtered = filterRows(rows, options.find(item => item.key === board), {
-      query: $('search').value.trim().toLowerCase(), state: $('filter').value, period, order: $('order').value,
-    });
+    const scope = options.find(item => item.key === board);
+    const query = $('search').value.trim().toLowerCase();
+    const scoped = scopedRows(rows, scope, query);
+    access = activationAccess(view, runtime, { statusError, viewError });
+    filtered = filterRows(scoped, { state: $('filter').value, period, order: $('order').value }, access);
+    renderResults(scoped, query ? `${scope.name} · 搜索结果` : scope.name);
     $('row-count').textContent = view ? `${quantity(filtered.length)} 只股票` : '';
     const empty = !view ? (viewError ? '观察结果暂不可读' : '等待后台发布观察结果') : rows.length
       ? '没有符合筛选的股票' : '在关注管理中保存板块后显示成分股';
-    const markup = stockRows(filtered, selection?.symbol, empty);
+    const markup = stockRows(filtered, selection?.symbol, empty, access);
     if (markup !== tableMarkup) {
       const { stock, tf } = doc.activeElement.dataset;
       const wrap = $('table-wrap'), { scrollLeft, scrollTop } = wrap;
@@ -91,6 +97,22 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
       wrap.scrollLeft = scrollLeft; wrap.scrollTop = scrollTop;
       if (stock) [...$('stocks').querySelectorAll('button')].find(item =>
         item.dataset.stock === stock && item.dataset.tf === tf)?.focus({ preventScroll: true });
+    }
+  }
+  function renderResults(rows, scope) {
+    const markup = resultsMarkup(activationResults(rows, access), access, {
+      timeframe: resultPeriod, today: resultToday, expanded, scope,
+    });
+    results = markup.entries;
+    for (const [part, role] of [['tabs', 'result-periods'], ['controls', 'result-controls'], ['list', 'result-list']]) {
+      if (resultParts.get(part) === markup[part]) continue;
+      const el = $(role), scroll = el.scrollTop;
+      const focused = el.contains(doc.activeElement) ? Object.entries(doc.activeElement.dataset) : [];
+      el.innerHTML = markup[part];
+      resultParts.set(part, markup[part]);
+      el.scrollTop = scroll;
+      if (focused.length) [...el.querySelectorAll('button')].find(button =>
+        focused.every(([key, value]) => button.dataset[key] === value))?.focus({ preventScroll: true });
     }
   }
   function renderChartHeader() {
@@ -113,11 +135,22 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     $('levels').innerHTML = levels.length ? `<div class="mr-levels"><h2>各周期 MA55</h2>
       <p class="mr-meta">${row?.reference ? `参考 ${price(row.reference.price, row.raw_tick)} · ${short(row.reference.at)}` : '等待可比较的完成价'}</p>
       ${levels.map(level => {
-        const frame = row?.frames[level.timeframe], confirmation = frame?.latest_candidate;
+        const frame = row?.frames[level.timeframe], signal = frame?.activation;
+        const confirmation = access.usable.includes(level.timeframe) ? signal?.events?.at(-1) : null;
+        const decision = frame?.result?.latest;
         const position = { PRESSURE: '上方', SUPPORT_REFERENCE: '下方 · 支撑参考', ON: '在线' }[level.side];
+        const facts = [
+          frame?.expected_end ? `周期结束 ${short(frame.expected_end)}` : null,
+          decision?.pattern ? `形态 ${decision.pattern}` : null, decision?.veto ? `限制 ${decision.veto}` : null,
+          frame?.basis, decision?.rule_version,
+        ].filter(Boolean).join(' · ');
+        const review = signal?.review_pending ? '输入变更待复核' : signal?.invalidated ? '复核后有历史确认失效' : '';
         return `<div><strong>${PERIOD_LABEL[level.timeframe]}</strong><span>${price(level.ma55, row?.raw_tick)}</span>
-          <small>${esc(position ? `${position} ${signed(level.distance_pct)}` : statusText(level.status === 'READY' ? 'WAITING_INPUT' : level.status))}</small>
-          ${confirmation || level.pressure_test ? `<small>${confirmation ? `确认 ${short(confirmation.at)} · ${esc(confirmation.mode)}` : ''}${level.pressure_test ? ' · 反压观察' : ''}</small>` : ''}</div>`;
+          <small title="${esc(facts)}">${esc(position ? `${position} ${signed(level.distance_pct)}` : statusText(level.status === 'READY' ? 'WAITING_INPUT' : level.status))}</small>
+          ${confirmation || level.pressure_test || review ? `<small>${esc([
+            confirmation ? `确认 ${short(confirmation.at)} · ${confirmation.mode}` : null,
+            level.pressure_test ? '反压观察' : null, review,
+          ].filter(Boolean).join(' · '))}</small>` : ''}</div>`;
       }).join('')}</div>` : '';
     chart?.setLevels(!legacy && $('show-levels').checked ? (row?.levels?.pressures || [])
       .map(item => ({ price: item.ma55, label: `当前 ${PERIOD_LABEL[item.timeframe]} MA55` })) : []);
@@ -129,7 +162,7 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     loadingChart = true;
     if (reset) {
       chart?.dispose(); chart = null;
-      $('chart').hidden = true; $('readout').textContent = '';
+      $('chart').hidden = true; chartReadout(null);
       action('locate').hidden = true;
       $('chart-state').textContent = '正在读取已完成 K 线…';
     }
@@ -144,22 +177,30 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
       $('chart-state').textContent = model.count ? [
         PERIOD_LABEL[selected.timeframe], basis, `${model.count} 根完成 K`, short(data.asof),
         reason, selected.anchor && model.anchor < 0 ? '所选确认时刻缺少已保存 K 线' : '',
+        data.event_invalidated ? '所选事件经复核已失效' : data.event_verified === false ? '所选事件待核实' : '',
       ].filter(Boolean).join(' · ') : reason || '等待完成 K 线';
       if (model.count) {
         $('chart').hidden = false;
-        if (!chart) chart = makeChart($('chart'), bar => {
-          $('readout').textContent = bar ? `${short(bar.timestamp)}　收 ${price(bar.close, data.tick)}　MA55 ${price(bar.ma55, data.tick)}　成交量 ${bar.volume.toLocaleString('zh-CN')} 股` : '';
-        });
+        if (!chart) {
+          chart = makeChart($('chart'), bar => chartReadout(bar, data.tick));
+          for (const period of hiddenAverages) chart.setAverageVisible(period, false);
+        }
         chart.update(model, reset);
       } else if (chart) {
-        chart.dispose(); chart = null; $('chart').hidden = true; $('readout').textContent = '';
+        chart.dispose(); chart = null; $('chart').hidden = true; chartReadout(null);
       }
-      action('locate').hidden = model.anchor < 0;
+      action('locate').hidden = model.anchor < 0 || data.event_verified === false;
       renderChartHeader();
     } catch (error) {
       if (!stopped && generation === chartGeneration) $('chart-state').textContent = error.message;
     } finally {
       if (generation === chartGeneration) loadingChart = false;
+    }
+  }
+  function chartReadout(bar, tick) {
+    $('readout').textContent = bar ? `${short(bar.timestamp)}　收 ${price(bar.close, tick)}　成交量 ${quantity(bar.volume)} 股` : '';
+    for (const entry of $('ma-legend').children) {
+      entry.lastElementChild.textContent = price(bar?.volume > 0 ? bar[`ma${entry.dataset.ma}`] : null, tick);
     }
   }
   function open(next, scroll = true) {
@@ -171,9 +212,10 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
   function openRow(symbol, timeframe, locateCandidate = true) {
     const row = view?.rows.find(item => item.symbol === symbol);
     if (!row) return;
-    const [recent, time] = newest(row);
-    timeframe ||= time ? recent : '15m';
-    const candidate = locateCandidate ? row.frames[timeframe]?.latest_candidate : null;
+    const period = $('filter-period').value;
+    const [recent, time] = newest(row, period, access);
+    timeframe ||= period !== 'all' || time ? recent : '15m';
+    const candidate = locateCandidate ? matrixSignal(row, timeframe, access) : null;
     open({ symbol, timeframe, source: 'focus', anchor: candidate?.at || null, eventId: candidate?.id || null });
   }
 
@@ -195,7 +237,8 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
           if (!raw && view) throw Error('观察结果暂不可读');
           if (raw && raw !== lastRaw) {
             const incoming = JSON.parse(raw);
-            if (!lastFocus || incoming.focus.revision >= lastFocus.revision) {
+            if ((!runtime?.result_id || incoming.result_id === runtime.result_id)
+                && (!lastFocus || incoming.focus.revision >= lastFocus.revision)) {
               updateFocus(incoming.focus);
               lastRaw = raw; view = { ...incoming, focus: lastFocus };
             }
@@ -206,7 +249,8 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
       const market = runtime?.market_day || view?.summary.market_day;
       $('market').textContent = market ? `交易日 ${market}` : '';
       paintRuntime(node, runtime, view, { statusError, viewError });
-      if (before !== view || beforeError !== viewError) renderTable();
+      const nextAccess = activationAccess(view, runtime, { statusError, viewError });
+      if (before !== view || beforeError !== viewError || JSON.stringify(access) !== JSON.stringify(nextAccess)) renderTable();
       if (view && selection?.source === 'focus' && !loadingChart) {
         const row = view.rows.find(item => item.symbol === selection.symbol);
         const frame = row?.frames[selection.timeframe];
@@ -258,7 +302,8 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
   node.addEventListener('click', event => {
     const button = event.target.closest('button');
     if (!button) return;
-    const { board: sector, stock, tf, period, act, old, inspect } = button.dataset;
+    const { board: sector, stock, tf, period, act, old, inspect, resultPeriod: chosen,
+      resultWindow, signal, ma } = button.dataset;
     if (sector !== undefined) { board = sector; renderTable(); }
     if (inspect || act === 'manage') openManager(button, inspect);
     if (act === 'close-manager') $('manager').close();
@@ -268,6 +313,24 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
       button.setAttribute('aria-expanded', String(expanded));
       const label = expanded ? '折叠当前关注' : '展开当前关注';
       button.setAttribute('aria-label', label); button.title = label;
+    }
+    if (chosen && chosen !== resultPeriod) {
+      resultPeriod = chosen; resultToday = false; expanded = false; renderTable();
+    }
+    if (resultWindow && resultToday !== (resultWindow === 'today')) {
+      resultToday = resultWindow === 'today'; expanded = false; renderTable();
+    }
+    if (act === 'expand-results') { expanded = !expanded; renderTable(); }
+    if (signal) {
+      const entry = results.find(item => item.events.some(event => event.id === signal));
+      const event = entry?.events.find(event => event.id === signal);
+      if (event) open({ symbol: entry.row.symbol, timeframe: resultPeriod, source: 'focus', anchor: event.at, eventId: event.id });
+    }
+    if (ma) {
+      const visible = hiddenAverages.delete(ma);
+      if (!visible) hiddenAverages.add(ma);
+      button.setAttribute('aria-pressed', String(visible));
+      chart?.setAverageVisible(ma, visible);
     }
     if (stock) openRow(stock, tf);
     if (period && period !== selection?.timeframe) {
@@ -292,6 +355,8 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     if (act === 'history-prev' || act === 'history-next') void history(Math.max(0, archiveOffset + (act === 'history-next' ? 50 : -50)));
   });
   $('periods').innerHTML = TIMEFRAMES.map(tf => `<button data-period="${tf}">${PERIOD_LABEL[tf]}</button>`).join('');
+  $('ma-legend').innerHTML = Object.entries(AVERAGE_COLORS).map(([period, color]) =>
+    `<button type="button" data-ma="${period}" aria-label="MA${period}" aria-pressed="true" style="--ma-color:${color}">MA${period} <span>—</span></button>`).join('');
   paintRuntime(node, null, null);
   renderTable();
   const linked = deepLink(win.location.search);

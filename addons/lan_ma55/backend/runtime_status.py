@@ -1,8 +1,8 @@
 """Read-only business status from independently committed market and analysis facts."""
 
+from .activation_results import display_targets
 from .market_grid import SOURCE, wall
 from .multiframe_core.multiframe import TIMEFRAMES
-
 
 RUNTIME_FIELDS = (
     "version", "phase", "active_operation", "active_symbols", "work_stage", "waiting_for",
@@ -20,6 +20,8 @@ def observation_summary(rows, targets, market_day, *, latest_saved=None, latest_
     readiness = {period: 0 if not total or targets[period] else None for period in TIMEFRAMES}
     reasons = {period: {} for period in TIMEFRAMES}
     ready_symbols = ready_all = candidates = 0
+    activated = 0
+    has_activations = False
     arrivals = 0 if targets["15m"] else None
     saved, analyzed = latest_saved, latest_analyzed
     for row in rows:
@@ -27,6 +29,7 @@ def observation_summary(rows, targets, market_day, *, latest_saved=None, latest_
             arrivals += 1
         ready = 0
         candidate = False
+        active = False
         reference = row.get("reference")
         if reference and (not saved or reference["at"] > saved):
             saved = reference["at"]
@@ -41,6 +44,9 @@ def observation_summary(rows, targets, market_day, *, latest_saved=None, latest_
             if not target:
                 continue
             frame = row["frames"].get(period, {})
+            activation = frame.get("activation", {})
+            active |= bool(activation.get("events"))
+            has_activations |= activation.get("state") in ("ACTIVATED", "INACTIVE")
             status = frame.get("status") or "WAITING_INPUT"
             if frame.get("expected_end") != target:
                 status = "WAITING_FOR_COMPLETED_TARGET"
@@ -55,11 +61,13 @@ def observation_summary(rows, targets, market_day, *, latest_saved=None, latest_
         ready_symbols += bool(ready)
         ready_all += ready == len(TIMEFRAMES)
         candidates += candidate
+        activated += active
     minute = readiness["15m"]
     return dict(
         market_day=market_day, target_15m=targets["15m"], expected=total, ready_symbols=ready_symbols,
         blocked_symbols=total - ready_symbols, candidate_symbols=candidates if any(
             value is not None for value in readiness.values()) else None,
+        activation_symbols=activated if has_activations or activated else None,
         ready_15m=minute, unready_15m=total - minute if minute is not None else None,
         arrived_15m=arrivals,
         ready_all=ready_all if all(value is not None for value in readiness.values()) else None,
@@ -80,6 +88,7 @@ def runtime_projection(state, *, focus, scope_count, targets, market_day, publis
     return {
         **{field: state.get(field) for field in RUNTIME_FIELDS},
         "market_day": market_day, "target_15m": targets.get("15m"),
+        "activation_targets": display_targets(targets, market_day),
         "focus_revision": revision, "taxonomy_run": run, "scope_count": scope_count,
         "saved_sectors": len(focus.snapshot["sectors"]) if focus else None,
         "coverage": coverage, "worker_alive": worker_alive,

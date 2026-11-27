@@ -7,14 +7,17 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from addons.lan_ma55.backend.activation_results import activation, confirmations, display_targets
 from addons.lan_ma55.backend.daily_store import DailyStore
 from addons.lan_ma55.backend.exchange_sessions import frame_schedules, planned_session
 from addons.lan_ma55.backend.focus_owner import FocusOwner, THSTransport
-from addons.lan_ma55.backend.market_grid import combined, stamp
+from addons.lan_ma55.backend.market_grid import MAS, combined, stamp
+from addons.lan_ma55.backend.multiframe_core.multiframe import VERSION
 from addons.lan_ma55.backend.multiframe_input import DAILY_SOURCE, frame_bars
 from addons.lan_ma55.backend.native15_owner import NativeOwner
 from addons.lan_ma55.backend.native15_shadow import PROOF, SOURCE
 from addons.lan_ma55.backend.observations import Observations
+from addons.lan_ma55.backend.runtime_status import completed_targets, observation_summary
 from addons.lan_ma55.backend.ths_focus import CATALOG, MEMBERS, THSUnavailable
 from addons.lan_ma55.backend.ths_taxonomy import REVERSE
 
@@ -223,3 +226,144 @@ def test_required_history_is_planned_from_each_completed_frame(tmp_path):
         saved = {frame:json.loads(row["payload"]) for frame, row in obs.saved(symbol).items()}
         assert all(saved[frame]["status"] == "READY" for frame in ("15m", "30m", "60m", "120m"))
         assert saved["weekly"]["status"] != "READY" and obs.needs[symbol, "15m"] is None
+
+
+def test_activity_windows_follow_session_and_independent_completed_targets():
+    days = ["2026-09-21", "2026-09-22", "2026-09-23", "2026-09-24", "2026-09-28"]
+    for now, first in (
+        ("09:44:00", []), ("09:47:00", ["15m"]), ("10:02:00", ["15m", "30m"]),
+        ("10:32:00", ["15m", "30m", "60m"]), ("12:45:00", ["15m", "30m", "60m", "120m"]),
+    ):
+        schedules, _ = frame_schedules(days, f"{days[-1]} {now}")
+        targets = display_targets(completed_targets(schedules), days[-1])
+        assert [tf for tf, at in targets.items() if tf.endswith("m") and at] == first
+        assert targets["daily"] == targets["weekly"] == "2026-09-24 15:00:00"
+    on_weekend, _ = frame_schedules(days[:-1], "2026-09-27 16:00:00")
+    assert display_targets(completed_targets(on_weekend), days[-2])["15m"] == "2026-09-24 15:00:00"
+
+
+def test_project_current_replay_events_and_keep_revised_evidence(tmp_path):
+    from addons.lan_ma55.backend.market_store import encoded
+
+    period, day = "15m", "2026-11-27"
+    t0 = "2026-11-26 15:00:00"
+    t1, t2, t3 = [f"{day} {stamp}" for stamp in ("09:45:00", "10:00:00", "10:15:00")]
+
+    def event(at, price):
+        return dict(event_id=f"{VERSION}:{SYMBOL}:{period}:{at.replace(' ', 'T')}", symbol=SYMBOL,
+                    timeframe=period, timestamp=at, close=price)
+
+    def result(at, **values):
+        return dict(status="READY", expected_end=at, source_revision=1,
+                    result=dict(timeframe=period, rule_version=VERSION, latest=dict(timestamp=at)), **values)
+
+    old, first, second = event(t0, 9), event(t1, 10), event(t2, 11)
+    with NativeOwner(tmp_path / "state.sqlite3") as owner:
+        obs = Observations(owner.market, DailyStore(owner.conn))
+        prior = result(t1, latest_candidate=dict(at=t1, id=first["event_id"], mode="REPLAY"))
+        assert confirmations(prior)["events"][0]["id"] == first["event_id"]
+        with owner.conn:
+            latest, confirmed = obs.save_events([old, first, second], prior, confirmations(prior),
+                                                period, t2, f"{day} 10:04:00", t1, True, "QFQ", 1)
+            frame = result(t2, latest_candidate=latest, confirmations=confirmed)
+            owner.conn.execute("INSERT INTO ma55_observation_v1 VALUES(?,?,?,?,?,?)",
+                               (VERSION, SYMBOL, period, t0, "key", encoded(frame)))
+        assert [row["mode"] for row in confirmed["events"]] == ["REPLAY", "DELAYED"]
+        assert [row["price"] for row in confirmed["events"]] == [10, 11]
+        assert activation(dict(frame, status="WAITING_FOR_COMPLETED_TARGET"), t3, period)["events"] == confirmed["events"]
+        assert activation(frame, None, period)["state"] == "PENDING"
+        assert activation(frame, t3, "daily")["events"] == []
+        sessions = [t0[:10], day]
+        schedules, _ = frame_schedules(sessions, f"{day} 10:17:00")
+        snapshot = {"members": {SYMBOL: ["a", "b"]}}
+        master = {SYMBOL: {"eligible": True, "basis_revision": 1}}
+        rows = obs.rows(snapshot, master, schedules, day)
+        assert rows[0]["frames"][period]["activation"]["state"] == "PENDING"
+        assert observation_summary(rows, completed_targets(schedules), day)["activation_symbols"] == 1
+        master[SYMBOL]["basis_revision"] = 2
+        changed = obs.rows(snapshot, master, schedules, day)[0]["frames"][period]["activation"]
+        assert changed == dict(state="PENDING", through=None, events=[], invalidated=0, review_pending=True)
+        with owner.conn:
+            _, confirmed = obs.save_events([old, first], frame, confirmed, period, t3, t3, t1, False, "QFQ", 2)
+        state = activation(result(t3, confirmations=confirmed), t3, period)
+        assert state["state"] == "ACTIVATED" and [item["at"] for item in state["events"]] == [t1]
+        assert state["invalidated"] == 1
+        assert owner.conn.execute("SELECT count(*) FROM ma55_observation_event_v1").fetchone()[0] == 3
+        assert activation(result(t3, confirmations=confirmed), "2026-11-30 09:45:00", period)["events"] == []
+
+
+def test_chart_120m_uses_482_completed_buckets_without_displaying_warmup(tmp_path):
+    dates = [date(2025, 1, 6) + timedelta(days=i) for i in range(400)]
+    sessions = [str(day) for day in dates if day.weekday() < 5]
+    now = sessions[-1] + " 15:02:00"
+    schedules, weeks = frame_schedules(sessions, now)
+    grid = schedules["120m"][-482:]
+    native = schedules["15m"][-482 * 8:]
+    path = tmp_path / "chart.sqlite3"
+    with NativeOwner(path) as owner:
+        owner.refresh_master([dict(symbol=SYMBOL, name="测试", eligible=True,
+                                  source_type="stock", raw_tick=.01)], {"expected": 1}, sessions)
+        with owner.conn:
+            owner.market.factor_response(SYMBOL, [], now, sessions, update_indicators=False)
+            owner.market._write(SYMBOL, [bar(at, close=i // 8 + 1) for i, at in enumerate(native)])
+        obs = Observations(owner.market, DailyStore(owner.conn))
+        result = obs.chart(SYMBOL, "120m", sessions, schedules, weeks)
+        assert result["grid"] == grid[-250:]
+        assert len(result["bars"]) == 250
+        first = result["bars"][0]
+        assert first["timestamp"] == grid[232] and first["source_count"] == 8
+        assert [first[f"ma{n}"] for n in MAS] == [233 - (n - 1) / 2 for n in MAS]
+        missing = native[240 * 8]
+        with owner.conn:
+            owner.conn.execute("DELETE FROM native15_bar WHERE symbol=? AND bar_end=?", (SYMBOL, missing))
+        result = obs.chart(SYMBOL, "120m", sessions, schedules, weeks)
+        after = [bar for bar in result["bars"] if bar["timestamp"] >= grid[240]]
+        assert len(result["bars"]) == 249 and after[0]["timestamp"] == grid[241]
+        assert all(after[0][f"ma{n}"] is None for n in MAS)
+        assert after[231]["ma233"] is None and after[232]["ma233"] == 358
+
+
+def test_chart_zero_volume_or_unverified_adjustment_breaks_same_period_sma(tmp_path):
+    sessions = ["2026-11-26", "2026-11-27"]
+    now = sessions[-1] + " 15:02:00"
+    schedules, weeks = frame_schedules(sessions, now)
+    grid = schedules["15m"]
+    with NativeOwner(tmp_path / "state.sqlite3") as owner:
+        instrument = dict(symbol=SYMBOL, name="测试", eligible=True, source_type="stock", raw_tick=.01)
+        owner.refresh_master([instrument], {"expected": 1}, sessions)
+        with owner.conn:
+            owner.market._write(SYMBOL, [bar(at, close=i + 1, volume=0 if i == 20 else 100) for i, at in enumerate(grid)])
+        obs = Observations(owner.market, DailyStore(owner.conn))
+        unverified = obs.chart(SYMBOL, "15m", sessions, schedules, weeks)["bars"]
+        assert all(row["ma5"] is None for row in unverified)
+        with owner.conn:
+            owner.market.factor_response(SYMBOL, [], now, sessions, update_indicators=False)
+        bars = obs.chart(SYMBOL, "15m", sessions, schedules, weeks)["bars"]
+        assert bars[19]["ma5"] == 18
+        assert all(row["ma5"] is None for row in bars[20:25])
+        assert bars[25]["ma5"] == 24 and bars[-1]["ma233"] is None
+        old_native = owner.market.read(SYMBOL, "15m", grid[-1], chart=True)["bars"]
+        assert [row["ma5"] for row in old_native] == [row["ma5"] for row in bars]
+
+
+def test_weekly_ma233_waits_for_a_real_233rd_completed_week(tmp_path):
+    days = [date(2021, 1, 4) + timedelta(days=i) for i in range(233 * 7)]
+    sessions = [str(day) for day in days if day.weekday() < 5]
+    thursday, friday = (day + " 15:02:00" for day in sessions[-2:])
+    first, first_weeks = frame_schedules(sessions, thursday)
+    latest, weeks = frame_schedules(sessions, friday)
+    assert len(first_weeks) == 232 and len(weeks) == 233
+    with NativeOwner(tmp_path / "weekly.sqlite3") as owner:
+        info = dict(symbol=SYMBOL, name="测试", eligible=True, source_type="stock", raw_tick=.01)
+        owner.refresh_master([info], {"expected": 1}, sessions)
+        obs = Observations(owner.market, DailyStore(owner.conn))
+        with owner.conn:
+            owner.market.factor_response(SYMBOL, [], friday, sessions, update_indicators=False)
+            data = [(SYMBOL, stamp(day, 900), price, price, price, price, 100)
+                    for index, day in enumerate(sessions) for price in (index // 5 + 1,)]
+            owner.conn.executemany("INSERT INTO ma55_daily_bar_v1(symbol,bar_end,open,high,low,close,volume) "
+                                   "VALUES(?,?,?,?,?,?,?)", data)
+        previous = obs.chart(SYMBOL, "weekly", sessions, first, first_weeks)
+        final = obs.chart(SYMBOL, "weekly", sessions, latest, weeks)
+        assert previous["asof"] == stamp(sessions[-6], 900) and previous["bars"][-1]["ma233"] is None
+        assert final["asof"] == stamp(sessions[-1], 900) and final["bars"][-1]["ma233"] == 117

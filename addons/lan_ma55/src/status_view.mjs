@@ -1,4 +1,5 @@
 import { beijing } from './chart_model.mjs';
+import { activationAccess } from './activation_results.mjs';
 import { escapeHtml as esc, icon, quantity } from './presentation.mjs';
 import { normalizedTime, PERIOD_LABEL, statusText, TIMEFRAMES } from './workbench_data.mjs';
 
@@ -113,7 +114,8 @@ export function paintRuntime(root, status, view, errors) {
   role('metrics').innerHTML = [
     metric('监控股票', total, Number.isInteger(model.savedSectors) ? `已保存 ${quantity(model.savedSectors)} 个板块` : '', 'blue', 'activity'),
     metric('15m 就绪', ready, Number.isInteger(denominator) ? `有效范围 ${quantity(denominator)} 只` : '', tone, 'check'),
-    metric('结构候选', coverage?.candidate_symbols, '六周期按股票去重', 'violet', 'spark'),
+    metric('激活股票', activationAccess(view, status, errors).usable.length ? coverage?.activation_symbols : null,
+      '六周期有效窗口去重', 'violet', 'spark'),
     metric('15m 未就绪', coverage?.unready_15m, '待补与阻塞', 'amber', 'clock'),
   ].join('');
   const statusChip = role('task-chip');

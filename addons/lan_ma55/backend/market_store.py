@@ -614,7 +614,7 @@ class Store:
                     self._put(info)
             self.set_meta("data_revision", self.meta("data_revision", 0) + 1)
 
-    def read(self, symbol, tf, asof, limit=250, *, connection=None, strategy=False):
+    def read(self, symbol, tf, asof, limit=250, *, connection=None, strategy=False, chart=False):
         with (
             nullcontext(connection)
             if connection is not None
@@ -636,7 +636,7 @@ class Store:
             sessions = self.meta("sessions", [], conn=conn)
             visible = min(limit, CAPACITY[tf])
             events = self.events(symbol, conn=conn)
-            cached = None if strategy else indicator_cache.read(conn, symbol, tf, asof, visible, info,
+            cached = None if strategy or chart else indicator_cache.read(conn, symbol, tf, asof, visible, info,
                 self.meta("calendar_revision", 0, conn=conn), events, table=self.cache_table)
             if cached:
                 visible_bars = cached["bars"]
@@ -645,7 +645,7 @@ class Store:
                 raw15 = self.raw_rows(symbol, asof, limit=STRATEGY_CAPACITY if strategy else history_capacity(), conn=conn)
                 raw = derived(raw15, tf, sessions, asof)
                 visible_bars = project(raw, events, asof, sessions=sessions, timeframe=tf,
-                                       periods=() if strategy else MAS)[-visible:]
+                                       periods=() if strategy else MAS, exclude_zero_volume=chart)[-visible:]
                 available, raw_count = len(raw), len(raw15)
                 history_gaps = len(points(sessions, raw15[0]["timestamp"], raw15[-1]["timestamp"], step=15)) - len(raw15) if raw15 else 0
             complete_ma = bool(visible_bars) and all(b.get(f"ma{n}") is not None for b in visible_bars for n in MAS)

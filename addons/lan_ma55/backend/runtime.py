@@ -11,10 +11,11 @@ from time import monotonic, time
 
 import httpx
 
+from .activation_results import display_targets
 from .collector import Collector, SourceError
 from .daily_store import DailyStore
-from .exchange_sessions import INTRADAY, frame_schedules, planned_session
 from .dc_focus_owner import DCFocusOwner
+from .exchange_sessions import INTRADAY, frame_schedules, planned_session
 from .market_grid import (
     CAPACITY,
     now_cn,
@@ -27,11 +28,10 @@ from .native15_scheduler import task as native_task
 from .native15_shadow import SOURCE as NATIVE_SOURCE
 from .observations import Observations
 from .request_budget import CollectionStopped, RequestDeferred, RollingBudget
-from .result_publisher import Publisher, RUNTIME_ID, workbench_configs
+from .result_publisher import RUNTIME_ID, Publisher, workbench_configs
 from .runtime_status import completed_targets, observation_summary, runtime_projection
 from .workbench_bridge import WorkbenchBridge, focus_view
 from .worker_lease import ProcessLease
-
 
 ANALYSIS_BATCH = 12
 WRITE_BATCH = 16
@@ -88,7 +88,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.13.5", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.6", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -240,7 +240,7 @@ class Worker:
             current = {**snapshot, "members": {symbol: snapshot["members"][symbol]
                                                for symbol in snapshot["members"] if symbol in scope}}
             master = self.store.universe(scope)
-            rows = self.observations.rows(current, master, schedules)
+            rows = self.observations.rows(current, master, schedules, self.market_day)
             latest_saved = max((info["latest_completed15"] for info in master.values()
                                 if info.get("latest_completed15")), default=None)
             prior_analysis = None
@@ -252,6 +252,7 @@ class Worker:
             view = dict(
                 result_id=f"{self.state['started_at']}/{self.view_sequence}",
                 focus=focus_view(self.focus, self.market_day), rows=rows,
+                activation_targets=display_targets(self.targets, self.market_day),
                 summary=observation_summary(rows, self.targets, self.market_day, latest_saved=latest_saved,
                                             latest_analyzed=prior_analysis),
                 state={key: self.state.get(key) for key in ("phase", "error", "waiting_for",

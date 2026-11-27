@@ -1,6 +1,6 @@
 // Price/volume panes, theme updates and event time columns from lan.kline 3.3.0.
 import { createChart, CandlestickSeries, HistogramSeries, LineSeries, CrosshairMode, LineStyle } from 'lightweight-charts';
-import { beijing } from './chart_model.mjs';
+import { AVERAGE_COLORS, beijing } from './chart_model.mjs';
 import { BuyColumns } from './chart_columns.mjs';
 
 export function createWorkbenchChart(el, onReadout, { makeChart = createChart } = {}) {
@@ -20,8 +20,9 @@ export function createWorkbenchChart(el, onReadout, { makeChart = createChart } 
   const candles = chart.addSeries(CandlestickSeries, { borderVisible: false, priceLineVisible: false, lastValueVisible: false });
   const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: 'volume' }, priceLineVisible: false,
     lastValueVisible: false }, 1);
-  const ma55 = chart.addSeries(LineSeries, { color: '#F97316', lineWidth: 1, priceLineVisible: false,
-    lastValueVisible: false, crosshairMarkerVisible: false });
+  const averages = Object.fromEntries(Object.entries(AVERAGE_COLORS).map(([period, color]) =>
+    [period, chart.addSeries(LineSeries, { color, lineWidth: 1, priceLineVisible: false,
+      lastValueVisible: false, crosshairMarkerVisible: false })]));
   chart.panes()[0].setStretchFactor(4);
   chart.panes()[1].setStretchFactor(1);
   const columns = new BuyColumns();
@@ -81,19 +82,20 @@ export function createWorkbenchChart(el, onReadout, { makeChart = createChart } 
       const tick = next.tick > 0 ? next.tick : .01;
       const priceFormat = { type: 'price', precision: Math.max(0, Math.ceil(-Math.log10(tick))), minMove: tick };
       candles.applyOptions({ priceFormat });
-      ma55.applyOptions({ priceFormat });
+      for (const series of Object.values(averages)) series.applyOptions({ priceFormat });
       chart.applyOptions({ timeScale: { timeVisible: next.period.endsWith('m'),
         tickMarkFormatter: t => next.period === 'weekly' ? beijing(t).slice(0, 7)
           : beijing(t).slice(5, next.period.endsWith('m') ? 16 : 10) } });
       candles.setData(next.bars.map(bar => bar.complete
         ? { time: bar.time, open: bar.open, high: bar.high, low: bar.low, close: bar.close } : { time: bar.time }));
       setVolume();
-      ma55.setData(next.averages);
+      for (const [period, series] of Object.entries(averages)) series.setData(next.averages[period]);
       columns.setTimes(next.times);
       if (reset) { hoverTime = undefined; focus(next.anchor); }
       readout();
     },
     focus() { if (model?.anchor >= 0) focus(model.anchor); },
+    setAverageVisible(period, visible) { averages[period].applyOptions({ visible }); },
     setLevels,
     dispose() { observer.disconnect(); candles.detachPrimitive(columns); chart.remove(); },
   };

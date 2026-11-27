@@ -3,7 +3,9 @@ import test from 'node:test';
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { JSDOM } from 'jsdom';
-import { chartModel } from '../src/chart_model.mjs';
+import { AVERAGE_COLORS, chartModel } from '../src/chart_model.mjs';
+import { activationAccess, activationResults } from '../src/activation_results.mjs';
+import { filterRows } from '../src/stock_matrix.mjs';
 import extension from '../src/extension.mjs';
 import { mountWorkbench } from '../src/workbench.mjs';
 import { COMMAND, RECEIPT, RUNTIME, WORKBENCH, createWorkbenchIO, deepLink, TIMEFRAMES } from '../src/workbench_data.mjs';
@@ -260,4 +262,123 @@ test('weekly stamps and frozen event links use the stored exchange end', () => {
   assert.equal(model.anchor, 0);
   assert.equal(model.bars[0].timestamp, at);
   assert.equal(model.times[0], Date.parse('2026-09-24T15:00:00+08:00') / 1000);
+});
+
+test('period filters, current counters and today results use the same published window', () => {
+  const day = time.slice(0, 10);
+  const early = `${day} 09:45:00`, near = `${day} 14:45:00`;
+  const targets = Object.fromEntries(TIMEFRAMES.map(tf => [tf, time]));
+  const item = (symbol, intraday, state, weekly = []) => ({
+    ...row(symbol, symbol), frames: {
+      '15m': { activation: { state, events: intraday } },
+      weekly: { activation: { state: weekly.length ? 'ACTIVATED' : 'INACTIVE', events: weekly } },
+    },
+  });
+  const events = (...times) => times.map(at => ({ at }));
+  const rows = [
+    item('600000.SH', events(early), 'ACTIVATED', events(time)),
+    item('600001.SH', events(near), 'ACTIVATED'),
+    item('600002.SH', events(early, time), 'ACTIVATED'),
+    item('600003.SH', events(early), 'PENDING'),
+    item('600004.SH', [], 'MISSING'),
+    item('600005.SH', [], 'INACTIVE'),
+  ];
+  const view = { result_id: 'r1', focus: { ...empty, revision: 1 }, rows,
+    summary: { expected: rows.length, market_day: day }, activation_targets: targets };
+  const status = { result_id: 'r1', focus_revision: 1, taxonomy_run: 'verified', scope_count: rows.length,
+    market_day: day, activation_targets: targets, worker_alive: true, status_at_ms: Date.now() };
+  const access = activationAccess(view, status);
+  const results = activationResults(rows, access);
+  const minute = results['15m'];
+  assert.deepEqual([minute.ready, minute.pending, minute.count, minute.today.length], [4, 1, 1, 4]);
+  assert.equal(minute.today[0].events.length, 2);
+  const sorted = filterRows(rows, { period: '15m', state: 'ACTIVATED', order: 'candidate' }, access);
+  assert.deepEqual(sorted.map(item => item.symbol), ['600002.SH', '600001.SH', '600000.SH']);
+  for (const [state, symbol] of [['PENDING', '600003.SH'], ['MISSING', '600004.SH'], ['INACTIVE', '600005.SH']]) {
+    assert.equal(filterRows(rows, { period: '15m', state, order: 'symbol' }, access)[0].symbol, symbol);
+  }
+  const rolled = activationAccess(view, { ...status, activation_targets: { ...targets, '15m': null } });
+  assert.equal(activationResults(rows, rolled)['15m'].count, null);
+  assert.equal(activationResults(rows, rolled).weekly.count, 1);
+  for (const broken of [{ result_id: 'r2' }, { focus_revision: 2 }, { publisher_error: '失败' }, { taxonomy_run: 'other' }]) {
+    assert.equal(activationResults(rows, activationAccess(view, { ...status, ...broken }))['15m'].count, null);
+  }
+});
+
+test('confirmed rows use exact chart anchors and moving average toggles consume no commands', async () => {
+  const dom = new JSDOM('<div id="mount"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
+  const { document } = dom.window;
+  const symbol = '600000.SH', day = time.slice(0, 10), early = `${day} 14:30:00`;
+  const targets = Object.fromEntries(TIMEFRAMES.map(tf => [tf, time]));
+  const events = [{ id: 'past', at: early, mode: 'REPLAY' }, { id: 'now', at: time, mode: 'LIVE', price: 11 }];
+  const another = { ...related, symbols: ['000001.SZ'] };
+  const entries = [{ ...row(symbol, '测试股'), frames: {
+    ...frames, '30m': { status: 'READY', expected_end: time, activation: { state: 'ACTIVATED', events } },
+  } }, { ...row('000001.SZ', '其他'), sectors: [another.key] }];
+  const view = { result_id: 'r1', summary: { ...summary, expected: 2, market_day: day },
+    focus: { ...empty, revision: 1, sectors: [{ ...board, symbols: [symbol] }, another],
+      members: { [symbol]: [board.key], '000001.SZ': [another.key] } },
+    activation_targets: targets, rows: entries };
+  const runtime = { result_id: 'r1', focus_revision: 1, taxonomy_run: 'verified', market_day: day,
+    scope_count: 2, activation_targets: targets, worker_alive: true, status_at_ms: Date.now() };
+  const commands = new Map(), replies = [], requested = [], visible = [];
+  const bars = [early, time].map((timestamp, index) => ({ ...bar, timestamp, close: 10 + index,
+    ...Object.fromEntries(Object.keys(AVERAGE_COLORS).map(n => [`ma${n}`, index ? 10 : null])) }));
+  const api = {
+    async extDataRows(id) {
+      if (id === COMMAND) return { rows: [...commands.values()] };
+      if (id === RECEIPT) return { rows: replies };
+      return { rows: [{ payload_json: JSON.stringify(id === RUNTIME ? runtime : view) }] };
+    },
+    async extDataIngest(id, { rows: [command] }) {
+      assert.equal(id, COMMAND);
+      commands.set(command.scope, command);
+      const request = JSON.parse(command.payload_json);
+      requested.push(request);
+      replies.push({ ...command, payload_json: JSON.stringify({ ...request, bars, events, asof: time, status: 'READY' }) });
+    },
+  };
+  const fakeChart = (el, readout) => ({ update(model) { readout(model.bars.at(-1)); },
+    setAverageVisible(period, value) { visible.push([period, value]); }, focus() {}, setLevels() {}, dispose() {} });
+  const dispose = mountWorkbench(document.querySelector('#mount'), { api }, {
+    ioOptions: { uuid: randomUUID, wait: () => tick() }, makeChart: fakeChart,
+  });
+  const find = selector => document.querySelector(selector);
+  try {
+    await tick();
+    find(`button[data-board="${board.key}"]`).click();
+    find('[data-result-period="30m"]').click();
+    assert.equal(find('[data-result-period="30m"] b').textContent, '1');
+    assert.match(find('[data-role="result-controls"]').textContent, /已算 1\/1/);
+    find('[data-result-window="today"]').click();
+    assert.match(find('[data-role="result-controls"]').textContent, /今日 1 只/);
+    find('[data-act="expand-results"]').click();
+    assert.match(find('[data-signal="past"]').textContent, /补算/);
+    find('[data-signal="past"]').click();
+    await tick();
+    assert.deepEqual(requested[0], { symbol, timeframe: '30m', source: 'focus', anchor: early, eventId: 'past' });
+    assert.equal(document.querySelectorAll('[data-ma]').length, 6);
+    assert.equal(find('[data-ma="233"] span').textContent, '10.00');
+    find('[data-ma="233"]').click();
+    assert.deepEqual(visible, [['233', false]]);
+    assert.equal(requested.length, 1);
+    find(`[data-stock="${symbol}"][data-tf="30m"]`).click();
+    await tick();
+    assert.deepEqual(requested.at(-1), { symbol, timeframe: '30m', source: 'focus', anchor: time, eventId: 'now' });
+    assert.equal(find('[data-ma="233"]').getAttribute('aria-pressed'), 'false');
+  } finally { dispose(); dom.window.close(); }
+});
+
+test('all six SMAs retain the same bar timestamps and break at an unavailable slot', () => {
+  const dates = [0, 1, 2].map(i => `2026-11-2${i} 15:00:00`);
+  const values = Object.fromEntries(Object.keys(AVERAGE_COLORS).map((n, i) => [`ma${n}`, i + 1]));
+  const model = chartModel({ grid: dates, bars: [dates[0], dates[2]].map(timestamp => ({
+    ...bar, ...values, timestamp,
+  })) }, { timeframe: 'daily' });
+  for (const [i, points] of Object.values(model.averages).entries()) {
+    assert.equal(points[0].value, i + 1);
+    assert.equal(points[0].color, 'transparent');
+    assert.equal(points[1].value, undefined);
+    assert.equal(points[2].time, model.bars.at(-1).time);
+  }
 });

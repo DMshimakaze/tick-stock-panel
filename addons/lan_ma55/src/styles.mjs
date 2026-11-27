@@ -148,6 +148,22 @@ export const WORKBENCH_CSS = `
 .mr .mr-rail-manage { width: 100%; justify-content: start; color: var(--mr-blue); }
 .mr .mr-matrix { overflow: hidden; }
 .mr .mr-matrix-top { padding: 8px 10px 7px; }
+.mr .mr-activation { padding: 7px 10px; border-bottom: 1px solid var(--mr-line); min-width: 0; }
+.mr .mr-activation-head, .mr .mr-activation-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 5px 8px; }
+.mr .mr-activation-head h3 { margin: 0; font-size: 12px; white-space: nowrap; }
+.mr .mr-activation-periods { flex: 1 1 405px; display: grid; grid-template-columns: repeat(auto-fit, minmax(74px, 1fr)); min-width: 0; }
+.mr .mr-activation-periods button { display: grid; gap: 0; justify-items: center; font-size: 11px; padding: 2px 3px; white-space: nowrap; }
+.mr .mr-activation-periods small { color: var(--mr-muted); font: 10px/1.2 var(--mr-mono); }
+.mr .mr-activation-controls { margin-top: 4px; }
+.mr .mr-activation-controls button { min-height: 22px; font-size: 11px; padding: 1px 5px; }
+.mr .mr-activation-list { max-height: 112px; overflow: auto; }
+.mr .mr-activation-entry { width: 100%; display: grid; grid-template-columns: minmax(0, 1fr) auto auto 12px;
+  text-align: left; align-items: center; gap: 5px; min-height: 23px; padding: 2px 4px; border-color: transparent; background: transparent; font-size: 11px; }
+.mr .mr-activation-entry > span:first-child { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.mr .mr-activation-entry small, .mr .mr-activation-entry > span:not(:first-child) { color: var(--mr-muted); font-family: var(--mr-mono); }
+.mr .mr-activation-entry svg { width: 12px; height: 12px; transform: rotate(-90deg); }
+.mr .mr-activation-more { display: flex; flex-wrap: wrap; gap: 4px; margin: 0 4px 3px; }
+.mr .mr-activation-more button { min-height: 20px; font-size: 10px; }
 .mr .mr-matrix-top .mr-tools { margin-top: 6px; }
 .mr .mr-matrix-top .mr-search { flex: 1 1 135px; max-width: 290px; }
 .mr .mr-filter { display: inline-flex; align-items: center; gap: 4px; color: var(--mr-muted); white-space: nowrap; font-size: 11px; }
@@ -171,12 +187,10 @@ export const WORKBENCH_CSS = `
 .mr .mr-price small { font-family: inherit; font-size: 10px; }
 .mr .mr-frame { padding: 2px 5px; min-height: 23px; font-size: 11px; border-color: transparent; background: transparent; color: var(--mr-muted); }
 .mr .mr-frame:not([data-state="—"]) { background: color-mix(in srgb, currentColor 8%, transparent); }
-.mr .mr-frame[data-state="就绪"] { color: var(--mr-teal); }
-.mr .mr-frame[data-state="候选"] { color: var(--mr-violet); font-weight: 650; }
-.mr .mr-frame[data-state="观察"] { color: var(--mr-blue); }
-.mr .mr-frame[data-state="反压"] { color: var(--mr-amber); }
-.mr .mr-frame[data-state="待补"] { color: var(--mr-amber); }
-.mr .mr-frame[data-state="阻塞"] { color: var(--mr-red); }
+.mr .mr-frame[data-state="INACTIVE"] { color: var(--mr-teal); }
+.mr .mr-frame[data-state="ACTIVATED"] { color: var(--mr-violet); font-weight: 650; }
+.mr .mr-frame[data-state="PENDING"] { color: var(--mr-amber); }
+.mr .mr-frame[data-state="MISSING"] { color: var(--mr-red); }
 .mr .mr-matrix[data-period-lens="15m"] [data-column="15m"],
 .mr .mr-matrix[data-period-lens="30m"] [data-column="30m"],
 .mr .mr-matrix[data-period-lens="60m"] [data-column="60m"],
@@ -190,6 +204,11 @@ export const WORKBENCH_CSS = `
 .mr .mr-check { display: inline-flex; align-items: center; gap: 4px; }
 .mr .mr-chart-panel .mr-meta { margin-top: 3px; }
 .mr .mr-readout { color: var(--mr-muted); font: 11px/1.4 var(--mr-mono); min-height: 1.4em; }
+.mr .mr-chart-readout, .mr .mr-ma-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; }
+.mr .mr-ma-legend button { display: inline-flex; align-items: center; gap: 3px; min-height: 21px; padding: 1px 4px;
+  color: var(--mr-ink); font: 11px/1.3 var(--mr-mono); }
+.mr .mr-ma-legend button::before { content: ''; width: 7px; height: 2px; background: var(--ma-color); }
+.mr .mr-ma-legend button[aria-pressed=false] { opacity: .5; }
 .mr .mr-chart-body { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,220px); gap: 8px; }
 .mr .mr-chart-body:has(>[data-role=levels]:empty,>.mr-canvas[hidden]) { grid-template-columns: minmax(0,1fr); }
 .mr [data-role=levels]:empty { display: none; }

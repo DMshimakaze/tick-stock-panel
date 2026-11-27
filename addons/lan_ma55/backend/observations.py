@@ -1,13 +1,14 @@
 """Independent versioned MA55 observations backed by the existing owner."""
 
+import json
 from bisect import bisect_left, bisect_right
 from datetime import timedelta
-import json
 from math import isfinite
 
+from .activation_results import activation, confirmations, display_targets, in_window
 from .exchange_sessions import INTRADAY
 from .ma55_levels import project_levels
-from .market_grid import history_capacity, wall, with_averages
+from .market_grid import MAS, history_capacity, wall, with_averages
 from .market_store import encoded
 from .multiframe_core.multiframe import TIMEFRAMES, VERSION, analyze_timeframe
 from .multiframe_input import DAILY_HISTORY, frame_bars, missing_window, replay_input, source_window
@@ -106,22 +107,35 @@ class Observations:
                     else:
                         inputs, reason = replay_input(bars, schedule, start)
                     result, candidate = None, None
+                    prior_window = confirmations(prior)
+                    confirmed = None
                     reference = self.price_reference(bars) if timeframe == "15m" else None
                     if not reason:
                         result = analyze_timeframe(symbol, timeframe, inputs, asof=end, raw_tick=tick)
                         start = inputs[0]["timestamp"]
-                        candidate = self.save_events(result.pop("events"), prior, end, now, live_after, live, basis, revision)
+                        candidate, confirmed = self.save_events(
+                            result.pop("events"), prior, prior_window, timeframe, end, now, live_after, live, basis, revision,
+                        )
+                    elif prior_window:
+                        confirmed = dict(prior_window, verified=bool(
+                            minute and in_window(prior_window["through"], end, timeframe)
+                            and prior_window["through"] < end and prior_window.get("verified", True)
+                            and basis == prior.get("basis") and prior.get("source_revision") == revision
+                            and reason in ("MISSING_COMPLETED_BAR", "ZERO_VOLUME_BAR", "GAP_IN_REPLAY_WINDOW")
+                            and (not missing or missing[0] > prior_window["through"])
+                        ))
                     payload = dict(status=reason or "READY", basis=basis, expected_end=end, result=result,
                                    latest_candidate=candidate, reference=reference, replay_start=start,
-                                   missing_raw=missing,
+                                   missing_raw=missing, confirmations=confirmed,
                                    source_revision=revision, asset_type=info["source_type"], raw_tick=tick)
                     self.conn.execute("INSERT OR REPLACE INTO ma55_observation_v1 VALUES(?,?,?,?,?,?)",
                                       (VERSION, symbol, timeframe, start, key, encoded(payload)))
                     changed = True
         return changed
 
-    def save_events(self, events, prior, end, now, live_after, live, basis, revision):
+    def save_events(self, events, prior, prior_window, timeframe, end, now, live_after, live, basis, revision):
         previous_at = ((prior.get("result") or {}).get("latest") or {}).get("timestamp")
+        current = {}
         for event in events:
             confirmed = str(wall(event["timestamp"]))
             live_event = bool(live and previous_at and str(wall(previous_at)) < confirmed
@@ -132,13 +146,25 @@ class Observations:
             self.conn.execute("INSERT OR IGNORE INTO ma55_observation_event_v1 VALUES(?,?,?,?,?,?,?,?)",
                               (event["event_id"], VERSION, event["symbol"], event["timeframe"],
                                confirmed, now, mode, encoded(dict(event, basis=basis, source_revision=revision))))
-        if not events:
-            return None
-        latest = events[-1]
-        saved = self.conn.execute("SELECT mode,first_seen_at FROM ma55_observation_event_v1 WHERE event_id=?",
-                                  (latest["event_id"],)).fetchone()
-        return dict(at=str(wall(latest["timestamp"])), id=latest["event_id"],
-                    mode=saved["mode"], first_seen_at=saved["first_seen_at"])
+            if in_window(confirmed, end, timeframe) or event is events[-1]:
+                current[event["event_id"]] = (confirmed, event["close"])
+        saved = {}
+        for row in self.conn.execute(
+            "SELECT event_id,mode,first_seen_at FROM ma55_observation_event_v1 "
+            "WHERE event_id IN (SELECT value FROM json_each(?))", (encoded(list(current)),),
+        ):
+            at, price = current[row["event_id"]]
+            saved[row["event_id"]] = dict(at=at, id=row["event_id"], mode=row["mode"],
+                                           first_seen_at=row["first_seen_at"], price=price)
+        active = [saved[key] for key, (at, _) in current.items() if in_window(at, end, timeframe)]
+        previous = set()
+        if prior_window:
+            previous.update(prior_window["invalidated"])
+            if prior_window["through"] <= end:
+                previous.update(event["id"] for event in prior_window["events"])
+        invalidated = sorted(previous - {event["event_id"] for event in events}) if previous else []
+        latest = saved[events[-1]["event_id"]] if events else None
+        return latest, dict(through=end, events=active, invalidated=invalidated)
 
     @staticmethod
     def price_reference(bars):
@@ -152,7 +178,7 @@ class Observations:
         ) else None
         return dict(price=last["close"], at=at, change_pct=change, price_basis=last["price_basis"])
 
-    def rows(self, snapshot, master, schedules):
+    def rows(self, snapshot, master, schedules, market_day=None):
         members = snapshot["members"]
         symbols = json.dumps(list(members))
         saved = {symbol: {} for symbol in members}
@@ -162,6 +188,7 @@ class Observations:
         ):
             saved[item["symbol"]][item["timeframe"]] = json.loads(item["payload"])
         target = schedules["15m"][-1] if schedules["15m"] else None
+        targets = display_targets({tf: times[-1] for tf, times in schedules.items() if times}, market_day)
         rows = []
         for symbol, keys in members.items():
             info = master.get(symbol) or {}
@@ -174,7 +201,22 @@ class Observations:
                     status = "METADATA_PENDING"
                 elif data.get("expected_end") != end:
                     status = "WAITING_FOR_COMPLETED_TARGET"
-                frames[tf] = dict(data, expected_end=end, status=status or "WAITING_INPUT")
+                reviewed = confirmations(data)
+                frame = dict(data, expected_end=end, status=status or "WAITING_INPUT", confirmations=reviewed)
+                # A correction queued for replay cannot present the earlier inputs as current.
+                basis_changed = data.get("basis") and "factor_revision" in info and not data["basis"].startswith(
+                    f"TickFlow:QFQ:{symbol}:{info['factor_revision']}:",
+                )
+                corrected = tf in INTRADAY and data and "basis_revision" in info and (
+                    data.get("source_revision") != info["basis_revision"]
+                )
+                if not info.get("eligible") or basis_changed or corrected:
+                    frame["confirmations"] = dict(reviewed, verified=False) if reviewed else None
+                    if info.get("eligible") and status in ("READY", "WAITING_FOR_COMPLETED_TARGET"):
+                        frame["status"] = "WAITING_FOR_REVIEW"
+                frame["activation"] = activation(frame, targets[tf], tf)
+                frame.pop("confirmations")
+                frames[tf] = frame
             minute = frames["15m"]
             ref = minute.get("reference")
             if ref and (not target or ref["at"] > target):
@@ -187,7 +229,7 @@ class Observations:
                              sectors=keys, frames=frames, reference=ref, levels=levels))
         return rows
 
-    def chart(self, symbol, timeframe, sessions, schedules, weeks, *, anchor_event=None):
+    def chart(self, symbol, timeframe, sessions, schedules, weeks, *, anchor_event=None, event_id=None):
         schedule = schedules[timeframe]
         target = schedules["15m"][-1] if schedules["15m"] else None
         info = self.market.instrument(symbol)
@@ -199,16 +241,24 @@ class Observations:
             pos = bisect_left(schedule, anchor_event)
             end = schedule[min(len(schedule) - 1, pos + CHART_LIMIT // 3)]
         end_index = bisect_right(schedule, end)
-        grid = schedule[max(0, end_index - CHART_LIMIT - 55):end_index]
+        grid = schedule[max(0, end_index - CHART_LIMIT - max(MAS) + 1):end_index]
+        visible = grid[-CHART_LIMIT:]
         start = grid[0]
         if timeframe in INTRADAY:
             raw = self.market.raw_rows(symbol, end, start=str(wall(start) - timedelta(hours=2)), limit=-1)
         else:
             raw = self.daily.raw_rows(symbol, end, start=str(wall(start) - timedelta(days=7)))
-        bars = frame_bars(raw, timeframe, sessions, weeks, end, factors, target)
+        aligned = set(grid)
+        bars = [bar for bar in frame_bars(raw, timeframe, sessions, weeks, end, factors, target)
+                if bar["timestamp"] in aligned]
         for bar in bars:
             bar["valid"] = bar["valid"] and bar["volume"] > 0
-        bars = with_averages(bars, grid, (55,))[-CHART_LIMIT:]
+        bars = [bar for bar in with_averages(bars, grid, MAS) if bar["timestamp"] >= visible[0]]
+        saved = self.saved(symbol).get(timeframe)
+        frame = json.loads(saved["payload"]) if saved else {}
+        confirmed = confirmations(frame) or {}
+        invalidated = set(confirmed.get("invalidated", ()))
+        reviewing = {item["id"] for item in confirmed["events"]} if confirmed.get("verified") is False else set()
         events = []
         if bars:
             events = [dict(json.loads(row["payload"]), mode=row["mode"], at=row["confirmed_at"])
@@ -216,9 +266,9 @@ class Observations:
                           "SELECT * FROM ma55_observation_event_v1 WHERE rule_version=? AND symbol=? "
                           "AND timeframe=? AND confirmed_at BETWEEN ? AND ? ORDER BY confirmed_at",
                           (VERSION, symbol, timeframe, bars[0]["timestamp"], end),
-                      )]
-        saved = self.saved(symbol).get(timeframe)
-        status = json.loads(saved["payload"])["status"] if saved else "WAITING_INPUT"
+                      ) if row["event_id"] not in invalidated and row["event_id"] not in reviewing]
+        located = any(event["event_id"] == event_id and event["at"] == anchor_event for event in events)
         return dict(symbol=symbol, timeframe=timeframe, name=info["name"], tick=info["raw_tick"],
-                    bars=bars, events=events, status=status, basis=basis, expected_end=schedule[-1],
-                    asof=bars[-1]["timestamp"] if bars else None, grid=grid)
+                    bars=bars, events=events, status=frame.get("status", "WAITING_INPUT"), basis=basis,
+                    expected_end=schedule[-1], asof=bars[-1]["timestamp"] if bars else None, grid=visible,
+                    event_verified=located if event_id else None, event_invalidated=event_id in invalidated)

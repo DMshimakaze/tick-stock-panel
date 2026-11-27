@@ -122,7 +122,8 @@ class WorkbenchBridge:
         if source == "focus":
             if symbol not in self.focus.snapshot["members"]:
                 return dict(symbol=symbol, timeframe=timeframe, bars=[], events=[], status="OUTSIDE_FOCUS")
-            return self.observations.chart(symbol, timeframe, sessions, schedules, weeks, anchor_event=anchor)
+            return self.observations.chart(symbol, timeframe, sessions, schedules, weeks,
+                                           anchor_event=anchor, event_id=args.get("eventId"))
         if source not in ("archive", "native") or timeframe not in CAPACITY:
             return dict(symbol=symbol, timeframe=timeframe, bars=[], events=[], status="LEGACY_PERIOD_UNAVAILABLE")
         store = self.owner.archive_market if source == "archive" else self.owner.market
@@ -133,7 +134,7 @@ class WorkbenchBridge:
             target = min(anchor, target)
         if not target:
             return dict(symbol=symbol, timeframe=timeframe, bars=[], events=[], status="WAITING_INPUT")
-        series = store.read(symbol, timeframe, target, limit=250, connection=self.owner.conn)
+        series = store.read(symbol, timeframe, target, limit=250, connection=self.owner.conn, chart=True)
         bars = series["bars"]
         kwargs = dict(symbol=symbol, start=bars[0]["timestamp"], end=bars[-1]["timestamp"]) if bars else None
         events = []

@@ -1,26 +1,16 @@
 import { escapeHtml as esc, icon, kindBadge, kindOf, price, quantity, signed } from './presentation.mjs';
 import { normalizedTime, PERIOD_LABEL, statusText, TIMEFRAMES } from './workbench_data.mjs';
+import { frameActivation, matrixSignal, STATE_LABEL } from './activation_results.mjs';
 
 export const short = value => normalizedTime(value).slice(0, 16) || '—';
 
-export function newest(row) {
-  return TIMEFRAMES.map(tf => [tf, row.frames[tf]?.latest_candidate?.at || ''])
+export function newest(row, period, access) {
+  const frames = period === 'all' ? TIMEFRAMES : [period];
+  return frames.map(tf => [tf, matrixSignal(row, tf, access)?.at || ''])
     .sort((a, b) => b[1].localeCompare(a[1]))[0];
 }
 
-function frameLabel(frame) {
-  if (frame?.status !== 'READY') {
-    return ({
-      INSUFFICIENT_HISTORY: '待补', MISSING_COMPLETED_BAR: '待补',
-      WAITING_FOR_COMPLETED_TARGET: '待算', WAITING_INPUT: '待算',
-      FACTOR_PENDING: '复权待核实', GAP_IN_REPLAY_WINDOW: '缺柱', ZERO_VOLUME_BAR: '零成交',
-    }[frame?.status] || (frame?.status ? '阻塞' : '—'));
-  }
-  const decision = frame.result?.latest;
-  if (decision?.event_id) return '候选';
-  if (decision?.pressure_test) return '反压';
-  return decision?.impulse_recent || decision?.support_test_time ? '观察' : '就绪';
-}
+const frameState = (row, tf, access) => frameActivation(row, tf, access)?.state || 'PENDING';
 
 export function savedScopes(focus) {
   if (!focus) return [{ key: '', name: '全部' }];
@@ -46,29 +36,33 @@ export function scopeButtons(scopes, selected, query) {
   </div>`).join('');
 }
 
-export function filterRows(rows, scope, { query, state, period, order }) {
+export function scopedRows(rows, scope, query) {
   const sectors = new Set(scope.boards || [scope.key]);
-  const periods = period === 'all' ? TIMEFRAMES : [period];
   return rows.filter(row => (!scope.key || row.sectors.some(key => sectors.has(key))) &&
-    (!query || [row.symbol, row.name].some(value => value?.toLowerCase().includes(query))) &&
-    (state === 'all' || periods.some(tf => state === 'blocked'
-      ? row.frames[tf]?.status !== 'READY' : frameLabel(row.frames[tf]) === state)))
-    .sort((a, b) => (order === 'candidate' ? newest(b)[1].localeCompare(newest(a)[1])
+    (!query || [row.symbol, row.name].some(value => value?.toLowerCase().includes(query))));
+}
+
+export function filterRows(rows, { state, period, order }, access) {
+  const periods = period === 'all' ? TIMEFRAMES : [period];
+  const filtered = rows.filter(row => state === 'all' || periods.some(tf => frameState(row, tf, access) === state));
+  const times = order === 'candidate' ? new Map(filtered.map(row => [row.symbol, newest(row, period, access)[1]])) : null;
+  return filtered.sort((a, b) => (times ? times.get(b.symbol).localeCompare(times.get(a.symbol))
       : order === 'change' ? (b.reference?.change_pct ?? -Infinity) - (a.reference?.change_pct ?? -Infinity)
         : 0) || a.symbol.localeCompare(b.symbol));
 }
 
-export function stockRows(rows, selected, empty) {
+export function stockRows(rows, selected, empty, access) {
   return rows.map(row => {
     const symbol = esc(row.symbol), name = esc(row.name);
     const top = row.levels?.pressures?.[0], ref = row.reference, change = ref?.change_pct;
     const cells = TIMEFRAMES.map(tf => {
-      const frame = row.frames[tf], label = frameLabel(frame);
-      const title = frame?.status === 'READY'
-        ? [short(frame.expected_end), frame.latest_candidate?.at ? `最近确认 ${short(frame.latest_candidate.at)}` : ''].filter(Boolean).join(' / ')
-        : statusText(frame?.status);
+      const frame = row.frames[tf], state = frameState(row, tf, access);
+      const signal = matrixSignal(row, tf, access), label = STATE_LABEL[state];
+      const title = [access.targets[tf] ? `目标 ${short(access.targets[tf])}` : '等待该周期完成 K 线',
+        access.usable.includes(tf) && frame?.status !== 'READY' ? statusText(frame?.status) : null,
+        signal ? `确认 ${short(signal.at)}` : null].filter(Boolean).join(' · ');
       return `<td data-column="${tf}"><button class="mr-frame" data-stock="${symbol}" data-tf="${tf}"
-        data-state="${['待算', '待补'].includes(label) ? '待补' : frame?.status === 'READY' ? label : '阻塞'}"
+        data-state="${state}"
         title="${esc(title)}" aria-label="${name} ${PERIOD_LABEL[tf]} ${label}">${label}</button></td>`;
     }).join('');
     return `<tr class="${selected === row.symbol ? 'selected' : ''}">

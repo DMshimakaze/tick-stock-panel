@@ -23,6 +23,7 @@ const MESSAGES = {
   ZERO_VOLUME_BAR: '回放窗口含零成交柱',
   WAITING_INPUT: '等待有效数据',
   WAITING_FOR_COMPLETED_TARGET: '等待最新完成周期',
+  WAITING_FOR_REVIEW: '输入已变更，等待复核',
   WAITING_NEXT_15M: '等待下一根完成 K 线',
   OUTSIDE_FOCUS: '该证券已移出关注范围',
   HOST_BUSY: '宿主正在同步数据',
