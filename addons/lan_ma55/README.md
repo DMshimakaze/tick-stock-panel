@@ -24,6 +24,8 @@
 
 2026-11-26，关注管理、分析供给和跨窗口提交的正式验收使用 `lan.ma55 0.13.5`。 [关注池与吞吐验收](FOCUS_THROUGHPUT_ACCEPTANCE_20261126.md)
 
+2026-11-27，正式升级到 `lan.ma55 0.13.6`，核对了本轮与今日激活结果、图表定位和六均线。 [激活结果与六均线验收](ACTIVATION_RESULTS_ACCEPTANCE_20261127.md)
+
 在现有 `nga` 环境中运行定向 pytest，使用 pnpm 构建页面，再运行 `build_backend.py` 生成官方扩展包。产物由「设置 → 导入与备份」预检和安装，生效需要正常重启。新版使用宿主主题和个股详情。历史链接使用 `/lan-ma55`，保留 `symbol`、`period`、`event` 和 `event_id`。旧原生 15m 候选使用 `source=native`，冻结 BUY 使用 `source=archive`。
 
 需要回退时，先保存 SQLite 一致性备份和安装状态，再通过「设置 → 导入与备份 → 已安装扩展」回退并正常重启。读回生效版本、关注配置和冻结历史后恢复使用。 [同花顺归档验收](V041_TAXONOMY_HANDOFF.md) · [六周期整合验收](SECTOR_MULTIFRAME_INTEGRATION.md)
