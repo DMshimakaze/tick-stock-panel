@@ -351,8 +351,10 @@ test('confirmed rows use exact chart anchors and moving average toggles consume 
     assert.equal(find('[data-result-period="30m"] b').textContent, '1');
     assert.match(find('[data-role="result-controls"]').textContent, /已算 1\/1/);
     find('[data-result-window="today"]').click();
-    assert.match(find('[data-role="result-controls"]').textContent, /今日 1 只/);
+    assert.equal(find('[data-result-window="today"]').getAttribute('aria-pressed'), 'true');
+    assert.equal(find('[data-result-period="30m"] b').textContent, '1');
     find('[data-act="expand-results"]').click();
+    find(`[data-result-detail="${symbol}"]`).click();
     assert.match(find('[data-signal="past"]').textContent, /补算/);
     find('[data-signal="past"]').click();
     await tick();
@@ -381,4 +383,83 @@ test('all six SMAs retain the same bar timestamps and break at an unavailable sl
     assert.equal(points[1].value, undefined);
     assert.equal(points[2].time, model.bars.at(-1).time);
   }
+});
+
+test('grouped lists keep separate navigation, shared period and actionable missing-state details', async () => {
+  const dom = new JSDOM('<div id="mount"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
+  const { document } = dom.window;
+  const day = time.slice(0, 10), [first, missing, last, unknown] = ['300001.SZ', '300002.SZ', '300003.SZ', '300004.SZ'];
+  const industry = ['BK1201', 'BK1036', 'BK1325'].map((code, i) => ({ kind: 'industry', level: i + 1,
+    key: `dc:industry:${code}.DC`, name: ['电子', '半导体', '半导体材料'][i] }));
+  industry.forEach((node, i) => { node.parent = industry[i - 1]?.key; });
+  const leaf = industry.at(-1), concept = { ...board, symbols: [missing, unknown] };
+  const members = { [first]: [leaf.key], [missing]: [leaf.key, board.key], [last]: [leaf.key], [unknown]: [board.key] };
+  const targets = Object.fromEntries(TIMEFRAMES.map(tf => [tf, time]));
+  const entries = Object.keys(members).map((symbol, i) => ({ ...row(symbol, `证券${i + 1}`), sectors: members[symbol],
+    frames: { ...frames, '15m': { expected_end: time, status: i % 2 === 0 ? 'READY' : 'GAP_IN_REPLAY_WINDOW',
+      activation: { state: i % 2 === 0 ? 'ACTIVATED' : 'MISSING', events: i % 2 === 0 ? [{ id: symbol, at: time }] : [] } },
+      '30m': { expected_end: time, status: 'WAITING_INPUT', activation: { state: 'PENDING', events: [] } } } }));
+  const view = { result_id: 'r1', summary: { ...summary, expected: 4, market_day: day }, activation_targets: targets,
+    focus: { ...empty, revision: 1, members, catalog: [...industry, concept], sectors: [{ ...leaf, symbols: [first, missing, last] }, concept],
+      groups: [{ id: 'overlap', name: '交叉组', boards: [leaf.key, board.key] }] },
+    industry_paths: { [first]: leaf.key, [missing]: leaf.key, [last]: leaf.key }, rows: entries };
+  const runtime = { result_id: 'r1', focus_revision: 1, taxonomy_run: 'verified', market_day: day, scope_count: 4,
+    activation_targets: targets, worker_alive: true, status_at_ms: Date.now(),
+    coverage: { expected: 4, blocking_by_timeframe: { '15m': { GAP_IN_REPLAY_WINDOW: 2 } } } };
+  const commands = new Map(), replies = new Map(), requests = [], previews = [];
+  const api = {
+    async extDataRows(id) {
+      if (id === COMMAND || id === RECEIPT) return { rows: [...(id === COMMAND ? commands : replies).values()] };
+      return { rows: [{ payload_json: JSON.stringify(id === RUNTIME ? runtime : view) }] };
+    },
+    async extDataIngest(id, { rows: [command] }) {
+      const request = JSON.parse(command.payload_json);
+      requests.push(request);
+      commands.set(command.scope, command);
+      replies.set(command.scope, { ...command, payload_json: JSON.stringify({ ...request, bars: [bar], asof: time,
+        diagnostic: request.symbol === missing ? { target: time, reason: 'GAP_IN_REPLAY_WINDOW',
+          missing_raw: [time, time], queue: 'COOLING', retry_at: `${day} 16:00:00` } : null }) });
+    },
+  };
+  const dispose = mountWorkbench(document.querySelector('#mount'), { api, ui: { openStockPreview: p => previews.push(p) } }, {
+    ioOptions: { uuid: randomUUID, wait: () => tick() }, makeChart: () => ({ update() {}, setLevels() {}, dispose() {} }),
+  });
+  const find = selector => document.querySelector(selector);
+  const symbols = () => [...document.querySelectorAll('.mr-stock-name[data-stock]')].map(x => x.dataset.stock);
+  try {
+    await tick();
+    find('[data-board="group:overlap"]').click();
+    assert.equal(new Set(symbols()).size, 4);
+    assert.equal(symbols().length, 4);
+    assert.match(find('[data-matrix-group="unclassified"]').textContent, /未分类/);
+    find(`[data-matrix-group="${leaf.key}"]`).click();
+    assert.deepEqual(symbols(), [unknown]);
+    find(`[data-matrix-group="${leaf.key}"]`).click();
+    find(`[data-signal="${first}"]`).click();
+    await tick();
+    find('[data-act="preview"]').click();
+    assert.deepEqual(previews[0].navList.map(x => x.symbol), [first, last]);
+    find('[data-act="next"]').click();
+    await tick();
+    assert.equal(requests.at(-1).symbol, last);
+    find(`[data-board="${board.key}"]`).click();
+    assert.match(find('[data-role="nav-context"]').textContent, /不在当前范围/);
+    assert.equal(find('[data-act="previous"]').disabled, true);
+    find('[data-board=""]').click();
+    const order = find('[data-role="order"]');
+    order.value = 'symbol'; order.dispatchEvent(new dom.window.Event('change'));
+    find(`.mr-stock-name[data-stock="${first}"]`).click();
+    await tick();
+    find('[data-act="next"]').click();
+    await tick();
+    assert.equal(requests.at(-1).symbol, missing);
+    assert.match(find('[data-role="stock-diagnostic"]').textContent, /冷却至 2026-11-20 16:00:00/);
+    find('[data-block-period="15m"]').click();
+    assert.deepEqual(symbols(), [missing, unknown]);
+    find('[data-result-period="30m"]').click();
+    const lens = find('[data-role="filter-period"]');
+    assert.equal(lens.value, '30m');
+    lens.value = '15m'; lens.dispatchEvent(new dom.window.Event('change'));
+    assert.equal(find('[data-result-period="15m"]').getAttribute('aria-pressed'), 'true');
+  } finally { dispose(); dom.window.close(); }
 });

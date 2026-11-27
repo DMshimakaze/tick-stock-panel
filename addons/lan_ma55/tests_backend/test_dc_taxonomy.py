@@ -51,6 +51,17 @@ def publish(owner, run=RUN, day=DAY):
     return store
 
 
+def test_workbench_industry_paths_preserve_missing_and_conflicting_evidence(tmp_path):
+    with NativeOwner(tmp_path / "workbench.sqlite3") as owner:
+        publish(owner)
+        focus = DCFocusOwner(owner, None, None, Event())
+        assert focus.industry_paths({A, C, "300000.SZ"}) == {A: LEAF, C: LEAF2}
+        with owner.conn:
+            owner.conn.executemany("INSERT INTO dc_membership_v1 VALUES (?,?,?,?,?,?)",
+                                   [(RUN, key, A, "甲", None, 1) for key in (ROOT2, MID2, LEAF2)])
+        assert focus.industry_paths({A}) == {A: [LEAF, LEAF2]}
+
+
 @pytest.mark.parametrize("case,message", [
     ("overlap", "DC_OVERLAPPING_INDUSTRY"),
     ("orphan", "DC_INDUSTRY_PARENT_UNRESOLVED"),

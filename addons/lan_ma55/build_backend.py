@@ -8,7 +8,7 @@ from pathlib import Path
 def build(destination=None, page=None):
     root = Path(__file__).resolve().parent
     target = (
-        Path(destination) if destination else root / "dist" / "lan-ma55-0.13.6.zip"
+        Path(destination) if destination else root / "dist" / "lan-ma55-0.13.7.zip"
     )
     target.parent.mkdir(parents=True, exist_ok=True)
     names = ['__init__.py','engine.py','pipeline.py','store.py','extension.py',
@@ -18,7 +18,7 @@ def build(destination=None, page=None):
              'native15_signal_adapter.py','native15_scheduler.py','native15_owner.py',
              'focus_pool.py','dc_taxonomy.py','dc_store.py','dc_transport.py','dc_maintenance.py',
              'dc_focus_owner.py','ma55_levels.py','exchange_sessions.py','multiframe_input.py',
-             'daily_store.py','activation_results.py','observations.py','workbench_bridge.py',
+             'daily_store.py','activation_results.py','observations.py','workbench_bridge.py','workbench_diagnostics.py',
              'multiframe_core/__init__.py','multiframe_core/features.py',
              'multiframe_core/structure.py','multiframe_core/multiframe.py']
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:

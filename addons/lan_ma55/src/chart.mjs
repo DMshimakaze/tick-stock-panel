@@ -75,6 +75,12 @@ export function createWorkbenchChart(el, onReadout, { makeChart = createChart } 
     const size = Math.min(100, model.bars.length);
     const right = anchor < 0 ? model.bars.length - 1 : Math.min(model.bars.length - 1, Math.max(size - 1, anchor + Math.floor(size / 2)));
     chart.timeScale().setVisibleLogicalRange({ from: right - size + 1, to: right + 1 });
+    if (anchor >= 0) {
+      const bar = model.bars[anchor];
+      chart.setCrosshairPosition(bar.close, bar.time, candles);
+      hoverTime = bar.time;
+      readout();
+    }
   }
   return {
     update(next, reset) {

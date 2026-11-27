@@ -188,6 +188,32 @@ def test_fixed_origin_restart_gap_and_independent_periods(tmp_path):
         assert json.loads(saved["payload"])["status"] == "GAP_IN_REPLAY_WINDOW"
 
 
+def test_chart_diagnoses_current_gap_and_does_not_borrow_it_for_a_new_target(tmp_path):
+    sessions = ["2026-11-25", "2026-11-26", "2026-11-27", "2026-11-30"]
+    when = "2026-11-27 15:03:00"
+    schedules, weeks = frame_schedules(sessions, when)
+    target = schedules["15m"][-1]
+    with NativeOwner(tmp_path / "diagnostic.sqlite3") as owner:
+        owner.refresh_master([dict(symbol=SYMBOL, name="测试", eligible=True, source_type="stock", raw_tick=.01)],
+                             {"expected": 1}, sessions)
+        market = owner.market
+        preceding = schedules["15m"][-2]
+        with owner.conn:
+            market._write(SYMBOL, [bar(preceding)])
+            market.factor_response(SYMBOL, [], when, sessions, update_indicators=False)
+        market.failed([SYMBOL], target, when, "INVALID_NATIVE15_OHLCV", stage="A", delay=3000)
+        obs = Observations(market, DailyStore(owner.conn))
+        obs.refresh([SYMBOL], sessions, schedules, weeks, when, when)
+        detail = obs.chart(SYMBOL, "15m", sessions, schedules, weeks)["diagnostic"]
+        assert (detail["reason"], detail["target"], detail["last_bar"]) == ("MISSING_COMPLETED_BAR", target, preceding)
+        assert detail["missing_raw"][-1] == target
+        assert (detail["queue"], detail["error"], detail["requested_at"]) == ("COOLING", "INVALID_NATIVE15_OHLCV", when)
+        new, new_weeks = frame_schedules(sessions, "2026-11-30 10:33:00")
+        detail = obs.chart(SYMBOL, "15m", sessions, new, new_weeks)["diagnostic"]
+        assert detail["reason"] == "WAITING_INPUT" and detail["missing_raw"] is None
+        assert detail["target"] == "2026-11-30 10:30:00"
+
+
 def test_required_history_is_planned_from_each_completed_frame(tmp_path):
     from addons.lan_ma55.backend.multiframe_input import MIN_HISTORY, replay_input, source_window
     from addons.lan_ma55.backend.native15_scheduler import task

@@ -85,24 +85,44 @@ const BLOCK_GROUPS = [
   ['输入核实', ['TICK_UNAVAILABLE', 'METADATA_PENDING', 'WAITING_INPUT']],
 ];
 
-function blocking(coverage) {
+function blocking(coverage, usable) {
   const summary = new Map();
   for (const period of TIMEFRAMES) {
     for (const [reason, count] of Object.entries(coverage?.blocking_by_timeframe?.[period] || {})) {
       if (!summary.has(reason)) summary.set(reason, []);
-      summary.get(reason).push(`${PERIOD_LABEL[period]} ${quantity(count)}`);
+      summary.get(reason).push({ period, count });
     }
   }
   return BLOCK_GROUPS.map(([group, reasons]) => {
     const lines = reasons.filter(reason => summary.has(reason))
-      .map(reason => `<li><span>${esc(statusText(reason))}</span><b>${summary.get(reason).join(' / ')}</b></li>`);
+      .map(reason => `<li><span>${esc(statusText(reason))}</span><div>${summary.get(reason).map(({ period, count }) =>
+        `<button type="button" data-block-period="${period}" data-block-reason="${esc(reason)}"
+          ${usable.includes(period) ? '' : 'disabled'} title="查看全池匹配股票">${PERIOD_LABEL[period]} ${quantity(count)}</button>`).join('')}</div></li>`);
     return lines.length ? `<div><h3>${group}</h3><ul>${lines.join('')}</ul></div>` : '';
   }).join('');
+}
+
+export function chartDiagnosis(detail) {
+  if (!detail) return '';
+  const timestamp = value => normalizedTime(value) || '未知';
+  const retry = detail.queue === 'COOLING' ? `冷却至 ${timestamp(detail.retry_at)}` : detail.queue === 'ELIGIBLE'
+    ? '待后台按现有额度调度' : '未知';
+  const request = detail.requested_at ? [STAGES[detail.stage]?.[0], timestamp(detail.requested_at),
+    detail.error ? statusText(detail.error) : ''].filter(Boolean).join(' · ') : '未知';
+  const bounds = detail.missing_raw;
+  return `<dl class="mr-facts" aria-label="逐股数据诊断">${[
+    pair('当前目标', timestamp(detail.target)), pair('数据状态', statusText(detail.reason)),
+    bounds ? pair('已核实缺柱区间', bounds[0] === bounds[1] ? timestamp(bounds[0]) : bounds.map(timestamp).join(' 至 ')) : '',
+    detail.replay_start ? pair('固定回放起点', timestamp(detail.replay_start)) : '',
+    pair(detail.source === 'daily' ? '最近有效日源' : '最近有效原生 15m', timestamp(detail.last_bar)),
+    pair('最近请求', request), pair('最近请求成功', timestamp(detail.last_success)), pair('重试状态', retry),
+  ].join('')}</dl>`;
 }
 
 export function paintRuntime(root, status, view, errors) {
   const s = status || {};
   const model = statusModel(status, view, errors);
+  const access = activationAccess(view, status, errors);
   const role = name => root.querySelector(`[data-role="${name}"]`);
   const { coverage, total } = model;
   const ready = coverage?.ready_15m;
@@ -114,7 +134,7 @@ export function paintRuntime(root, status, view, errors) {
   role('metrics').innerHTML = [
     metric('监控股票', total, Number.isInteger(model.savedSectors) ? `已保存 ${quantity(model.savedSectors)} 个板块` : '', 'blue', 'activity'),
     metric('15m 就绪', ready, Number.isInteger(denominator) ? `有效范围 ${quantity(denominator)} 只` : '', tone, 'check'),
-    metric('激活股票', activationAccess(view, status, errors).usable.length ? coverage?.activation_symbols : null,
+    metric('激活股票', access.usable.length ? coverage?.activation_symbols : null,
       '六周期有效窗口去重', 'violet', 'spark'),
     metric('15m 未就绪', coverage?.unready_15m, '待补与阻塞', 'amber', 'clock'),
   ].join('');
@@ -152,11 +172,18 @@ export function paintRuntime(root, status, view, errors) {
     pair('全周期齐套', quantity(coverage?.ready_all)),
     pair('当前批次', Number.isInteger(s.active_symbols) && model.running ? `${quantity(s.active_symbols)} 只` : '—'),
   ].join('');
-  const reasons = blocking(coverage);
+  const reasons = blocking(coverage, access.usable) || (coverage ? '<p class="mr-meta">当前结果没有已知阻塞</p>' : '');
   const waiting = ['QUOTA_WAIT', 'RATE_LIMITED'].includes(s.phase) ? statusText(s.phase) : null;
   const host = s.host_job_status?.state;
   const hostLabel = { IDLE: '空闲', BUSY: '同步中', UNAVAILABLE: '暂不可核实' }[host];
-  role('blocking').innerHTML = reasons || (coverage ? '<p class="mr-meta">当前结果没有已知阻塞</p>' : '');
+  const blocks = role('blocking');
+  if (blocks.dataset.markup !== reasons) {
+    const { blockPeriod, blockReason } = root.ownerDocument.activeElement.dataset;
+    blocks.innerHTML = reasons;
+    blocks.dataset.markup = reasons;
+    if (blockReason) [...blocks.querySelectorAll('button')].find(button =>
+      button.dataset.blockPeriod === blockPeriod && button.dataset.blockReason === blockReason)?.focus({ preventScroll: true });
+  }
   role('system-facts').innerHTML = [
     pair('额度', waiting || (s.waiting_for && !s.waiting_for.startsWith('HOST_') ? statusText(s.waiting_for) : '—')),
     pair('宿主任务', hostLabel || '—'),

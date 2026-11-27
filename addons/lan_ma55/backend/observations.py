@@ -12,6 +12,7 @@ from .market_grid import MAS, history_capacity, wall, with_averages
 from .market_store import encoded
 from .multiframe_core.multiframe import TIMEFRAMES, VERSION, analyze_timeframe
 from .multiframe_input import DAILY_HISTORY, frame_bars, missing_window, replay_input, source_window
+from .workbench_diagnostics import chart_diagnostic
 
 CHART_LIMIT = 250
 INPUT_KEY_VERSION = 2
@@ -256,6 +257,7 @@ class Observations:
         bars = [bar for bar in with_averages(bars, grid, MAS) if bar["timestamp"] >= visible[0]]
         saved = self.saved(symbol).get(timeframe)
         frame = json.loads(saved["payload"]) if saved else {}
+        current = frame if frame.get("expected_end") == schedule[-1] else {}
         confirmed = confirmations(frame) or {}
         invalidated = set(confirmed.get("invalidated", ()))
         reviewing = {item["id"] for item in confirmed["events"]} if confirmed.get("verified") is False else set()
@@ -269,6 +271,7 @@ class Observations:
                       ) if row["event_id"] not in invalidated and row["event_id"] not in reviewing]
         located = any(event["event_id"] == event_id and event["at"] == anchor_event for event in events)
         return dict(symbol=symbol, timeframe=timeframe, name=info["name"], tick=info["raw_tick"],
-                    bars=bars, events=events, status=frame.get("status", "WAITING_INPUT"), basis=basis,
+                    bars=bars, events=events, status=current.get("status", "WAITING_INPUT"), basis=basis,
                     expected_end=schedule[-1], asof=bars[-1]["timestamp"] if bars else None, grid=visible,
-                    event_verified=located if event_id else None, event_invalidated=event_id in invalidated)
+                    event_verified=located if event_id else None, event_invalidated=event_id in invalidated,
+                    diagnostic=chart_diagnostic(self.market, self.daily, symbol, timeframe, schedules, current))

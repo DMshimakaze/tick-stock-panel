@@ -1,5 +1,6 @@
 import { icon } from './presentation.mjs';
 import { PERIOD_LABEL, TIMEFRAMES } from './workbench_data.mjs';
+import { matrixLegend } from './stock_matrix.mjs';
 
 export const LAYOUT = `<header class="mr-header">
   <div class="mr-heading"><h1>MA55 板块观察</h1><p class="mr-meta" data-role="market"></p></div>
@@ -55,13 +56,14 @@ export const LAYOUT = `<header class="mr-header">
     <div class="mr-matrix-top"><header class="mr-panel-head"><h2>六周期观察</h2><span class="mr-meta" data-role="row-count"></span></header>
       <div class="mr-tools">
         <label class="mr-search">${icon('search')}<input data-role="search" aria-label="搜索股票" placeholder="名称或代码"></label>
-        <label class="mr-filter">状态 <select data-role="filter"><option value="all">全部</option><option value="ACTIVATED">激活</option>
+        <label class="mr-filter">矩阵状态 <select data-role="filter"><option value="all">全部</option><option value="ACTIVATED">激活</option>
           <option value="INACTIVE">未激活</option><option value="PENDING">待算</option><option value="MISSING">缺数据</option></select></label>
-        <label class="mr-filter">周期 <select data-role="filter-period"><option value="all">全部</option>${TIMEFRAMES.map(tf =>
+        <label class="mr-filter">联动周期 <select data-role="filter-period">${TIMEFRAMES.map(tf =>
           `<option value="${tf}">${PERIOD_LABEL[tf]}</option>`).join('')}</select></label>
         <label class="mr-filter">排序 <select data-role="order"><option value="candidate">最近激活</option>
           <option value="symbol">股票代码</option><option value="change">涨跌幅</option></select></label>
-      </div></div>
+        <button type="button" data-act="clear-reason" hidden title="清除原因筛选"></button>
+      </div><div class="mr-state-legend" aria-label="状态图例">${matrixLegend}</div></div>
     <div class="mr-table mr-focus-list" data-role="table-wrap" tabindex="0" aria-label="六周期股票矩阵"><table>
       <thead><tr><th scope="col">股票</th><th scope="col">完成价 / 涨跌</th>${TIMEFRAMES.map(tf =>
         `<th scope="col" data-column="${tf}">${PERIOD_LABEL[tf]}</th>`).join('')}<th scope="col">最近上方 MA55</th></tr></thead>
@@ -70,7 +72,8 @@ export const LAYOUT = `<header class="mr-header">
   </section>
 </div>
 <section class="mr-panel mr-chart-panel" data-role="chart-panel" aria-label="所选股票图表" hidden>
-  <div class="mr-panel-head mr-chart-heading"><div><h2 data-role="selection"></h2><p class="mr-meta" data-role="membership"></p></div>
+  <div class="mr-panel-head mr-chart-heading"><div><h2 data-role="selection"></h2><p class="mr-meta" data-role="membership"></p>
+    <p class="mr-meta" data-role="nav-context"></p></div>
     <div class="mr-actions">
       <button data-act="previous" class="mr-icon-button" title="上一只" aria-label="上一只">${icon('arrowLeft')}</button>
       <button data-act="next" class="mr-icon-button" title="下一只" aria-label="下一只">${icon('arrowRight')}</button>
@@ -80,8 +83,10 @@ export const LAYOUT = `<header class="mr-header">
   <div class="mr-tools"><div class="mr-segments" data-role="periods" role="group" aria-label="图表周期"></div>
     <label class="mr-check"><input data-role="show-levels" type="checkbox">上方55线</label>
     <button data-act="locate" hidden>${icon('target')}定位确认</button>
+    <span class="mr-anchor" data-role="anchor"></span>
   </div>
   <p class="mr-meta" data-role="chart-state" role="status"></p>
+  <div class="mr-stock-diagnostic" data-role="stock-diagnostic"></div>
   <div class="mr-chart-readout"><p class="mr-readout" data-role="readout"></p>
     <div class="mr-ma-legend" role="group" aria-label="均线显示" data-role="ma-legend"></div></div>
   <div class="mr-chart-body"><div class="mr-canvas" data-role="chart" hidden></div><div data-role="levels"></div></div>

@@ -88,7 +88,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.13.6", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.7", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -252,6 +252,7 @@ class Worker:
             view = dict(
                 result_id=f"{self.state['started_at']}/{self.view_sequence}",
                 focus=focus_view(self.focus, self.market_day), rows=rows,
+                industry_paths=self.focus.industry_paths(scope),
                 activation_targets=display_targets(self.targets, self.market_day),
                 summary=observation_summary(rows, self.targets, self.market_day, latest_saved=latest_saved,
                                             latest_analyzed=prior_analysis),

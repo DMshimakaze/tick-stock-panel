@@ -17,6 +17,7 @@ class DCFocusOwner:
         self.pool = FocusPool(owner.market.path, dc=True)
         self.snapshot = self.pool.read()
         self.legacy = FocusPool.legacy(owner.market.path)
+        self._industries = None
 
     @property
     def run(self):
@@ -47,6 +48,26 @@ class DCFocusOwner:
 
     def is_available(self, key, _day=None):
         return key in self.taxonomy.boards
+
+    def industry_paths(self, symbols):
+        signature = (self.run, frozenset(symbols))
+        if self._industries and self._industries[0] == signature:
+            return self._industries[1]
+        paths = {}
+        if self.run and symbols:
+            boards = self.taxonomy.boards
+            for symbol, keys in self.taxonomy.store.industry_memberships(self.run, symbols).items():
+                leaves = []
+                for leaf in sorted(keys):
+                    node = boards[leaf]
+                    parent = boards.get(node['parent'], {})
+                    if node['level'] == 3 and node['parent'] in keys and parent.get('parent') in keys:
+                        leaves.append(leaf)
+                if leaves:
+                    # The active generation certifies uniqueness. Expose ambiguity if that evidence disagrees.
+                    paths[symbol] = leaves[0] if len(keys) == 3 and len(leaves) == 1 else leaves
+        self._industries = (signature, paths)
+        return paths
 
     def board_snapshot(self, key):
         board = self.taxonomy.boards[key]

@@ -1,10 +1,11 @@
 """Raw daily history and its request watermarks in the shared MA55 SQLite."""
 
 from collections import defaultdict
+from datetime import datetime
 import json
 from time import time
 
-from .market_grid import FIELDS
+from .market_grid import BEIJING, FIELDS
 from .multiframe_input import DAILY_HISTORY, DAILY_SOURCE, MAX_DAILY_BATCH_POINTS, window_batch
 
 
@@ -18,6 +19,9 @@ class DailyStore:
             CREATE TABLE IF NOT EXISTS ma55_daily_progress_v1(
                 symbol TEXT PRIMARY KEY, target TEXT, revision INTEGER NOT NULL,
                 first_gap TEXT, next_retry REAL NOT NULL, last_error TEXT);
+            CREATE TABLE IF NOT EXISTS ma55_daily_retry_v1(
+                symbol TEXT PRIMARY KEY, target TEXT NOT NULL, revision INTEGER NOT NULL,
+                next_retry REAL NOT NULL, last_attempt TEXT NOT NULL, no_progress INTEGER NOT NULL);
         """)
 
     def raw_rows(self, symbol, target, *, start=""):
@@ -31,7 +35,11 @@ class DailyStore:
         ]
 
     def progress(self, symbol):
-        row = self.conn.execute("SELECT * FROM ma55_daily_progress_v1 WHERE symbol=?", (symbol,)).fetchone()
+        row = self.conn.execute(
+            "SELECT p.*,r.last_attempt,r.no_progress FROM ma55_daily_progress_v1 p "
+            "LEFT JOIN ma55_daily_retry_v1 r USING(symbol,target,revision,next_retry) WHERE p.symbol=?",
+            (symbol,),
+        ).fetchone()
         return dict(row) if row else {}
 
     def frame_revision(self, symbol, target, *, start=""):
@@ -75,6 +83,8 @@ class DailyStore:
             return
         target, earliest = schedule[-1], schedule[-DAILY_HISTORY:][0]
         sessions = set(schedule)
+        now = time()
+        attempted = datetime.fromtimestamp(now, BEIJING).replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
         with self.conn:
             for symbol in symbols:
                 existing = self.progress(symbol)
@@ -104,6 +114,13 @@ class DailyStore:
                 gap = next((at for at in schedule if at >= earliest and (not listing or at[:10] >= listing)
                             and at not in actual), None)
                 error = errors.get(symbol)
-                delay = time() + retry if error or not changed else 0
+                same_gap = existing.get("target") == target and existing.get("first_gap") == gap
+                streak = 0 if changed else ((existing.get("no_progress") or 0) if same_gap else 0) + 1
+                # Repeated empty or identical replies for the same gap should yield to other work.
+                delay = now + retry * (1, 3, 6)[max(0, min(streak - 1, 2))] if error or streak else 0
+                revision = existing.get("revision", 0) + changed
                 self.conn.execute("INSERT OR REPLACE INTO ma55_daily_progress_v1 VALUES (?,?,?,?,?,?)",
-                                  (symbol, target, existing.get("revision", 0) + changed, gap, delay, error))
+                                  (symbol, target, revision, gap, delay, error))
+                # Keep the existing progress table writable by the installed rollback version.
+                self.conn.execute("INSERT OR REPLACE INTO ma55_daily_retry_v1 VALUES (?,?,?,?,?,?)",
+                                  (symbol, target, revision, delay, attempted, streak))

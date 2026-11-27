@@ -195,3 +195,14 @@ class DCStore:
             "SELECT board,name FROM dc_membership_v1 WHERE run=? AND symbol=? AND in_scope=1 ORDER BY board",
             (run, symbol),
         ).fetchall()
+
+    def industry_memberships(self, run, symbols):
+        memberships = {}
+        for symbol, board in self.conn.execute(
+            "SELECT m.symbol,m.board FROM json_each(?) AS requested "
+            "JOIN dc_membership_v1 AS m ON m.run=? AND m.symbol=requested.value AND m.in_scope=1 "
+            "JOIN dc_node_v1 AS n ON n.run=m.run AND n.key=m.board AND n.kind='industry' ORDER BY m.board",
+            (json.dumps(sorted(symbols)), run),
+        ):
+            memberships.setdefault(symbol, set()).add(board)
+        return memberships

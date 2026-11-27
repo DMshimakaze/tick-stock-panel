@@ -1,5 +1,6 @@
 import { escapeHtml as esc, icon, price, quantity } from './presentation.mjs';
 import { PERIOD_LABEL, TIMEFRAMES } from './workbench_data.mjs';
+import { groupButton, industryGroups } from './industry_groups.mjs';
 
 const INTRADAY = TIMEFRAMES.slice(0, 4);
 export const STATE_LABEL = { ACTIVATED: '激活', INACTIVE: '未激活', PENDING: '待算', MISSING: '缺数据' };
@@ -48,9 +49,11 @@ export function activationResults(rows, access) {
 const when = time => time?.slice(5, 16) || '—';
 const isIntraday = timeframe => INTRADAY.includes(timeframe);
 
-export function resultsMarkup(frames, access, { timeframe, today, expanded, scope }) {
+export function resultsMarkup(frames, access, { timeframe, today, expanded, scope, scopeLabel,
+  nodes, paths, collapsed, details, eventId }) {
   const data = frames[timeframe];
-  const list = today ? data.today : data.latest;
+  const useToday = today && isIntraday(timeframe);
+  const list = useToday ? data.today : data.latest;
   const usable = access.usable.includes(timeframe);
   const coverage = data.total && usable && data.target ?
     `${data.pending ? '计算中' : '已算'} ${quantity(data.ready)}/${quantity(data.total)}` : '';
@@ -58,31 +61,46 @@ export function resultsMarkup(frames, access, { timeframe, today, expanded, scop
   const empty = access.failed ? '结果暂不可用' : !usable ? '等待有效结果' : !data.total ?
     '当前范围暂无股票' : !data.target ? '等待该周期完成 K 线' : !data.ready && !list.length ? '等待有效结果' :
       data.ready === data.total ? '暂无激活' : '已算范围内暂无激活';
-  const meta = [scope, PERIOD_LABEL[timeframe], data.target ? when(data.target) : (access.day || ''),
+  const meta = [scopeLabel, PERIOD_LABEL[timeframe], data.target ? when(data.target) : (access.day || ''),
     coverage, coverage && missing ? `缺数据 ${quantity(missing)}` : '',
-    today && list.length ? `今日 ${quantity(list.length)} 只` : ''].filter(Boolean).join(' · ');
+    usable && data.pending ? `待算 ${quantity(data.pending)}` : ''].filter(Boolean).join(' · ');
   const tabs = TIMEFRAMES.map(tf => {
     const item = frames[tf];
-    const progress = item.target && item.total && access.usable.includes(tf) ? `${quantity(item.ready)}/${quantity(item.total)}` : '—';
+    const count = useToday && isIntraday(tf) && (item.ready || item.today.length) ? item.today.length : item.count;
     return `<button type="button" data-result-period="${tf}" aria-pressed="${tf === timeframe}">
-      <span>${PERIOD_LABEL[tf]} <b>${quantity(item.count)}</b></span><small>${when(item.target)}</small><small>${progress}</small></button>`;
+      ${PERIOD_LABEL[tf]} <b>${quantity(count)}</b></button>`;
   }).join('');
   const toggle = isIntraday(timeframe) ? `<div class="mr-segments" role="group" aria-label="激活时间范围">
     <button type="button" data-result-window="latest" aria-pressed="${!today}">本轮</button>
     <button type="button" data-result-window="today" aria-pressed="${today}">今日</button></div>` : '';
-  const canExpand = list.length > 2 || (today && list.some(item => item.events.length > 1));
-  const expand = canExpand ? `<button type="button" data-act="expand-results" aria-expanded="${expanded}">
+  const expand = list.length ? `<button type="button" data-act="expand-results" aria-expanded="${expanded}">
     ${expanded ? '收起' : '展开全部'}${icon('chevron')}</button>` : '';
-  const entries = (expanded ? list : list.slice(0, 2)).map(({ row, events }) => {
+  const groups = industryGroups(list, item => item.row, nodes, paths, scope);
+  const signalRow = ({ row, events }) => {
     const event = events.at(-1);
-    const detail = expanded && events.length > 1 ? `<div class="mr-activation-more">${events.slice(0, -1).map(earlier =>
-      `<button type="button" data-signal="${esc(earlier.id)}">${when(earlier.at)}${earlier.mode === 'REPLAY' ? ' · 补算' : ''}</button>`
+    const mode = event.mode === 'REPLAY' ? '补算' : event.mode === 'DELAYED' ? '延迟' : '';
+    const state = frameActivation(row, timeframe, access)?.state;
+    const pending = state === 'PENDING' || state === 'MISSING' ? `当前${STATE_LABEL[state]}` : '';
+    const facts = [row.symbol, event.at, Number.isFinite(event.price) ? price(event.price, row.raw_tick) : '', mode, pending]
+      .filter(Boolean).join(' · ');
+    const open = details.has(row.symbol);
+    const detail = open ? `<div class="mr-activation-more"><small>${esc(facts)}</small>${events.slice(0, -1).map(earlier =>
+      `<button type="button" data-signal="${esc(earlier.id)}" aria-current="${earlier.id === eventId}"
+        title="${esc(earlier.at)}">${when(earlier.at)}${earlier.mode === 'REPLAY' ? ' · 补算' : earlier.mode === 'DELAYED' ? ' · 延迟' : ''}</button>`
     ).join('')}</div>` : '';
-    return `<div><button type="button" class="mr-activation-entry" data-signal="${esc(event.id)}">
-      <span><b>${esc(row.name)}</b> <small>${esc(row.symbol)}</small></span>
-      <span>${when(event.at)}${event.mode === 'REPLAY' ? ' · 补算' : event.mode === 'DELAYED' ? ' · 延迟' : ''}</span>
-      ${Number.isFinite(event.price) ? `<span>${price(event.price, row.raw_tick)}</span>` : '<span></span>'}${icon('chevron')}</button>${detail}</div>`;
+    return `<div class="mr-activation-item"><button type="button" class="mr-activation-entry" data-signal="${esc(event.id)}"
+      title="${esc(facts)}" aria-current="${event.id === eventId}"><b>${esc(row.name)}</b>
+      <time>${esc(isIntraday(timeframe) ? event.at?.slice(11, 16) || '—' : when(event.at))}</time>
+      ${mode ? `<small title="${mode}">${mode[0]}</small>` : ''}${pending ? `<small>${pending}</small>` : ''}</button>
+      <button type="button" class="mr-icon-button mr-event-info" data-result-detail="${esc(row.symbol)}" aria-expanded="${open}"
+        aria-label="${esc(row.name)} 确认详情${events.length > 1 ? `，共 ${events.length} 次` : ''}">${events.length > 1 ? `<small>${events.length}</small>` : ''}${icon('chevron')}</button>${detail}</div>`;
+  };
+  const entries = groups.map(group => {
+    const closed = collapsed.has(group.key);
+    return `<div class="mr-activation-group">${groupButton(group, 'activation', closed)}
+      ${closed ? '' : group.items.map(signalRow).join('')}</div>`;
   }).join('');
   return { tabs, controls: `<span class="mr-meta">${esc(meta)}</span>${toggle}${expand}`,
-    list: entries || `<span class="mr-meta">${esc(empty)}</span>`, entries: list };
+    list: entries || `<span class="mr-meta">${esc(empty)}</span>`,
+    entries: groups.flatMap(group => collapsed.has(group.key) ? [] : group.items) };
 }

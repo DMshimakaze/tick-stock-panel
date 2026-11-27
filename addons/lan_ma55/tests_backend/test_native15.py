@@ -4,6 +4,7 @@ from time import time
 
 import pytest
 
+from addons.lan_ma55.backend.daily_store import DailyStore
 from addons.lan_ma55.backend.native15_owner import NativeOwner, candidates_page
 from addons.lan_ma55.backend.native15_shadow import SOURCE, PROOF
 from addons.lan_ma55.backend.native15_scheduler import task
@@ -23,6 +24,44 @@ def prepare(owner, sessions, count=1):
     rows = [dict(symbol=f"{i:06d}.SZ", name=f"sample{i}", source_type="stock", raw_tick=.01, eligible=True) for i in range(count)]
     owner.refresh_master(rows, dict(expected=count, stock=count, etf=0), sessions)
     return [r["symbol"] for r in rows]
+
+
+def test_daily_no_progress_yields_shared_budget_and_survives_restart(tmp_path, monkeypatch):
+    from addons.lan_ma55.backend.multiframe_input import DAILY_SOURCE
+
+    clock = [1_795_790_000.0]
+    monkeypatch.setattr("addons.lan_ma55.backend.daily_store.time", lambda: clock[0])
+    path = tmp_path / "state.sqlite3"
+    schedule = [f"2026-11-{day} 15:00:00" for day in (25, 26, 27)]
+    with NativeOwner(path) as owner:
+        symbol, = prepare(owner, [stamp[:10] for stamp in schedule])
+        master = owner.market.universe({symbol})
+        daily = DailyStore(owner.conn)
+        needs = {(symbol, "weekly"): (schedule[0], schedule[-1])}
+        for delay in (300, 900, 1800):
+            assert daily.task(master, schedule, needs)[-1] is True
+            daily.accept([symbol], {}, {symbol: "SOURCE_UNAVAILABLE"}, schedule, master)
+            assert daily.progress(symbol)["next_retry"] == clock[0] + delay
+            assert daily.task(master, schedule, needs) is None
+            if delay < 1800:
+                clock[0] += delay
+    with NativeOwner(path) as owner:
+        daily = DailyStore(owner.conn)
+        assert daily.progress(symbol)["no_progress"] == 3
+        assert daily.task(master, schedule, needs) is None
+        next_target = "2026-11-30 15:00:00"
+        new_schedule = schedule + [next_target]
+        new_needs = {(symbol, "daily"): (next_target, next_target)}
+        assert daily.task(master, new_schedule, new_needs)[-1] is False
+        row = dict(timestamp=next_target, open=1, high=2, low=1, close=2, volume=100, amount=150,
+                   source_id=DAILY_SOURCE)
+        daily.accept([symbol], {symbol: {next_target: row}}, {}, new_schedule, master)
+        assert daily.progress(symbol)["no_progress"] == 0
+        assert daily.progress(symbol)["next_retry"] == 0
+        with owner.conn:
+            owner.conn.execute("INSERT OR REPLACE INTO ma55_daily_progress_v1 VALUES (?,?,?,?,?,?)",
+                               (symbol, next_target, 2, schedule[0], clock[0] + 300, "SOURCE_UNAVAILABLE"))
+        assert daily.progress(symbol)["last_attempt"] is None
 
 
 def accept(owner, bars, sessions, *, symbols=None, factors=None, stage="B"):
