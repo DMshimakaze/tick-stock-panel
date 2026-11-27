@@ -36,8 +36,8 @@ python -B -m backend.bridge --data-dir <隔离数据目录> --url http://127.0.0
 
 已设置面板密码的实例追加 `--session`，在交互提示中输入已授权的管理会话凭据。后台通过 `read:ext`、`write:ext` 调用 Ext Data HTTP，凭据保存在插件独立运行目录。管理会话可访问 `/api/extensions/market.volpulse/v1/status` 查看最近成功、请求计数、覆盖和下一次计划。停用通过「已安装扩展」操作，重启生效，SQLite 继续保留。
 
-### 生产启用条件
+### 正式实例
 
-TSP v0.4.1 的 Ext Data 写入会删除宿主共享策略结果缓存并清理内存行情视图。本版交付已在隔离实例验证。生产启用依赖宿主提供保留这些共享缓存的正式发布契约。
+0.1.0 已在本机正式 TSP v0.4.1 启用，菜单为「大盘量能」。TSP v0.4.1 的 Ext Data 写入会删除宿主共享策略结果缓存并清理内存行情视图。正式安装在收盘后完成，持续盘中发布的宿主负载待观察。
 
 本机有界验证使用三个公开端点。生产使用与行情再分发应分别核对数据方的适用条款和授权，尤其是东财对行情再传播的限制。[东方财富法律声明](https://about.eastmoney.com/home/legal) · [新浪财经用户协议](https://finance.sina.com.cn/roll/2021-05-12/doc-ikmxzfmm2033220.shtml)
