@@ -9,7 +9,7 @@ from addons.lan_ma55.backend.native15_owner import NativeOwner, candidates_page
 from addons.lan_ma55.backend.native15_shadow import SOURCE, PROOF
 from addons.lan_ma55.backend.native15_scheduler import task
 from addons.lan_ma55.backend.native15_signal_adapter import FAMILY
-from addons.lan_ma55.backend.market_grid import aggregate, project, derived, MAS, points
+from addons.lan_ma55.backend.market_grid import aggregate, as_ms, project, derived, MAS, points
 from addons.lan_ma55.backend.unified_store import UnifiedStore
 from addons.lan_ma55.tests_market.test_rolling import sample
 from addons.lan_ma55.migrate_unified import row_digests
@@ -364,6 +364,57 @@ def test_new_trading_day_waits_for_factor_verification_then_uses_saved_target(tm
         assert owner.status_snapshot(target=after)['today_analyzed_candidates']==1
         assert owner.market.instrument(symbol)['basis_revision']==previous['basis_revision']
         assert owner.market.instrument(symbol)['factors_day']==after[:10]
+
+
+def test_opening_factor_check_respects_coverage_and_bj_cooldown(tmp_path, monkeypatch):
+    from addons.lan_ma55.backend.workbench_diagnostics import chart_diagnostic
+
+    previous, today = "2026-11-26", "2026-11-27"
+    sessions, target = [previous, today], previous + " 15:00:00"
+    attempted, opening = previous + " 15:05:00", today + " 09:31:00"
+    admitted = ["600000.SH", "000001.SZ", "920001.BJ", "920117.BJ"]
+    known_sh, pending_sh, known_bj, pending_bj = admitted
+    clock = [as_ms(attempted) / 1000]
+    for module in ("native15_scheduler", "native15_store", "workbench_diagnostics"):
+        monkeypatch.setattr(f"addons.lan_ma55.backend.{module}.time", lambda: clock[0])
+    path = tmp_path / "state.sqlite3"
+    with NativeOwner(path) as owner:
+        store = owner.market
+        rows = [dict(symbol=s, name=s, source_type="stock", raw_tick=.01, eligible=True) for s in admitted]
+        owner.refresh_master(rows, {"expected": len(rows)}, sessions)
+        with owner.conn:
+            for symbol in (known_sh, known_bj):
+                store.factor_response(symbol, [], attempted, sessions, update_indicators=False)
+            for _ in range(2):
+                for symbol in (pending_sh, pending_bj):
+                    store.factor_response(symbol, None, attempted, sessions, update_indicators=False)
+        clock[0] = as_ms(opening) / 1000
+        plan = task(store, store.universe(), sessions, target, opening, factor_day=today)
+        assert plan[2] == "F" and set(plan[3]) == {known_sh, known_bj}
+        assert store.deferred_bj_factors(set(admitted)) == 1
+        diagnostic = chart_diagnostic(store, DailyStore(owner.conn), pending_bj, "15m", {"15m": [target]}, [],
+                                      {"status": "FACTOR_PENDING"})
+        assert (diagnostic["queue"], diagnostic["retry_at"], diagnostic["error"]) == (
+            "BJ_FACTOR_DEFERRED", today + " 15:05:00", "MISSING_RESPONSE",
+        )
+        with owner.conn:
+            store.factor_response(known_sh, None, opening, sessions, update_indicators=False)
+            store.factor_response(known_bj, [], opening, sessions, update_indicators=False)
+        assert store.instrument(known_sh)["factors_day"] == previous
+        assert store.instrument(known_bj)["factors_day"] == today
+        assert store.instrument(pending_bj)["factor_coverage"] == "MISSING"
+    with NativeOwner(path) as owner:
+        store = owner.market
+        assert store.deferred_bj_factors(set(admitted)) == 1
+        clock[0] = as_ms(today + " 15:05:00") / 1000
+        assert store.deferred_bj_factors(set(admitted)) == 0
+        at = today + " 15:00:00"
+        bar = dict(timestamp=at, open=10, high=10, low=10, close=10, volume=100, amount=1000,
+                   source_id=SOURCE, source_count=1, source_proof=PROOF)
+        with owner.conn:
+            store.accept(pending_bj, {at: bar}, sessions=sessions, start=at, end=at, now=at, update_indicators=False)
+        regular = task(store, store.universe({pending_bj}), sessions, at, today + " 15:05:00")
+        assert regular[2:4] == ("F", [pending_bj])
 
 
 @pytest.mark.parametrize('error',['FACTOR_PENDING','SOURCE_LAG'])

@@ -16,7 +16,7 @@ from .activation_results import display_targets
 from .collector import Collector, SourceError
 from .daily_store import DailyStore
 from .dc_focus_owner import DCFocusOwner
-from .exchange_sessions import INTRADAY, frame_schedules, planned_session
+from .exchange_sessions import INTRADAY, frame_schedules, next_native15_request, planned_session
 from .market_grid import (
     CAPACITY,
     now_cn,
@@ -29,7 +29,7 @@ from .native15_scheduler import task as native_task
 from .native15_shadow import SOURCE as NATIVE_SOURCE
 from .native15_store import in_verified_halt
 from .observations import Observations
-from .request_budget import CollectionStopped, RequestDeferred, RollingBudget
+from .request_budget import WINDOW_SECONDS, CollectionStopped, RequestDeferred, RollingBudget
 from .result_publisher import RUNTIME_ID, Publisher, workbench_configs
 from .runtime_status import completed_targets, observation_summary, runtime_projection
 from .workbench_bridge import WorkbenchBridge, focus_view
@@ -90,7 +90,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.13.9", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.10", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -330,6 +330,12 @@ class Worker:
             for frame in TIMEFRAMES:
                 self.observations.needs.pop((symbol, frame), None)
         changed = tuple(frame for frame in TIMEFRAMES if self.targets[frame] != self.analysis_targets.get(frame))
+        if changed:
+            # LIVE applies to the completed target whose input actually arrived.
+            for queued in self.analyze_queue.values():
+                for frame in changed:
+                    if frame in queued:
+                        queued[frame] = False
         if calendar != self.analysis_calendar:
             changed = TIMEFRAMES
         if changed:
@@ -340,10 +346,19 @@ class Worker:
     def analyze_next(self, sessions, schedules, weeks, now, *, stage="ANALYZING"):
         if not self.analyze_queue:
             return
-        symbols = list(islice(self.analyze_queue, ANALYSIS_BATCH))
+        # At the close the daily/weekly replays can take much longer than the
+        # new 15m result. Commit and publish the minutes before those replays.
+        minute = list(islice((s for s, frames in self.analyze_queue.items() if "15m" in frames), ANALYSIS_BATCH))
+        symbols = minute or list(islice(self.analyze_queue, ANALYSIS_BATCH))
         grouped = defaultdict(list)
         for symbol in symbols:
-            wanted = self.analyze_queue.pop(symbol)
+            if minute:
+                queued = self.analyze_queue[symbol]
+                wanted = {"15m": queued.pop("15m")}
+                if not queued:
+                    del self.analyze_queue[symbol]
+            else:
+                wanted = self.analyze_queue.pop(symbol)
             for live in (True, False):
                 frames = tuple(frame for frame in TIMEFRAMES if wanted.get(frame) is live)
                 if frames:
@@ -397,7 +412,7 @@ class Worker:
                 schedules, weeks = frame_schedules(sessions, now)
                 self.targets, self.market_day = completed_targets(schedules), sessions[-1] if sessions else None
                 work = None
-                phase, stage, waiting_stage = "WAITING_NEXT_15M", None, None
+                phase, stage, waiting_stage, wait_reason = "WAITING_NEXT_15M", None, None, None
                 try:
                     self.prepare_bridge()
                     if self.last_runtime is None:
@@ -406,6 +421,7 @@ class Worker:
                     self.sync_analysis(self.active_scope())
                     self.analyze_next(sessions, schedules, weeks, now)
                     scope = self.active_scope()
+                    self.report(deferred_bj_factors=self.store.deferred_bj_factors(scope))
                     if not scope:
                         phase = "SCOPE_PAUSED"
                     elif not self.collector or self.market_rejected:
@@ -426,8 +442,11 @@ class Worker:
                         halts = self.store.meta("verified_trading_halts", {})
                         if target:
                             minute_master = {s: info for s, info in master.items() if not in_verified_halt(halts.get(s), target)}
+                            day = now[:10]
+                            factor_day = day if day in sessions and target[:10] < day and now[11:] >= "09:30:00" else None
                             work = native_task(self.store, minute_master, sessions, target, now,
-                                               needs=needs, grid=schedules["15m"], cold_allowed=cold_allowed)
+                                               needs=needs, grid=schedules["15m"], cold_allowed=cold_allowed,
+                                               factor_day=factor_day)
                         metadata = bool(sessions and (not work or work[2] != "A")
                                         and self.update_metadata(scope, now, sessions[-1]))
                         if metadata:
@@ -438,9 +457,13 @@ class Worker:
                                  if not metadata and (not work or work[2] == "C") else None)
                         use_daily = daily and (not work or self.repair_turn % 2 == 0)
                         budget = self.collector.budgets["minute"]
+                        next_request = next_native15_request(sessions, now)
+                        reserve = next_request and next_request <= now_cn() + timedelta(seconds=WINDOW_SECONDS)
                         if (daily or work) and budget.delay() > 0:
                             phase = "RATE_LIMITED" if budget.cooldown > monotonic() else "QUOTA_WAIT"
                             waiting_stage = ("W" if daily[-1] else "D") if use_daily else work[2]
+                        elif (daily or work) and reserve:
+                            wait_reason = "NATIVE15_BUDGET_RESERVED"
                         elif use_daily:
                             start, end, count, symbols, cold = daily
                             stage = "W" if cold else "D"
@@ -469,7 +492,7 @@ class Worker:
                         self.analyze_next(sessions, schedules, weeks, str(now_cn()), stage=stage)
                     self.report(phase=phase, active_operation="IDLE", active_symbols=None,
                                 backend_scanning=bool(scope and self.collector and not self.market_rejected),
-                                work_stage=waiting_stage, error=None, waiting_for=None)
+                                work_stage=waiting_stage, error=None, waiting_for=wait_reason)
                 except RequestDeferred as exc:
                     if exc.status_code == 429 and not (exc.reason or "").startswith("HOST_"):
                         with self.owner.conn:
@@ -572,7 +595,7 @@ class Worker:
                 self.collector.observations.popleft()
 
     def restore_budgets(self, now):
-        boundary = str(wall(now)-timedelta(seconds=60))
+        boundary = str(wall(now)-timedelta(seconds=WINDOW_SECONDS))
         clock = monotonic()
         for row in self.owner.conn.execute("SELECT at,capability,period,stage FROM native15_request_receipt WHERE at>? ORDER BY id", (boundary,)):
             age = max(0, (wall(now)-wall(row['at'])).total_seconds())

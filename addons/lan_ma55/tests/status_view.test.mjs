@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { statusModel } from '../src/status_view.mjs';
+import { chartDiagnosis, statusModel } from '../src/status_view.mjs';
 
 const at = 1795680120000;
 const view = { result_id: '1', focus: { revision: 4, taxonomy: { run: 'dc-a' } } };
@@ -60,4 +60,14 @@ test('unknown, changed focus and changed result IDs never borrow old coverage', 
   assert.equal(empty.label, '未启用监控');
   assert.equal(empty.total, 0);
   assert.equal(empty.coverage, null);
+});
+
+test('a deferred Beijing factor preserves the missing reason and shows its time to retry', () => {
+  const diagnostic = chartDiagnosis({
+    reason: 'FACTOR_PENDING', queue: 'BJ_FACTOR_DEFERRED', retry_at: '2026-11-29 11:21:38',
+    requested_at: '2026-11-28 11:21:38', stage: 'F', error: 'FACTOR_KEY_MISSING',
+  });
+  assert.match(diagnostic, /复权因子待核实/);
+  assert.match(diagnostic, /因子响应缺少该证券/);
+  assert.match(diagnostic, /暂缓至 2026-11-29 11:21:38/);
 });

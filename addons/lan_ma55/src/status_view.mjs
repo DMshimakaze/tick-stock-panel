@@ -105,7 +105,9 @@ function blocking(coverage, usable) {
 export function chartDiagnosis(detail) {
   if (!detail) return '';
   const timestamp = value => normalizedTime(value) || '未知';
-  const retry = detail.queue === 'COOLING' ? `冷却至 ${timestamp(detail.retry_at)}` : detail.queue === 'ELIGIBLE'
+  const retry = detail.queue === 'BJ_FACTOR_DEFERRED'
+    ? `北交所反复缺因子 · 暂缓至 ${timestamp(detail.retry_at)}，到期后按既有额度核验`
+    : detail.queue === 'COOLING' ? `冷却至 ${timestamp(detail.retry_at)}` : detail.queue === 'ELIGIBLE'
     ? '待后台按现有额度调度' : '未知';
   const request = detail.requested_at ? [STAGES[detail.stage]?.[0], timestamp(detail.requested_at),
     detail.error ? statusText(detail.error) : ''].filter(Boolean).join(' · ') : '未知';
@@ -193,6 +195,7 @@ export function paintRuntime(root, status, view, errors) {
   role('system-facts').innerHTML = [
     pair('额度', waiting || (s.waiting_for && !s.waiting_for.startsWith('HOST_') ? statusText(s.waiting_for) : '—')),
     pair('宿主任务', hostLabel || '—'),
+    model.sameFocus && s.deferred_bj_factors > 0 ? pair('北交所因子暂缓', `${quantity(s.deferred_bj_factors)} 只`) : '',
     pair('行情异常', ['ERROR', 'SOURCE_UNAVAILABLE', 'CREDENTIAL_REQUIRED'].includes(s.phase) ? statusText(s.phase) : '—'),
   ].join('');
   const dc = view?.focus.taxonomy;

@@ -6,7 +6,7 @@ from .multiframe_core.multiframe import TIMEFRAMES
 
 RUNTIME_FIELDS = (
     "version", "phase", "active_operation", "active_symbols", "work_stage", "waiting_for",
-    "error", "publisher_error", "command_error", "host_job_status", "calendar",
+    "error", "publisher_error", "command_error", "host_job_status", "calendar", "deferred_bj_factors",
 )
 
 

@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from math import fsum, isfinite, prod
 
 BEIJING = timezone(timedelta(hours=8))
+COMPLETE_BAR_SECONDS = 75
 CAPACITY = {"15m": 250, "30m": 125, "60m": 62}
 MAS = (5, 10, 20, 30, 55, 233)
 STRATEGY_CAPACITY = 250
@@ -47,7 +48,7 @@ def points(sessions, start, end, *, step=5):
     ]
 
 
-def latest_point(sessions, now, *, step=15, margin=75):
+def latest_point(sessions, now, *, step=15, margin=COMPLETE_BAR_SECONDS):
     cutoff = str(wall(now) - timedelta(seconds=margin))
     days = [d for d in sessions if d <= cutoff[:10]][-2:]
     available = points(days, days[0] if days else cutoff, cutoff, step=step)

@@ -264,9 +264,22 @@ def test_verified_session_target_boundaries(now, expected):
     assert latest_point(["2026-11-12", "2026-11-13"], now) == expected
 
 
+@pytest.mark.parametrize(("now", "due"), [
+    ("2026-11-27 09:30:00", "2026-11-27 09:46:15"),
+    ("2026-11-27 11:30:45", "2026-11-27 11:31:15"),
+    ("2026-11-27 12:30:00", "2026-11-27 13:16:15"),
+    ("2026-11-27 15:01:15", None),
+    ("2026-11-28 09:30:00", None),
+    ("2026-11-30 09:30:00", "2026-11-30 09:46:15"),
+])
+def test_next_request_uses_the_verified_session_and_completion_margin(now, due):
+    from addons.lan_ma55.backend.exchange_sessions import next_native15_request
+    assert str(next_native15_request(["2026-11-27", "2026-11-30"], now)) == str(due)
+
+
 @pytest.mark.parametrize(("configured", "forced_stage"), [
     ("empty", None), ("single", None), ("market", None),
-    *[("single", stage) for stage in ("A", "B", "C", "F", "D", "W", "error")],
+    *[("single", stage) for stage in ("A", "B", "C", "F", "D", "W", "error", "reserved", "reserved_retry")],
 ])
 def test_worker_scope_and_runtime_stage_at_the_sdk_http_boundary(tmp_path, monkeypatch, configured, forced_stage):
     import json
@@ -284,6 +297,8 @@ def test_worker_scope_and_runtime_stage_at_the_sdk_http_boundary(tmp_path, monke
     )
 
     day, now, target = "2026-11-13", "2026-11-13 10:52:00", "2026-11-13 10:45:00"
+    if forced_stage in ("reserved", "reserved_retry"):
+        now, target = day + " 13:15:30", day + " 11:30:00"
     a, b, board = "600000.SH", "159231.SZ", "dc:theme:000001.DC"
     monkeypatch.delenv("TUSHARE_RELAY_TOKEN", raising=False)
     monkeypatch.setattr(runtime, "now_cn", lambda: datetime.fromisoformat(now))
@@ -321,7 +336,7 @@ def test_worker_scope_and_runtime_stage_at_the_sdk_http_boundary(tmp_path, monke
     requests, published, done = [], {}, Event()
     worker = worker_at(tmp_path, lambda r: httpx.Response(200, json={"active_id": None}))
     worker.settings.update(tickflow_api_key="synthetic", collection_symbols=[a, b])
-    phase = "A" if forced_stage == "error" else forced_stage
+    phase = {"error": "A", "reserved": "W", "reserved_retry": "A"}.get(forced_stage, forced_stage)
     operation = ("COLLECTING_DAILY" if phase in ("D", "W") else
                  "CHECKING_FACTORS" if phase == "F" else "COLLECTING_NATIVE15")
     states = []
@@ -401,6 +416,10 @@ def test_worker_scope_and_runtime_stage_at_the_sdk_http_boundary(tmp_path, monke
     if forced_stage == "error":
         blocked = next(state for state in states if state["phase"] == "CREDENTIAL_REQUIRED")
         assert blocked["active_operation"] == "BLOCKED" and blocked["active_symbols"] is None
+    elif forced_stage in ("reserved", "reserved_retry"):
+        assert all(codes == ["000001.SH"] for _, codes in requests)
+        assert any(state["phase"] == "WAITING_NEXT_15M" and state["waiting_for"] == "NATIVE15_BUDGET_RESERVED"
+                   for state in states)
     elif forced_stage:
         observed = [(state["phase"], state["active_operation"]) for state in states]
         assert (phase, operation) in observed
@@ -412,6 +431,45 @@ def test_worker_scope_and_runtime_stage_at_the_sdk_http_boundary(tmp_path, monke
         assert all(period in (None, "15m", "1d") for period, _ in requests)
     else:
         assert requests == []
+
+
+def test_rollover_retires_live_flag_only_for_advanced_frames(tmp_path):
+    from addons.lan_ma55.backend.multiframe_core.multiframe import TIMEFRAMES
+
+    worker = worker_at(tmp_path, lambda _: httpx.Response(200, json={"active_id": None}))
+    symbol, old, new = "600000.SH", "2026-11-27 14:30:00", "2026-11-27 14:45:00"
+    worker.store = SimpleNamespace(meta=lambda *_: 1)
+    worker.analysis_calendar = 1
+    worker.analysis_scope = {symbol}
+    worker.analysis_targets = dict.fromkeys(TIMEFRAMES, old)
+    worker.targets = dict(worker.analysis_targets, **{"15m": new})
+    worker.enqueue_analysis([symbol], ("15m", "30m"), live=True)
+    worker.sync_analysis({symbol})
+    assert worker.analyze_queue[symbol] == {"15m": False, "30m": True}
+    worker.enqueue_analysis([symbol], ("15m",), live=True)
+    assert worker.analyze_queue[symbol]["15m"] is True
+    worker.publisher.close()
+    worker.http.close()
+
+
+def test_completed_minute_reaches_analysis_before_older_daily_weekly_work(tmp_path):
+    import sqlite3
+
+    worker = worker_at(tmp_path, lambda _: httpx.Response(200, json={"active_id": None}))
+    t, seen = "2026-11-27 15:01:15", []
+    with sqlite3.connect(":memory:") as db:
+        db.execute("CREATE TABLE native15_timing(at TEXT,stage TEXT,symbols INTEGER,scan_ms REAL)")
+        worker.owner = SimpleNamespace(conn=db)
+        worker.observations = SimpleNamespace(
+            refresh=lambda symbols, *_, frames, live: seen.append((symbols, frames, live)) or True)
+        worker.enqueue_analysis(["600000.SH"], ("daily", "weekly"), live=True)
+        worker.enqueue_analysis(["000001.SZ"], ("15m", "30m"), live=True)
+        worker.analyze_next([], {}, [], t)
+        assert seen == [(["000001.SZ"], ("15m",), True)]
+        worker.analyze_next([], {}, [], t)
+        assert seen[1:] == [(["600000.SH"], ("daily", "weekly"), True), (["000001.SZ"], ("30m",), True)]
+    worker.publisher.close()
+    worker.http.close()
 
 
 def test_focus_publication_failure_retries_the_same_committed_view(tmp_path):

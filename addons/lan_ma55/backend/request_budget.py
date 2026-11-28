@@ -8,6 +8,7 @@ import threading
 import time
 
 REQUESTS_PER_MINUTE = 8
+WINDOW_SECONDS = 60
 RETRY_MARGIN = 1.0
 
 
@@ -35,12 +36,12 @@ class RollingBudget:
     def delay(self):
         with self.lock:
             now = self.clock()
-            while self.sent and now - self.sent[0] >= 60:
+            while self.sent and now - self.sent[0] >= WINDOW_SECONDS:
                 self.sent.popleft()
             return max(
                 0,
                 self.cooldown - now,
-                self.sent[0] + 60 - now if len(self.sent) >= self.limit else 0,
+                self.sent[0] + WINDOW_SECONDS - now if len(self.sent) >= self.limit else 0,
             )
 
     def acquire(self, stop, report=lambda seconds: None):
@@ -49,12 +50,12 @@ class RollingBudget:
                 raise CollectionStopped()
             with self.lock:
                 now = self.clock()
-                while self.sent and now - self.sent[0] >= 60:
+                while self.sent and now - self.sent[0] >= WINDOW_SECONDS:
                     self.sent.popleft()
                 delay = max(
                     0,
                     self.cooldown - now,
-                    self.sent[0] + 60 - now if len(self.sent) >= self.limit else 0,
+                    self.sent[0] + WINDOW_SECONDS - now if len(self.sent) >= self.limit else 0,
                 )
                 if delay <= 0:
                     self.sent.append(now)

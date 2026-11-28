@@ -3,7 +3,7 @@
 from datetime import date, timedelta
 from itertools import groupby
 
-from .market_grid import points, stamp, wall
+from .market_grid import COMPLETE_BAR_SECONDS, points, stamp, wall
 
 # SSE announcement 2025-45, confirmed by the SZSE 2026 holiday schedule.
 HOLIDAYS_2026 = (
@@ -45,7 +45,7 @@ def complete_weeks(sessions, cutoff):
 
 
 def frame_schedules(sessions, now):
-    cutoff = str(wall(now) - timedelta(seconds=75))
+    cutoff = str(wall(now) - timedelta(seconds=COMPLETE_BAR_SECONDS))
     start = sessions[0] if sessions else cutoff
     weeks = complete_weeks(sessions, cutoff)
     schedules = {
@@ -54,3 +54,14 @@ def frame_schedules(sessions, now):
     schedules["daily"] = [stamp(day, 900) for day in sessions if stamp(day, 900) <= cutoff]
     schedules["weekly"] = [stamp(week[-1], 900) for week in weeks]
     return schedules, weeks
+
+
+def next_native15_request(sessions, now):
+    """Next eligible request on today's verified session, including the close margin."""
+    day = now[:10]
+    if day not in sessions:
+        return None
+    margin = timedelta(seconds=COMPLETE_BAR_SECONDS)
+    cutoff = str(wall(now) - margin)
+    after = next((at for at in points([day], day, stamp(day, 900), step=15) if at > cutoff), None)
+    return wall(after) + margin if after else None

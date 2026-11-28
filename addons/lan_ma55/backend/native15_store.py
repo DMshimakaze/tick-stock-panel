@@ -5,7 +5,7 @@ from math import isclose
 from time import time
 
 from .market_store import Store, BAR_COLUMNS
-from .market_grid import FIELDS, points, history_capacity, STRATEGY_CAPACITY
+from .market_grid import FIELDS, as_ms, points, history_capacity, STRATEGY_CAPACITY
 from .native15_shadow import SOURCE, PROOF
 
 
@@ -30,6 +30,16 @@ CREATE TABLE IF NOT EXISTS native15_history_progress(
 
 def in_verified_halt(halt, at):
     return bool(halt and at and halt["from_day"] <= at[:10] <= halt["through_day"])
+
+
+def bj_factor_deferred_until(symbol, coverage, retry):
+    last_attempt = retry.get("last_attempt")
+    if (symbol.endswith(".BJ") and coverage == "MISSING" and last_attempt
+            and retry.get("attempts", 0) >= 2 and retry.get("error_type") in (
+                "MISSING_RESPONSE", "FACTOR_KEY_MISSING", "FACTOR_NULL_RESPONSE",
+            )):
+        return as_ms(last_attempt) / 1000 + 86400
+    return 0
 
 
 class NativeStore(Store):
@@ -84,6 +94,13 @@ class NativeStore(Store):
                 self.conn.execute("UPDATE native15_retry SET error_type=NULL,attempts=0,next_eligible=0,retry_after=0 "
                                   f"WHERE {repair}")
                 self.set_meta("factor_retry_separated", 2)
+
+    def deferred_bj_factors(self, scope):
+        now = time()
+        return sum(row["symbol"] in scope and bj_factor_deferred_until(row["symbol"], "MISSING", dict(row)) > now
+                   for row in self.conn.execute(
+                       "SELECT r.* FROM native15_factor_retry r JOIN native15_instrument_progress i USING(symbol) "
+                       "WHERE r.symbol LIKE '%.BJ' AND i.factor_coverage='MISSING' AND r.attempts>=2"))
 
     def factor_attempt(self, symbols, now):
         with self.transaction():

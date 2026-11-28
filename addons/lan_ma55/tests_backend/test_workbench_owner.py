@@ -92,6 +92,37 @@ def test_verified_halt_keeps_security_in_focus_and_blocks_only_known_trading_dat
         assert not in_verified_halt(halted, "2026-11-30 09:45:00")
 
 
+def test_first_completed_bar_after_verified_halt_keeps_the_pinned_replay(tmp_path):
+    days = [str(date(2026, 11, 5) + timedelta(days=i)) for i in range(26)]
+    sessions = [day for day in days if planned_session(day)]
+    old = "2026-11-26 15:05:00"
+    resumes = "2026-11-30 09:47:00"
+    initial, weeks = frame_schedules(sessions, old)
+    resumed, later_weeks = frame_schedules(sessions, resumes)
+    with NativeOwner(tmp_path / "state.sqlite3") as owner:
+        market = owner.market
+        owner.refresh_master([dict(symbol=SYMBOL, name=SYMBOL, eligible=True, source_type="stock", raw_tick=.01)],
+                             {"expected": 1}, sessions)
+        with owner.conn:
+            market._write(SYMBOL, [bar(at) for at in initial["15m"]])
+            market.factor_response(SYMBOL, [], old, sessions, update_indicators=False)
+        observations = Observations(market, DailyStore(owner.conn))
+        observations.refresh([SYMBOL], sessions, initial, weeks, old, old, frames=("15m",))
+        origin = observations.saved(SYMBOL)["15m"]["replay_start"]
+        assert origin and json.loads(observations.saved(SYMBOL)["15m"]["payload"])["status"] == "READY"
+        recovered = resumed["15m"][-1]
+        with owner.conn:
+            market.set_meta("verified_trading_halts", {SYMBOL: {"from_day": "2026-11-27", "through_day": "2026-11-27"}})
+            market.factor_response(SYMBOL, [], resumes, sessions, update_indicators=False)
+            market.accept(SYMBOL, {recovered: dict(bar(recovered), source_proof=PROOF)}, sessions=sessions, start=recovered, end=recovered,
+                          now=resumes, update_indicators=False)
+        observations.refresh([SYMBOL], sessions, resumed, later_weeks, resumes, old, frames=("15m",))
+        saved = observations.saved(SYMBOL)["15m"]
+        assert market.instrument(SYMBOL)["latest_completed15"] == recovered
+        assert saved["replay_start"] == origin and json.loads(saved["payload"])["status"] == "GAP_IN_REPLAY_WINDOW"
+        assert observations.needs[SYMBOL, "15m"] is None
+
+
 @pytest.mark.parametrize("status", [401, 403, 429])
 def test_ths_rejection_stops_actual_http_and_429_survives_restart(tmp_path, status):
     requests = []

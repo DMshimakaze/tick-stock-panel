@@ -7,7 +7,7 @@ from time import time
 from .exchange_sessions import INTRADAY
 from .market_grid import BEIJING
 from .multiframe_input import MIN_HISTORY
-from .native15_store import in_verified_halt
+from .native15_store import bj_factor_deferred_until, in_verified_halt
 
 
 def chart_diagnostic(market, daily, symbol, timeframe, schedules, weeks, frame):
@@ -50,8 +50,12 @@ def chart_diagnostic(market, daily, symbol, timeframe, schedules, weeks, frame):
         retry = daily.progress(symbol)
         if not schedules["daily"] or retry.get("target") != schedules["daily"][-1]:
             retry = {}
-    eligible = retry.get("next_eligible") or retry.get("next_retry")
-    if eligible and eligible > time():
+    deferred = bj_factor_deferred_until(symbol, info.get("factor_coverage"), retry) if stage == "F" else 0
+    eligible = max(deferred, retry.get("next_eligible") or retry.get("next_retry") or 0)
+    now = time()
+    if deferred > now:
+        queue = "BJ_FACTOR_DEFERRED"
+    elif eligible > now:
         queue = "COOLING"
     elif missing or reason == "FACTOR_PENDING":
         queue = "ELIGIBLE"

@@ -10,7 +10,7 @@ from time import monotonic
 import httpx
 from tickflow import TickFlow, TickFlowError
 
-from .market_grid import BEIJING, as_ms, latest_point, normalize_five, now_cn, wall
+from .market_grid import BEIJING, COMPLETE_BAR_SECONDS, as_ms, latest_point, normalize_five, now_cn, wall
 from .multiframe_input import DAILY_HISTORY, MAX_BATCH_SYMBOLS, MAX_DAILY_BATCH_POINTS, MAX_NATIVE_BARS, normalize_daily
 from .native15_shadow import normalize_native
 from .request_budget import (
@@ -392,7 +392,7 @@ class Collector:
         """One production native15 HTTP, isolated validation per security."""
         if not 1 <= len(symbols) <= MAX_BATCH_SYMBOLS or not 1 <= count <= MAX_NATIVE_BARS:
             raise ValueError("Native15 batch limited to 100 symbols / 1280 bars")
-        cutoff = min(end, str(now_cn() - timedelta(seconds=75)))
+        cutoff = min(end, str(now_cn() - timedelta(seconds=COMPLETE_BAR_SECONDS)))
         began = monotonic()
         # The compact feed can return invalid OHLC for an isolated slot.
         # Request the preceding completed slot as context and admit only the planned window.
