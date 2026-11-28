@@ -90,7 +90,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.13.13", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.14", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -288,7 +288,19 @@ class Worker:
         )
         host = status.get("host_job_status") or {}
         comparison = dict(status, host_job_status={k: v for k, v in host.items() if k != "checked_at"})
-        if comparison == self.last_runtime and now - self.last_heartbeat < 10:
+        # Stage changes can alternate twice per scheduler turn. Every ingest
+        # clears host caches, so coalesce transient analysis/wait updates. Source
+        # operations, errors, new results and shutdown remain immediate.
+        immediate = self.last_runtime is None or not alive or (
+            comparison["result_id"] != self.last_runtime["result_id"]
+        ) or (
+            comparison["active_operation"] != "IDLE" and comparison["phase"] != "ANALYZING"
+        ) or any(
+            comparison[field] != self.last_runtime[field]
+            for field in ("error", "publisher_error", "command_error")
+        )
+        interval = 10 if comparison == self.last_runtime else 5
+        if not immediate and now - self.last_heartbeat < interval:
             return
         row = dict(scope="lan.ma55", payload_json=encoded(dict(status, status_at_ms=int(time() * 1000))))
         try:
