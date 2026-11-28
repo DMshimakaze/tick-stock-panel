@@ -40,8 +40,8 @@ export function statusModel(status, view, { now = Date.now(), statusError, viewE
   const knownTime = Number.isFinite(s.status_at_ms);
   const stale = knownTime && now - s.status_at_ms > STALE_MS;
   const running = knownTime && !stale && !statusError && s.worker_alive === true && ACTIVE.has(s.active_operation);
-  const work = STAGES[s.work_stage]?.[0];
-  let appearance = STAGES[s.phase] || ['状态待确认', 'muted', 'clock'];
+  const work = s.work_stage === 'F' ? null : STAGES[s.work_stage]?.[0];
+  let appearance = STAGES[s.phase === 'F' ? 'A' : s.phase] || ['状态待确认', 'muted', 'clock'];
   if (s.phase === 'SCOPE_PAUSED') appearance = [
     s.focus_revision || s.saved_sectors ? '监控已暂停' : '未启用监控', 'muted', 'clock',
   ];
@@ -105,9 +105,7 @@ function blocking(coverage, usable) {
 export function chartDiagnosis(detail) {
   if (!detail) return '';
   const timestamp = value => normalizedTime(value) || '未知';
-  const retry = detail.queue === 'BJ_FACTOR_DEFERRED'
-    ? `北交所反复缺因子 · 暂缓至 ${timestamp(detail.retry_at)}，到期后按既有额度核验`
-    : detail.queue === 'COOLING' ? `冷却至 ${timestamp(detail.retry_at)}` : detail.queue === 'ELIGIBLE'
+  const retry = ['COOLING', 'BJ_FACTOR_DEFERRED'].includes(detail.queue) ? `冷却至 ${timestamp(detail.retry_at)}` : detail.queue === 'ELIGIBLE'
     ? '待后台按现有额度调度' : '未知';
   const request = detail.requested_at ? [STAGES[detail.stage]?.[0], timestamp(detail.requested_at),
     detail.error ? statusText(detail.error) : ''].filter(Boolean).join(' · ') : '未知';
@@ -193,9 +191,9 @@ export function paintRuntime(root, status, view, errors) {
       button.dataset.blockPeriod === blockPeriod && button.dataset.blockReason === blockReason)?.focus({ preventScroll: true });
   }
   role('system-facts').innerHTML = [
-    pair('额度', waiting || (s.waiting_for && !s.waiting_for.startsWith('HOST_') ? statusText(s.waiting_for) : '—')),
+    pair('额度', waiting || (s.waiting_for && s.waiting_for !== 'NATIVE15_BUDGET_RESERVED'
+      && !s.waiting_for.startsWith('HOST_') ? statusText(s.waiting_for) : '—')),
     pair('宿主任务', hostLabel || '—'),
-    model.sameFocus && s.deferred_bj_factors > 0 ? pair('北交所因子暂缓', `${quantity(s.deferred_bj_factors)} 只`) : '',
     pair('行情异常', ['ERROR', 'SOURCE_UNAVAILABLE', 'CREDENTIAL_REQUIRED'].includes(s.phase) ? statusText(s.phase) : '—'),
   ].join('');
   const dc = view?.focus.taxonomy;

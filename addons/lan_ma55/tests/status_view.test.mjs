@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { chartDiagnosis, statusModel } from '../src/status_view.mjs';
+import { JSDOM } from 'jsdom';
+import { chartDiagnosis, paintRuntime, statusModel } from '../src/status_view.mjs';
+import { LAYOUT } from '../src/workbench_layout.mjs';
 
 const at = 1795680120000;
 const view = { result_id: '1', focus: { revision: 4, taxonomy: { run: 'dc-a' } } };
@@ -12,7 +14,7 @@ const state = { focus_revision: 4, taxonomy_run: 'dc-a', result_id: '1', worker_
 test('live A/B/C/F/D/W and analysis have their own status without hiding coverage', () => {
   const stages = [
     ['A', 'COLLECTING_NATIVE15', '更新行情'], ['B', 'COLLECTING_NATIVE15', '修复 15m 历史'],
-    ['C', 'COLLECTING_NATIVE15', '补齐长周期'], ['F', 'CHECKING_FACTORS', '核验复权'],
+    ['C', 'COLLECTING_NATIVE15', '补齐长周期'], ['F', 'CHECKING_FACTORS', '更新行情'],
     ['D', 'COLLECTING_DAILY', '更新日线'], ['W', 'COLLECTING_DAILY', '补齐周线历史'],
   ];
   for (const [phase, active_operation, label] of stages) {
@@ -24,7 +26,8 @@ test('live A/B/C/F/D/W and analysis have their own status without hiding coverag
     assert.equal(current.coverage, coverage);
     const analysis = statusModel({ ...live, active_operation: 'ANALYZING_MA55' }, view, { now: at });
     assert.equal(analysis.label, '计算 MA55');
-    assert.match(analysis.taskNote, new RegExp(label));
+    if (phase === 'F') assert.doesNotMatch(analysis.taskNote, /核验复权/);
+    else assert.match(analysis.taskNote, new RegExp(label));
   }
 });
 
@@ -62,12 +65,30 @@ test('unknown, changed focus and changed result IDs never borrow old coverage', 
   assert.equal(empty.coverage, null);
 });
 
-test('a deferred Beijing factor preserves the missing reason and shows its time to retry', () => {
+test('a deferred factor keeps the original short diagnosis', () => {
   const diagnostic = chartDiagnosis({
     reason: 'FACTOR_PENDING', queue: 'BJ_FACTOR_DEFERRED', retry_at: '2026-11-29 11:21:38',
     requested_at: '2026-11-28 11:21:38', stage: 'F', error: 'FACTOR_KEY_MISSING',
   });
   assert.match(diagnostic, /复权因子待核实/);
   assert.match(diagnostic, /因子响应缺少该证券/);
-  assert.match(diagnostic, /暂缓至 2026-11-29 11:21:38/);
+  assert.match(diagnostic, /冷却至 2026-11-29 11:21:38/);
+  assert.doesNotMatch(diagnostic, /北交所反复|按既有额度|暂缓至/);
+});
+
+test('runtime details keep scheduling evidence in the existing developer diagnostics', () => {
+  const dom = new JSDOM('<main></main>');
+  const root = dom.window.document.querySelector('main');
+  root.innerHTML = LAYOUT;
+  const current = { ...state, phase: 'WAITING_NEXT_15M', waiting_for: 'NATIVE15_BUDGET_RESERVED',
+    deferred_bj_factors: 4, status_at_ms: Date.now() };
+  const published = { ...view, summary: coverage };
+  paintRuntime(root, current, published, {});
+  const facts = root.querySelector('[data-role="system-facts"]').textContent;
+  assert.doesNotMatch(facts, /北交所因子暂缓|NATIVE15_BUDGET_RESERVED|为下一根|复权冷却/);
+  assert.match(root.querySelector('[data-role="diagnostics"]').textContent, /NATIVE15_BUDGET_RESERVED/);
+  assert.match(root.querySelector('[data-role="diagnostics"]').textContent, /"deferred_bj_factors": 4/);
+  paintRuntime(root, { ...current, phase: 'SOURCE_UNAVAILABLE' }, published, {});
+  assert.match(root.querySelector('[data-role="system-facts"]').textContent, /行情源暂不可用/);
+  dom.window.close();
 });
