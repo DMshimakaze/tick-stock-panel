@@ -30,7 +30,7 @@ from .native15_shadow import SOURCE as NATIVE_SOURCE
 from .native15_store import in_verified_halt
 from .observations import Observations
 from .request_budget import WINDOW_SECONDS, CollectionStopped, RequestDeferred, RollingBudget
-from .result_publisher import RUNTIME_ID, Publisher, workbench_configs
+from .result_publisher import RUNTIME_ID, Publisher
 from .runtime_status import completed_targets, observation_summary, runtime_projection
 from .workbench_bridge import WorkbenchBridge, focus_view
 from .worker_lease import ProcessLease
@@ -90,7 +90,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.13.12", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.13", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -223,7 +223,7 @@ class Worker:
         if not self.bridge_prepared and monotonic() >= self.bridge_retry:
             self.bridge_retry = monotonic() + 15
             try:
-                self.publisher.prepare(workbench_configs())
+                self.publisher.prepare()
             except (httpx.HTTPError, ValueError):
                 self.report(publisher_error="工作台扩展数据尚未就绪")
             else:
