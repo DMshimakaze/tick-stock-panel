@@ -21,6 +21,7 @@ const MESSAGES = {
   MISSING_COMPLETED_BAR: '目标 K 线尚未到达，或未取得有效成交',
   GAP_IN_REPLAY_WINDOW: '回放窗口存在缺柱',
   ZERO_VOLUME_BAR: '回放窗口含零成交柱',
+  TRADING_HALTED_VERIFIED: '交易所公告停牌',
   WAITING_INPUT: '等待有效数据',
   WAITING_FOR_COMPLETED_TARGET: '等待最新完成周期',
   WAITING_FOR_REVIEW: '输入已变更，等待复核',

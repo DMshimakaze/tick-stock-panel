@@ -79,7 +79,7 @@ function periods(coverage) {
 }
 
 const BLOCK_GROUPS = [
-  ['行情与回放', ['MISSING_COMPLETED_BAR', 'WAITING_FOR_COMPLETED_TARGET', 'GAP_IN_REPLAY_WINDOW', 'ZERO_VOLUME_BAR']],
+  ['行情与回放', ['TRADING_HALTED_VERIFIED', 'MISSING_COMPLETED_BAR', 'WAITING_FOR_COMPLETED_TARGET', 'GAP_IN_REPLAY_WINDOW', 'ZERO_VOLUME_BAR']],
   ['历史深度', ['INSUFFICIENT_HISTORY']],
   ['复权', ['FACTOR_PENDING']],
   ['输入核实', ['TICK_UNAVAILABLE', 'METADATA_PENDING', 'WAITING_INPUT']],
@@ -111,12 +111,14 @@ export function chartDiagnosis(detail) {
     detail.error ? statusText(detail.error) : ''].filter(Boolean).join(' · ') : '未知';
   const interval = bounds => bounds[0] === bounds[1] ? timestamp(bounds[0]) : bounds.map(timestamp).join(' 至 ');
   const capacity = detail.listed_capacity;
+  const halt = detail.verified_halt;
   return `<dl class="mr-facts" aria-label="逐股数据诊断">${[
     pair('当前目标', timestamp(detail.target)), pair('数据状态', statusText(detail.reason)),
     detail.missing_raw ? pair('已核实缺柱区间', interval(detail.missing_raw)) : '',
     detail.zero_raw ? pair('本地零成交柱', interval(detail.zero_raw)) : '',
     capacity ? pair('上市后完成柱上限', `${detail.listing_date} 上市 · ${capacity.listed}/${capacity.required} 根`) : '',
     detail.factor_day ? pair('已核实因子截至', detail.factor_day) : '',
+    halt ? pair('已核实停牌区间', `${halt.from_day} 至 ${halt.through_day} · ${halt.notice}`) : '',
     detail.replay_start ? pair('固定回放起点', timestamp(detail.replay_start)) : '',
     pair(detail.source === 'daily' ? '最近有效日源' : '最近有效原生 15m', timestamp(detail.last_bar)),
     pair('最近请求', request), pair('最近请求成功', timestamp(detail.last_success)), pair('重试状态', retry),

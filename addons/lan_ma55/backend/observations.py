@@ -12,6 +12,7 @@ from .market_grid import MAS, history_capacity, wall, with_averages
 from .market_store import encoded
 from .multiframe_core.multiframe import TIMEFRAMES, VERSION, analyze_timeframe
 from .multiframe_input import DAILY_HISTORY, frame_bars, missing_window, replay_input, source_window
+from .native15_store import in_verified_halt
 from .workbench_diagnostics import chart_diagnostic
 
 CHART_LIMIT = 250
@@ -53,6 +54,7 @@ class Observations:
         target = schedules["15m"][-1] if schedules["15m"] else None
         changed = False
         market_revision = self.market.meta("calendar_revision", 0)
+        halts = self.market.meta("verified_trading_halts", {})
         with self.conn:
             for symbol in symbols:
                 info = self.market.instrument(symbol)
@@ -61,6 +63,7 @@ class Observations:
                 saved = self.saved(symbol)
                 factors, basis = self.reference_basis(symbol, info, target)
                 tick = info["raw_tick"]
+                halt = halts.get(symbol)
                 latest_minute = {}
                 raw, available = {}, {}
                 for timeframe in frames:
@@ -83,8 +86,11 @@ class Observations:
                             "SELECT count(*) FROM native15_bar WHERE symbol=? AND bar_end BETWEEN ? AND ?",
                             (symbol, lower, end),
                         ).fetchone()[0]
-                    key = encoded([INPUT_KEY_VERSION, end, basis, tick, revision, market_revision,
-                                   latest_minute.get(end) if minute else None, info["listing_date"]])
+                    inputs_key = [INPUT_KEY_VERSION, end, basis, tick, revision, market_revision,
+                                  latest_minute.get(end) if minute else None, info["listing_date"]]
+                    if halt:
+                        inputs_key.append(halt)
+                    key = encoded(inputs_key)
                     fact = (symbol, timeframe)
                     prior = json.loads(previous["payload"]) if previous else {}
                     if previous and key == previous["input_key"]:
@@ -95,13 +101,20 @@ class Observations:
                             raw[minute] = self.market.raw_rows(symbol, target, start=lower, limit=-1)
                         else:
                             raw[minute] = self.daily.raw_rows(symbol, schedules["daily"][-1], start=lower)
+                        if halt:
+                            raw[minute] = [bar for bar in raw[minute] if not in_verified_halt(halt, bar["timestamp"])]
                         available[minute] = {bar["timestamp"] for bar in raw[minute]}
                     required = source_window(timeframe, schedule, source_grid, weeks, start, info["listing_date"])
-                    missing = missing_window(required, available.get(minute, ()))
+                    halted = in_verified_halt(halt, end)
+                    if halt:
+                        required = [at for at in required if not in_verified_halt(halt, at)]
+                    missing = None if halted else missing_window(required, available.get(minute, ()))
                     self.needs[fact] = missing
                     bars = (frame_bars(raw.get(minute, ()), timeframe, sessions, weeks, end, factors, target)
                             if basis or timeframe == "15m" else [])
-                    if not basis:
+                    if halted:
+                        reason = "TRADING_HALTED_VERIFIED"
+                    elif not basis:
                         reason = "FACTOR_PENDING"
                     elif not tick or not isfinite(tick) or tick <= 0:
                         reason = "TICK_UNAVAILABLE"
@@ -252,6 +265,9 @@ class Observations:
             raw = self.market.raw_rows(symbol, end, start=str(wall(start) - timedelta(hours=2)), limit=-1)
         else:
             raw = self.daily.raw_rows(symbol, end, start=str(wall(start) - timedelta(days=7)))
+        halt = self.market.meta("verified_trading_halts", {}).get(symbol)
+        if halt:
+            raw = [bar for bar in raw if not in_verified_halt(halt, bar["timestamp"])]
         aligned = set(grid)
         bars = [bar for bar in frame_bars(raw, timeframe, sessions, weeks, end, factors, target)
                 if bar["timestamp"] in aligned]

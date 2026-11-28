@@ -7,6 +7,7 @@ from time import time
 from .exchange_sessions import INTRADAY
 from .market_grid import BEIJING
 from .multiframe_input import MIN_HISTORY
+from .native15_store import in_verified_halt
 
 
 def chart_diagnostic(market, daily, symbol, timeframe, schedules, weeks, frame):
@@ -23,6 +24,7 @@ def chart_diagnostic(market, daily, symbol, timeframe, schedules, weeks, frame):
     ).fetchone()[0]
     missing = frame.get("missing_raw")
     info = market.instrument(symbol) or {}
+    halt = market.meta("verified_trading_halts", {}).get(symbol) if reason == "TRADING_HALTED_VERIFIED" else None
     listing = info.get("listing_date")
     capacity = None
     if listing and target:
@@ -59,6 +61,7 @@ def chart_diagnostic(market, daily, symbol, timeframe, schedules, weeks, frame):
                 if eligible else None)
     return dict(reason=reason, target=target, missing_raw=missing, replay_start=frame.get("replay_start"),
                 listing_date=listing, listed_capacity=capacity, zero_raw=list(zero) if zero and zero[0] else None,
+                verified_halt=halt if in_verified_halt(halt, target) else None,
                 factor_day=info.get("factors_day") if reason == "FACTOR_PENDING" else None,
                 source="15m" if minute else "daily", last_bar=last_bar, stage=stage, queue=queue, retry_at=retry_at,
                 requested_at=retry.get("last_attempt"), requested_through=retry.get("target"),

@@ -67,6 +67,31 @@ def test_listing_depth_excludes_incomplete_first_week_and_does_not_request_preli
         assert selected[0] == listing + " 09:45:00" and selected[2] == "B"
 
 
+def test_verified_halt_keeps_security_in_focus_and_blocks_only_known_trading_dates(tmp_path):
+    from addons.lan_ma55.backend.native15_store import in_verified_halt
+
+    sessions = ["2026-11-26", "2026-11-27"]
+    halted = {"from_day": sessions[-1], "through_day": sessions[-1], "notice": "Official announcement"}
+    when = sessions[-1] + " 15:05:00"
+    schedules, weeks = frame_schedules(sessions, when)
+    with NativeOwner(tmp_path / "state.sqlite3") as owner:
+        info = dict(symbol=SYMBOL, name="测试", eligible=True, source_type="stock", raw_tick=.01)
+        owner.refresh_master([info], {"expected": 1}, sessions)
+        with owner.conn:
+            owner.market.set_meta("verified_trading_halts", {SYMBOL: halted})
+            owner.market.factor_response(SYMBOL, [], when, sessions, update_indicators=False)
+        observations = Observations(owner.market, DailyStore(owner.conn))
+        observations.refresh([SYMBOL], sessions, schedules, weeks, when, when)
+        master = owner.market.universe({SYMBOL})
+        rows = observations.rows({"members": {SYMBOL: [BOARD]}}, master, schedules, sessions[-1])
+        assert rows[0]["frames"]["15m"]["status"] == "TRADING_HALTED_VERIFIED"
+        assert rows[0]["frames"]["15m"]["activation"]["state"] == "MISSING"
+        assert observations.needs[SYMBOL, "15m"] is None
+        diagnostic = observations.chart(SYMBOL, "15m", sessions, schedules, weeks)["diagnostic"]
+        assert diagnostic["verified_halt"] == halted
+        assert not in_verified_halt(halted, "2026-11-30 09:45:00")
+
+
 @pytest.mark.parametrize("status", [401, 403, 429])
 def test_ths_rejection_stops_actual_http_and_429_survives_restart(tmp_path, status):
     requests = []

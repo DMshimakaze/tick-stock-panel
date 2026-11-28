@@ -27,6 +27,7 @@ from .multiframe_core.multiframe import TIMEFRAMES, VERSION
 from .native15_owner import NativeOwner
 from .native15_scheduler import task as native_task
 from .native15_shadow import SOURCE as NATIVE_SOURCE
+from .native15_store import in_verified_halt
 from .observations import Observations
 from .request_budget import CollectionStopped, RequestDeferred, RollingBudget
 from .result_publisher import RUNTIME_ID, Publisher, workbench_configs
@@ -422,14 +423,18 @@ class Worker:
                         master = self.store.universe(scope)
                         needs = self.observations.needs
                         cold_allowed = self.cold_budget.delay() == 0
+                        halts = self.store.meta("verified_trading_halts", {})
                         if target:
-                            work = native_task(self.store, master, sessions, target, now,
+                            minute_master = {s: info for s, info in master.items() if not in_verified_halt(halts.get(s), target)}
+                            work = native_task(self.store, minute_master, sessions, target, now,
                                                needs=needs, grid=schedules["15m"], cold_allowed=cold_allowed)
                         metadata = bool(sessions and (not work or work[2] != "A")
                                         and self.update_metadata(scope, now, sessions[-1]))
                         if metadata:
                             work = None
-                        daily = (self.daily.task(master, schedules["daily"], needs, cold_allowed=cold_allowed)
+                        daily_master = {s: info for s, info in master.items()
+                                        if not in_verified_halt(halts.get(s), self.targets["daily"])}
+                        daily = (self.daily.task(daily_master, schedules["daily"], needs, cold_allowed=cold_allowed)
                                  if not metadata and (not work or work[2] == "C") else None)
                         use_daily = daily and (not work or self.repair_turn % 2 == 0)
                         budget = self.collector.budgets["minute"]

@@ -28,6 +28,10 @@ CREATE TABLE IF NOT EXISTS native15_history_progress(
 """
 
 
+def in_verified_halt(halt, at):
+    return bool(halt and at and halt["from_day"] <= at[:10] <= halt["through_day"])
+
+
 class NativeStore(Store):
     source = SOURCE
     source_count = 1
