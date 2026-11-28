@@ -121,6 +121,9 @@ def test_first_completed_bar_after_verified_halt_keeps_the_pinned_replay(tmp_pat
         assert market.instrument(SYMBOL)["latest_completed15"] == recovered
         assert saved["replay_start"] == origin and json.loads(saved["payload"])["status"] == "GAP_IN_REPLAY_WINDOW"
         assert observations.needs[SYMBOL, "15m"] is None
+        diagnostic = observations.chart(SYMBOL, "15m", sessions, resumed, later_weeks)["diagnostic"]
+        assert diagnostic["verified_halt"] == {"from_day": "2026-11-27", "through_day": "2026-11-27"}
+        assert diagnostic["missing_raw"] is None
 
 
 @pytest.mark.parametrize("status", [401, 403, 429])
