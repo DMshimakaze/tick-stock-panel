@@ -109,10 +109,14 @@ export function chartDiagnosis(detail) {
     ? '待后台按现有额度调度' : '未知';
   const request = detail.requested_at ? [STAGES[detail.stage]?.[0], timestamp(detail.requested_at),
     detail.error ? statusText(detail.error) : ''].filter(Boolean).join(' · ') : '未知';
-  const bounds = detail.missing_raw;
+  const interval = bounds => bounds[0] === bounds[1] ? timestamp(bounds[0]) : bounds.map(timestamp).join(' 至 ');
+  const capacity = detail.listed_capacity;
   return `<dl class="mr-facts" aria-label="逐股数据诊断">${[
     pair('当前目标', timestamp(detail.target)), pair('数据状态', statusText(detail.reason)),
-    bounds ? pair('已核实缺柱区间', bounds[0] === bounds[1] ? timestamp(bounds[0]) : bounds.map(timestamp).join(' 至 ')) : '',
+    detail.missing_raw ? pair('已核实缺柱区间', interval(detail.missing_raw)) : '',
+    detail.zero_raw ? pair('本地零成交柱', interval(detail.zero_raw)) : '',
+    capacity ? pair('上市后完成柱上限', `${detail.listing_date} 上市 · ${capacity.listed}/${capacity.required} 根`) : '',
+    detail.factor_day ? pair('已核实因子截至', detail.factor_day) : '',
     detail.replay_start ? pair('固定回放起点', timestamp(detail.replay_start)) : '',
     pair(detail.source === 'daily' ? '最近有效日源' : '最近有效原生 15m', timestamp(detail.last_bar)),
     pair('最近请求', request), pair('最近请求成功', timestamp(detail.last_success)), pair('重试状态', retry),

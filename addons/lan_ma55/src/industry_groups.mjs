@@ -12,29 +12,42 @@ export function industryPath(nodes, key) {
   return path.every((node, i) => node.level === i + 1) ? path : [];
 }
 
-export function industryGroups(items, rowOf, nodes, paths, scope) {
-  const groups = new Map();
-  const depth = scope.kind === 'industry' ? Math.min(3, (scope.level || 2) + 1) : 3;
-  for (const item of items) {
-    const value = paths[rowOf(item).symbol];
-    const path = typeof value === 'string' ? industryPath(nodes, value) : [];
-    const verified = path.length === 3 && (scope.kind !== 'industry' || path.some(node => node.key === scope.key));
-    const branch = verified ? path.slice(0, depth) : [];
-    const leaf = branch.at(-1);
-    const ambiguous = Array.isArray(value) || path.length === 3;
-    const key = leaf?.key || (ambiguous ? 'ambiguous' : 'unclassified');
-    if (!groups.has(key)) groups.set(key, {
-      key, verified, name: leaf?.name || (ambiguous ? '行业归属待核实' : '未分类'),
-      parents: branch.slice(0, -1).map(node => node.name).join(' / '), items: [],
+export function industryGroups(rows, nodes, paths, scope, expanded) {
+  const depth = !scope.key ? 1 :
+    scope.kind === 'industry' && (scope.level === 1 || scope.level === 2) && expanded.has(scope.key) ?
+      scope.level + 1 : null;
+  if (!depth) return null;
+  const entries = rows.map(row => {
+    const value = paths[row.symbol];
+    return { row, path: typeof value === 'string' ? industryPath(nodes, value) : [], ambiguous: Array.isArray(value) };
+  });
+  function partition(items, level) {
+    const groups = new Map();
+    for (const entry of items) {
+      const { path } = entry;
+      const node = path.length === 3 && (!scope.key || path[scope.level - 1]?.key === scope.key) ? path[level - 1] : null;
+      const ambiguous = entry.ambiguous || path.length === 3;
+      const key = node?.key || (ambiguous ? 'ambiguous' : 'unclassified');
+      if (!groups.has(key)) groups.set(key, {
+        key, level, verified: Boolean(node), name: node?.name || (ambiguous ? '行业归属待核实' : '未分类'), items: [],
+      });
+      groups.get(key).items.push(entry);
+    }
+    return [...groups.values()].sort((a, b) => Number(b.verified) - Number(a.verified) ||
+      industryOrder.compare(a.name, b.name) || a.key.localeCompare(b.key)).map(group => {
+      const expandable = group.verified && level < 3;
+      const children = expandable && expanded.has(group.key) ? partition(group.items, level + 1) : null;
+      return { ...group, expandable, children, items: group.items.map(entry => entry.row) };
     });
-    groups.get(key).items.push(item);
   }
-  return [...groups.values()].sort((a, b) => Number(b.verified) - Number(a.verified) ||
-    industryOrder.compare(`${a.parents}/${a.name}`, `${b.parents}/${b.name}`) || a.key.localeCompare(b.key));
+  return partition(entries, depth);
 }
 
-export function groupButton(group, list, collapsed) {
-  return `<button class="mr-group-toggle" type="button" data-${list}-group="${esc(group.key)}" aria-expanded="${!collapsed}">
-    ${icon('chevron')}<strong>${esc(group.name)}</strong>${group.parents ? `<small>${esc(group.parents)}</small>` : ''}
-    <span class="mr-count">${quantity(group.items.length)} 只</span></button>`;
+export function groupButtons(group, collapsed) {
+  return `<div class="mr-matrix-group-actions">
+    <button class="mr-group-toggle" type="button" data-matrix-group="${esc(group.key)}" aria-expanded="${!collapsed}">
+    ${icon('chevron')}<strong>${esc(group.name)}</strong><span class="mr-count">${quantity(group.items.length)} 只</span></button>
+    ${!collapsed && group.expandable ? `<button type="button" data-industry-detail="${esc(group.key)}"
+      aria-label="${esc(group.name)}的下级行业" aria-pressed="${Boolean(group.children)}">
+      ${group.children ? '收起细分' : '细分'}</button>` : ''}</div>`;
 }

@@ -21,8 +21,8 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
   let view = null, lastRaw = null, lastFocus = null, board = '';
   let runtime = null, statusError = '', viewError = '', reason = '';
   let access = activationAccess(null, null), resultPeriod = '15m', resultToday = false, expanded = false, results = [];
-  const parts = new Map(), hiddenAverages = new Set(), collapsedMatrix = new Set(), collapsedResults = new Set();
-  const railClosed = new Set(), eventDetails = new Set();
+  const parts = new Map(), hiddenAverages = new Set(), collapsedMatrix = new Set();
+  const expandedIndustries = new Set(), eventDetails = new Set();
   let catalog, nodes = new Map();
   let selection = null, chart = null, chartSignature = null, filtered = [];
   let loadingChart = false, refreshPending = false, stopped = false, chartGeneration = 0;
@@ -93,7 +93,7 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     const paths = view?.industry_paths || {};
     const options = savedScopes(view?.focus, nodes);
     if (!options.some(item => item.key === board)) board = '';
-    repaint('tabs', scopeButtons(options, board, $('scope-search').value.trim().toLowerCase(), nodes, railClosed));
+    repaint('tabs', scopeButtons(options, board, $('scope-search').value.trim().toLowerCase(), nodes));
     $('filter-period').value = resultPeriod;
     $('matrix').dataset.periodLens = resultPeriod;
     const scope = options.find(item => item.key === board);
@@ -101,11 +101,14 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     const scoped = scopedRows(rows, scope, query);
     access = activationAccess(view, runtime, { statusError, viewError });
     const matching = filterRows(scoped, { state: $('filter').value, period: resultPeriod, order: $('order').value, reason }, access);
-    const groups = industryGroups(matching, row => row, nodes, paths, scope);
-    filtered = groups.flatMap(group => collapsedMatrix.has(group.key) ? [] : group.items);
+    const groups = industryGroups(matching, nodes, paths, scope, expandedIndustries);
+    const detail = action('subgroups');
+    detail.hidden = scope.kind !== 'industry' || ![1, 2].includes(scope.level);
+    detail.dataset.industryDetail = detail.hidden ? '' : scope.key;
+    detail.setAttribute('aria-pressed', String(!detail.hidden && expandedIndustries.has(scope.key)));
     const markup = resultsMarkup(activationResults(scoped, access), access, {
-      timeframe: resultPeriod, today: resultToday, expanded, scope, scopeLabel: query ? `${scope.name} · 搜索结果` : scope.name,
-      nodes, paths, collapsed: collapsedResults, details: eventDetails, eventId: selection?.eventId,
+      timeframe: resultPeriod, today: resultToday, expanded, scopeLabel: query ? `${scope.name} · 搜索结果` : scope.name,
+      details: eventDetails, eventId: selection?.eventId,
     });
     results = markup.entries;
     $('result-list').dataset.expanded = String(expanded);
@@ -117,7 +120,9 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     action('clear-reason').textContent = reason ? `${statusText(reason)} ×` : '';
     const empty = !view ? (viewError ? '观察结果暂不可读' : '等待后台发布观察结果') : rows.length
       ? '没有符合筛选的股票' : '在关注管理中保存板块后显示成分股';
-    repaint('stocks', stockRows(groups, collapsedMatrix, selection?.symbol, empty, access), $('table-wrap'));
+    const matrix = stockRows(matching, groups, collapsedMatrix, selection?.symbol, empty, access);
+    filtered = matrix.visible;
+    repaint('stocks', matrix.markup, $('table-wrap'));
     renderChartContext();
   }
   function navigation() {
@@ -358,16 +363,15 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
     const button = event.target.closest('button');
     if (!button) return;
     const { board: sector, stock, tf, period, act, old, inspect, resultPeriod: chosen,
-      resultWindow, signal, ma, railGroup, matrixGroup, activationGroup, resultDetail, blockPeriod, blockReason } = button.dataset;
+      resultWindow, signal, ma, matrixGroup, industryDetail, resultDetail, blockPeriod, blockReason } = button.dataset;
     if (sector !== undefined) { board = sector; renderTable(); }
     const toggle = (items, key) => { if (!items.delete(key)) items.add(key); renderTable(); };
-    if (railGroup) toggle(railClosed, railGroup);
     if (matrixGroup) toggle(collapsedMatrix, matrixGroup);
-    if (activationGroup) toggle(collapsedResults, activationGroup);
+    if (industryDetail) toggle(expandedIndustries, industryDetail);
     if (resultDetail) toggle(eventDetails, resultDetail);
     if (blockReason && access.usable.includes(blockPeriod)) {
       board = ''; resultPeriod = blockPeriod; reason = blockReason;
-      $('search').value = ''; $('filter').value = 'all'; collapsedMatrix.clear();
+      $('search').value = ''; $('filter').value = 'all'; collapsedMatrix.clear(); expandedIndustries.clear();
       renderTable();
       $('table-wrap').scrollIntoView?.({ block: 'start' });
       $('table-wrap').focus({ preventScroll: true });

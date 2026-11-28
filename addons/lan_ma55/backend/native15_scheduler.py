@@ -19,7 +19,7 @@ def task(store, master, sessions, target, now, *, needs=None, grid=None, cold_al
     clock = time()
     warm_start = grid[max(0, len(grid) - MIN_HISTORY)]
     for symbol, info in master.items():
-        if not info["eligible"]:
+        if not info["eligible"] or (info["listing_date"] and info["listing_date"] > target[:10]):
             continue
         retry = retries.get(symbol, {})
         factor = factors.get(symbol, {})
@@ -48,7 +48,8 @@ def task(store, master, sessions, target, now, *, needs=None, grid=None, cold_al
         if (retry.get("next_eligible", 0) > clock and retry.get("stage") == stage and (
                 stage != "A" or (retry.get("target") or "") >= target)):
             continue
-        groups[stage].append((retry.get("last_attempt") or "", symbol, *bounds))
+        start, end = bounds
+        groups[stage].append((retry.get("last_attempt") or "", symbol, max(start, info["listing_date"] or start), end))
     if not groups:
         return None
     rank = {"A": 0, "F": 1, "B": 1, "C": 2}

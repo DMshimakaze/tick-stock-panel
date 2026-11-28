@@ -62,6 +62,7 @@ export const LAYOUT = `<header class="mr-header">
           `<option value="${tf}">${PERIOD_LABEL[tf]}</option>`).join('')}</select></label>
         <label class="mr-filter">排序 <select data-role="order"><option value="candidate">最近激活</option>
           <option value="symbol">股票代码</option><option value="change">涨跌幅</option></select></label>
+        <button type="button" data-act="subgroups" aria-pressed="false" hidden>按下级行业分组</button>
         <button type="button" data-act="clear-reason" hidden title="清除原因筛选"></button>
       </div><div class="mr-state-legend" aria-label="状态图例">${matrixLegend}</div></div>
     <div class="mr-table mr-focus-list" data-role="table-wrap" tabindex="0" aria-label="六周期股票矩阵"><table>

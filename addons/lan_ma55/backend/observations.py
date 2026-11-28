@@ -237,7 +237,7 @@ class Observations:
         factors, basis = self.reference_basis(symbol, info, target)
         if not schedule or not info:
             reason = "METADATA_PENDING" if schedule else "WAITING_FOR_COMPLETED_TARGET"
-            detail = chart_diagnostic(self.market, self.daily, symbol, timeframe, schedules, {"status": reason})
+            detail = chart_diagnostic(self.market, self.daily, symbol, timeframe, schedules, weeks, {"status": reason})
             return dict(symbol=symbol, timeframe=timeframe, bars=[], events=[], status=reason, basis=basis,
                         expected_end=detail["target"], diagnostic=detail)
         end = schedule[-1]
@@ -277,4 +277,4 @@ class Observations:
                     bars=bars, events=events, status=current.get("status", "WAITING_INPUT"), basis=basis,
                     expected_end=schedule[-1], asof=bars[-1]["timestamp"] if bars else None, grid=visible,
                     event_verified=located if event_id else None, event_invalidated=event_id in invalidated,
-                    diagnostic=chart_diagnostic(self.market, self.daily, symbol, timeframe, schedules, current))
+                    diagnostic=chart_diagnostic(self.market, self.daily, symbol, timeframe, schedules, weeks, current))

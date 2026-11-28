@@ -146,10 +146,7 @@ export const WORKBENCH_CSS = `
 .mr .mr-scope[aria-pressed=true] { color: var(--mr-blue); background: color-mix(in srgb, var(--mr-blue) 9%, transparent); border-color: color-mix(in srgb, var(--mr-blue) 20%, var(--mr-line)); }
 .mr .mr-scope b, .mr .mr-board-name b, .mr .mr-stock-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mr .mr-scope .mr-count { margin-left: auto; }
-.mr .mr-scope-section h3 { color: var(--mr-muted); font-size: 10px; margin: 5px 5px 2px; }
-.mr .mr-scope-children { margin-left: 7px; padding-left: 4px; border-left: 1px solid var(--mr-line); }
-.mr .mr-scope-branch > button { border: 0; background: transparent; padding: 2px 5px; min-height: 22px; font-size: 11px; color: var(--mr-muted); }
-.mr :is([data-rail-group],.mr-group-toggle)[aria-expanded=false] .mr-icon { transform: rotate(-90deg); }
+.mr .mr-group-toggle[aria-expanded=false] .mr-icon { transform: rotate(-90deg); }
 .mr .mr-rail-manage { width: 100%; justify-content: start; color: var(--mr-blue); }
 .mr .mr-matrix { overflow: hidden; }
 .mr .mr-matrix-top { padding: 8px 10px 7px; }
@@ -165,7 +162,6 @@ export const WORKBENCH_CSS = `
 .mr .mr-activation-list[data-expanded=true] { max-height: min(58vh, 490px); }
 .mr .mr-group-toggle { display: flex; gap: 6px; justify-content: flex-start; align-items: center; width: 100%; min-height: 23px;
   background: var(--mr-soft); border-color: transparent; text-align: left; padding: 2px 5px; color: var(--mr-ink); font-size: 11px; }
-.mr .mr-group-toggle small { color: var(--mr-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mr .mr-group-toggle .mr-count { margin-left: auto; white-space: nowrap; }
 .mr .mr-group-toggle .mr-icon { width: 11px; height: 11px; flex: none; }
 .mr .mr-activation-item { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; column-gap: 3px; }
@@ -192,7 +188,10 @@ export const WORKBENCH_CSS = `
 .mr .mr-focus-list thead th { position: sticky; top: 0; z-index: 1; }
 .mr .mr-focus-list :is(th,td) { white-space: nowrap; padding: 3px 6px; }
 .mr .mr-focus-list .mr-matrix-group th { width: auto; height: 25px; padding: 1px 4px; background: color-mix(in srgb, var(--mr-blue) 5%, var(--mr-surface)); }
-.mr .mr-matrix-group .mr-group-toggle { justify-content: flex-start; position: sticky; left: 4px; max-width: min(100%, 92cqw); }
+.mr .mr-matrix-group-actions { display: flex; align-items: center; gap: 4px; position: sticky; left: 4px; max-width: min(100%, 92cqw); }
+.mr .mr-matrix-group-actions > [data-industry-detail] { flex: none; min-height: 23px; padding: 2px 6px; font-size: 11px; }
+.mr .mr-matrix-group[data-level="2"] .mr-matrix-group-actions { padding-left: 13px; }
+.mr .mr-matrix-group[data-level="3"] .mr-matrix-group-actions { padding-left: 26px; }
 .mr .mr-focus-list th { height: 28px; }
 .mr .mr-focus-list td { height: 37px; }
 .mr .mr-focus-list :is(th,td):first-child { width: 18%; padding-left: 10px; }

@@ -2,6 +2,7 @@
 
 import atexit
 import os
+from bisect import bisect_left
 from collections import OrderedDict, defaultdict
 from datetime import timedelta
 from itertools import islice
@@ -88,7 +89,7 @@ class Worker:
         self.minute_limit = min(int(settings.get("minute_requests_per_minute", 8)), 12)
         self.cold_budget = RollingBudget(int(settings.get("cold_requests_per_minute", 2)))
         self.state = dict(
-            version="0.13.8", api_version=1, phase="STARTING", active_operation="IDLE",
+            version="0.13.9", api_version=1, phase="STARTING", active_operation="IDLE",
             backend_scanning=False, rule_version=VERSION, source_id=NATIVE_SOURCE,
             source="TickFlow 15m / 1d", database="user_data/lan_ma55/state.sqlite3",
             database_connected=False, capacities=dict(CAPACITY), error=None,
@@ -531,17 +532,20 @@ class Worker:
             self.owner.set_meta("target", target)
         if stage == "F":
             self.mark_task(stage, "CHECKING_FACTORS", symbols)
-            factors = self.collector.factors(symbols)
+            factors, errors = self.collector.factor_responses(symbols)
             self.store.factor_attempt(symbols, now)
             self.flush_requests(stage)
             for offset in range(0, len(symbols), WRITE_BATCH):
                 self.owner.accept_factors(symbols[offset:offset + WRITE_BATCH], factors, sessions=sessions,
                                           target=target, now=str(now_cn()), live_after=live_after,
-                                          analyze_candidates=False)
+                                          analyze_candidates=False, errors=errors)
                 self.service_commands(sessions, schedules, weeks)
         else:
             self.mark_task(stage, "COLLECTING_NATIVE15", symbols)
-            received, errors = self.collector.fetch(symbols, start, end, cold=stage == "C", count=count)
+            grid = schedules["15m"]
+            index = bisect_left(grid, start) if count == 1 and start == end else 0
+            previous = grid[index - 1] if index else None
+            received, errors = self.collector.fetch(symbols, start, end, cold=stage == "C", count=count, previous=previous)
             self.store.attempt(symbols, end, now, stage)
             self.flush_requests(stage)
             for offset in range(0, len(symbols), WRITE_BATCH):

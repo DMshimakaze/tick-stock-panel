@@ -25,6 +25,48 @@ SYMBOL = "600000.SH"
 BOARD = "industry:881001.TI"
 
 
+def test_missing_factors_keep_prior_verified_basis_without_advancing_it(tmp_path):
+    sessions = ["2026-11-26", "2026-11-27"]
+    old, new = [stamp(day, 900) for day in sessions]
+    factors = [{"day": "2026-11-26", "ex_factor": 1.1}]
+    with NativeOwner(tmp_path / "state.sqlite3") as owner:
+        info = dict(symbol=SYMBOL, name="测试", eligible=True, source_type="stock", raw_tick=.01)
+        owner.refresh_master([info], {"expected": 1}, sessions)
+        with owner.conn:
+            owner.market.factor_response(SYMBOL, factors, old, sessions, update_indicators=False)
+        owner.accept_factors([SYMBOL], {SYMBOL: None}, errors={SYMBOL: "FACTOR_KEY_MISSING"},
+                             sessions=sessions, target=new, now=new, live_after=new, analyze_candidates=False)
+        saved = owner.market.instrument(SYMBOL)
+        observations = Observations(owner.market, DailyStore(owner.conn))
+        assert saved["factors_day"] == sessions[0]
+        assert observations.reference_basis(SYMBOL, saved, old)[0] == factors
+        assert observations.reference_basis(SYMBOL, saved, new) == (None, None)
+        retry = owner.conn.execute("SELECT error_type,verified_at FROM native15_factor_retry WHERE symbol=?", (SYMBOL,)).fetchone()
+        assert tuple(retry) == ("FACTOR_KEY_MISSING", old)
+
+
+def test_listing_depth_excludes_incomplete_first_week_and_does_not_request_prelisting_slots(tmp_path):
+    from addons.lan_ma55.backend.native15_scheduler import task
+
+    sessions = [str(date(2026, 11, 2) + timedelta(days=i)) for i in (0, 1, 2, 3, 4, 7, 8, 9, 10, 11)]
+    listing = "2026-11-04"
+    target = stamp(sessions[-1], 900)
+    now = sessions[-1] + " 15:05:00"
+    schedules, weeks = frame_schedules(sessions, now)
+    with NativeOwner(tmp_path / "state.sqlite3") as owner:
+        info = dict(symbol=SYMBOL, name="测试", eligible=True, source_type="stock", raw_tick=.01, listing_date=listing)
+        owner.refresh_master([info], {"expected": 1}, sessions)
+        with owner.conn:
+            owner.market.factor_response(SYMBOL, [], now, sessions, update_indicators=False)
+        observations = Observations(owner.market, DailyStore(owner.conn))
+        diagnostic = observations.chart(SYMBOL, "weekly", sessions, schedules, weeks)["diagnostic"]
+        assert diagnostic["listing_date"] == listing
+        assert diagnostic["listed_capacity"] == {"listed": 1, "required": 150}
+        master = owner.market.universe({SYMBOL})
+        selected = task(owner.market, master, sessions, target, now, grid=schedules["15m"])
+        assert selected[0] == listing + " 09:45:00" and selected[2] == "B"
+
+
 @pytest.mark.parametrize("status", [401, 403, 429])
 def test_ths_rejection_stops_actual_http_and_429_survives_restart(tmp_path, status):
     requests = []

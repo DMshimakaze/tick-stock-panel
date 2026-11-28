@@ -29,6 +29,27 @@ class SourceError(Exception):
         )
 
 
+def factor_events(entries):
+    if not isinstance(entries, list):
+        return None, "INVALID_FACTOR_SCHEMA"
+    days = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            return None, "INVALID_FACTOR_EVENT"
+        timestamp, factor = entry.get("timestamp"), entry.get("ex_factor")
+        if (type(timestamp) not in (int, float) or not isfinite(timestamp) or timestamp <= 0
+                or type(factor) not in (int, float) or not isfinite(factor) or factor <= 0):
+            return None, "INVALID_FACTOR_EVENT"
+        try:
+            day = datetime.fromtimestamp(timestamp / 1000, BEIJING).date().isoformat()
+        except (ValueError, OverflowError, OSError):
+            return None, "INVALID_FACTOR_EVENT"
+        if day in days and days[day] != factor:
+            return None, "CONFLICTING_FACTOR_EVENTS"
+        days[day] = factor
+    return [dict(day=day, ex_factor=days[day]) for day in sorted(days)], None
+
+
 class Collector:
     def __init__(
         self,
@@ -258,7 +279,7 @@ class Collector:
         bars, errors = {}, {}
         for symbol in symbols:
             if data.get(symbol) is None:
-                errors[symbol] = "SOURCE_UNAVAILABLE"
+                errors[symbol] = "SOURCE_SYMBOL_NULL" if symbol in data else "SOURCE_SYMBOL_OMITTED"
                 continue
             try:
                 bars[symbol] = normalize_daily(data[symbol], start, end)
@@ -295,38 +316,40 @@ class Collector:
                     source_asof=max(actual, default=None))
 
     def factors(self, symbols):
+        return self.factor_responses(symbols)[0]
+
+    def factor_responses(self, symbols):
         if not symbols:
-            return {}
-        data = self.request(
-            lambda: self.tf.klines.ex_factors(
-                symbols, as_dataframe=False, batch_size=100, max_workers=1
-            )
-        )
-        result = {}
-        for symbol in symbols:
-            entries = data.get(symbol)
-            if entries is None:
-                result[symbol] = None
-                continue
-            if any(
-                not isinstance(e["ex_factor"], (int, float))
-                or not isfinite(e["ex_factor"])
-                or e["ex_factor"] <= 0
-                for e in entries
-            ):
-                result[symbol] = None
-                self.metrics["invalid_factor_symbols"] += 1
-                continue
-            result[symbol] = [
-                dict(
-                    day=str(
-                        datetime.fromtimestamp(e["timestamp"] / 1000, BEIJING).date()
-                    ),
-                    ex_factor=e["ex_factor"],
+            return {}, {}
+        try:
+            data = self.request(
+                lambda: self.tf.klines.ex_factors(
+                    symbols, as_dataframe=False, batch_size=100, max_workers=1
                 )
-                for e in entries
-            ]
-        return result
+            )
+        except (KeyError, TypeError, json.JSONDecodeError):
+            data = None
+        result, errors = {}, {}
+        for symbol in symbols:
+            if not isinstance(data, dict):
+                events, error = None, "INVALID_FACTOR_ENVELOPE"
+            elif symbol not in data:
+                events, error = None, "FACTOR_KEY_MISSING"
+            elif data[symbol] is None:
+                events, error = None, "FACTOR_NULL_RESPONSE"
+            else:
+                events, error = factor_events(data[symbol])
+                self.metrics["invalid_factor_symbols"] += int(error is not None)
+            result[symbol] = events
+            if error:
+                errors[symbol] = error
+        if self.observations and self.observations[-1]["capability"] == "adj_factor":
+            self.observations[-1]["batch_metrics"] = dict(
+                verified_events=sum(bool(events) for events in result.values()),
+                verified_empty=sum(events == [] for events in result.values()),
+                failures=dict(Counter(errors.values())),
+            )
+        return result, errors
 
     def fetch_five(self, symbols, start, end, *, cold=False):
         """Explicit offline archive comparison only; never used by the worker."""
@@ -365,15 +388,19 @@ class Collector:
                 errors[symbol] = dict(code=str(exc), timestamps=None)
         return valid, errors
 
-    def fetch(self, symbols, start, end, *, cold=False, count=MAX_NATIVE_BARS):
+    def fetch(self, symbols, start, end, *, cold=False, count=MAX_NATIVE_BARS, previous=None):
         """One production native15 HTTP, isolated validation per security."""
         if not 1 <= len(symbols) <= MAX_BATCH_SYMBOLS or not 1 <= count <= MAX_NATIVE_BARS:
             raise ValueError("Native15 batch limited to 100 symbols / 1280 bars")
         cutoff = min(end, str(now_cn() - timedelta(seconds=75)))
         began = monotonic()
+        # The compact feed can return invalid OHLC for an isolated slot.
+        # Request the preceding completed slot as context and admit only the planned window.
+        request_count = 2 if previous and start == end and count == 1 else count
+        request_start = previous if request_count != count else start
         data = self.request(lambda: self.tf.klines.batch(
-            symbols, period="15m", adjust="none", start_time=as_ms(start),
-            end_time=as_ms(end), count=count, as_dataframe=False,
+            symbols, period="15m", adjust="none", start_time=as_ms(request_start),
+            end_time=as_ms(end), count=request_count, as_dataframe=False,
             batch_size=100, max_workers=1, show_progress=False,
         ), cold=cold)
         decoded = monotonic()
@@ -381,8 +408,9 @@ class Collector:
             raise ValueError("UNREQUESTED_SYMBOL")
         valid, errors = {}, {}
         for symbol in symbols:
-            if symbol not in data:
-                errors[symbol] = dict(code="SOURCE_UNAVAILABLE", timestamps=None)
+            if data.get(symbol) is None:
+                errors[symbol] = dict(code="SOURCE_SYMBOL_NULL" if symbol in data else "SOURCE_SYMBOL_OMITTED",
+                                      timestamps=None)
                 continue
             try:
                 rows, diagnostic = normalize_native(data[symbol], start, cutoff)
@@ -393,7 +421,7 @@ class Collector:
                     self.metrics["invalid_native15_rows"] += len(diagnostic["invalid"])
             except (KeyError, TypeError, ValueError, OverflowError) as exc:
                 errors[symbol] = dict(code=str(exc) if isinstance(exc, ValueError) else "INVALID_NATIVE15_SCHEMA", timestamps=None)
-        self.record_bars("15m", count, valid, errors, began, decoded)
+        self.record_bars("15m", request_count, valid, errors, began, decoded)
         return valid, errors
 
     def close(self):

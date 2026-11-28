@@ -385,22 +385,24 @@ test('all six SMAs retain the same bar timestamps and break at an unavailable sl
   }
 });
 
-test('grouped lists keep separate navigation, shared period and actionable missing-state details', async () => {
+test('saved directions stay flat while the full matrix can expand industry levels', async () => {
   const dom = new JSDOM('<div id="mount"></div>', { url: 'http://localhost/', pretendToBeVisual: true });
   const { document } = dom.window;
   const day = time.slice(0, 10), [first, missing, last, unknown] = ['300001.SZ', '300002.SZ', '300003.SZ', '300004.SZ'];
   const industry = ['BK1201', 'BK1036', 'BK1325'].map((code, i) => ({ kind: 'industry', level: i + 1,
     key: `dc:industry:${code}.DC`, name: ['电子', '半导体', '半导体材料'][i] }));
   industry.forEach((node, i) => { node.parent = industry[i - 1]?.key; });
-  const leaf = industry.at(-1), concept = { ...board, symbols: [missing, unknown] };
-  const members = { [first]: [leaf.key], [missing]: [leaf.key, board.key], [last]: [leaf.key], [unknown]: [board.key] };
+  const [root, branch, leaf] = industry, concept = { ...board, symbols: [missing, unknown] };
+  const members = { [first]: [leaf.key, branch.key], [missing]: [leaf.key, branch.key, board.key],
+    [last]: [leaf.key, branch.key], [unknown]: [board.key] };
   const targets = Object.fromEntries(TIMEFRAMES.map(tf => [tf, time]));
   const entries = Object.keys(members).map((symbol, i) => ({ ...row(symbol, `证券${i + 1}`), sectors: members[symbol],
     frames: { ...frames, '15m': { expected_end: time, status: i % 2 === 0 ? 'READY' : 'GAP_IN_REPLAY_WINDOW',
       activation: { state: i % 2 === 0 ? 'ACTIVATED' : 'MISSING', events: i % 2 === 0 ? [{ id: symbol, at: time }] : [] } },
       '30m': { expected_end: time, status: 'WAITING_INPUT', activation: { state: 'PENDING', events: [] } } } }));
   const view = { result_id: 'r1', summary: { ...summary, expected: 4, market_day: day }, activation_targets: targets,
-    focus: { ...empty, revision: 1, members, catalog: [...industry, concept], sectors: [{ ...leaf, symbols: [first, missing, last] }, concept],
+    focus: { ...empty, revision: 1, members, catalog: [...industry, concept],
+      sectors: [{ ...leaf, symbols: [first, missing, last] }, { ...branch, symbols: [first, missing, last] }, concept],
       groups: [{ id: 'overlap', name: '交叉组', boards: [leaf.key, board.key] }] },
     industry_paths: { [first]: leaf.key, [missing]: leaf.key, [last]: leaf.key }, rows: entries };
   const runtime = { result_id: 'r1', focus_revision: 1, taxonomy_run: 'verified', market_day: day, scope_count: 4,
@@ -428,13 +430,33 @@ test('grouped lists keep separate navigation, shared period and actionable missi
   const symbols = () => [...document.querySelectorAll('.mr-stock-name[data-stock]')].map(x => x.dataset.stock);
   try {
     await tick();
+    assert.equal(find(`[data-board="${root.key}"]`), null);
+    assert.equal(find('[data-activation-group]'), null);
+    assert.match(find('[data-matrix-group="unclassified"]').textContent, /未分类/);
+    assert.equal(document.querySelectorAll('.mr-matrix-group[data-level="1"]').length, 2);
+    assert.equal(find(`[data-matrix-group="${leaf.key}"]`), null);
+    find(`[data-industry-detail="${root.key}"]`).click();
+    assert.ok(find(`[data-matrix-group="${branch.key}"]`));
+    assert.equal(find(`[data-matrix-group="${leaf.key}"]`), null);
+    find(`.mr-matrix-group [data-industry-detail="${branch.key}"]`).click();
+    assert.ok(find(`[data-matrix-group="${leaf.key}"]`));
+    find(`[data-matrix-group="${root.key}"]`).click();
+    assert.deepEqual(symbols(), [unknown]);
+    find(`[data-matrix-group="${root.key}"]`).click();
+    find(`[data-industry-detail="${root.key}"]`).click();
+    find(`[data-board="${leaf.key}"]`).click();
+    assert.equal(find('[data-matrix-group]'), null);
+    assert.deepEqual(new Set(symbols()), new Set([first, missing, last]));
+    find(`[data-board="${branch.key}"]`).click();
+    if (find('[data-act="subgroups"]').getAttribute('aria-pressed') === 'true') find('[data-act="subgroups"]').click();
+    assert.equal(find('[data-matrix-group]'), null);
+    find('[data-act="subgroups"]').click();
+    assert.ok(find(`[data-matrix-group="${leaf.key}"]`));
     find('[data-board="group:overlap"]').click();
     assert.equal(new Set(symbols()).size, 4);
     assert.equal(symbols().length, 4);
-    assert.match(find('[data-matrix-group="unclassified"]').textContent, /未分类/);
-    find(`[data-matrix-group="${leaf.key}"]`).click();
-    assert.deepEqual(symbols(), [unknown]);
-    find(`[data-matrix-group="${leaf.key}"]`).click();
+    assert.equal(find('[data-matrix-group]'), null);
+    assert.equal(requests.length, 0);
     find(`[data-signal="${first}"]`).click();
     await tick();
     find('[data-act="preview"]').click();
@@ -443,6 +465,7 @@ test('grouped lists keep separate navigation, shared period and actionable missi
     await tick();
     assert.equal(requests.at(-1).symbol, last);
     find(`[data-board="${board.key}"]`).click();
+    assert.equal(find('[data-matrix-group]'), null);
     assert.match(find('[data-role="nav-context"]').textContent, /不在当前范围/);
     assert.equal(find('[data-act="previous"]').disabled, true);
     find('[data-board=""]').click();

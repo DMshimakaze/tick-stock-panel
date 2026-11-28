@@ -98,10 +98,12 @@ class NativeStore(Store):
                                   "last_attempt=excluded.last_attempt,next_eligible=excluded.next_eligible,error_type=excluded.error_type",
                                   (symbol, attempts, now, time()+wait, error))
 
-    def factor_response(self, symbol, events, now, sessions, *, update_indicators=True):
+    def factor_response(self, symbol, events, now, sessions, *, update_indicators=True, error="MISSING_RESPONSE"):
         info = self.instrument(symbol)
         if events is None:
-            self.factor_failed([symbol], now, "MISSING_RESPONSE")
+            self.factor_failed([symbol], now, error)
+            if info["factor_coverage"] == "EXPLICIT":
+                return False
             changed = info["factor_coverage"] != "MISSING"
             info.update(factor_coverage="MISSING", revision=info["revision"]+int(changed))
         else:

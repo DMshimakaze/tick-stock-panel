@@ -101,11 +101,13 @@ class NativeOwner(UnifiedStore):
             self.conn.rollback()
             raise
 
-    def accept_factors(self, symbols, factors, *, sessions, target, now, live_after, analyze_candidates=True):
+    def accept_factors(self, symbols, factors, *, sessions, target, now, live_after, analyze_candidates=True, errors=None):
+        errors = errors or {}
         with self.conn:
             self.conn.execute("BEGIN IMMEDIATE")
             changed = [s for s in symbols if self.market.factor_response(
-                s, factors.get(s), now, sessions, update_indicators=analyze_candidates)]
+                s, factors.get(s), now, sessions, update_indicators=analyze_candidates,
+                error=errors.get(s, "MISSING_RESPONSE"))]
             if analyze_candidates:
                 self.analyze(changed, sessions, target, now, live_after, replay=True)
             self.market.set_meta("last_factor_check", now)

@@ -15,7 +15,8 @@ def normalize_native(data, start, end):
         raise ValueError("TRUNCATED_OR_MISALIGNED_NATIVE15")
     if any(type(t) not in (int, float) or not isfinite(t) for t in stamps):
         raise ValueError("INVALID_NATIVE15_TIMESTAMP")
-    keep = [i for i, stamp in enumerate(stamps) if stamp <= as_ms(end)]
+    lower, upper = as_ms(start), as_ms(end)
+    keep = [i for i, stamp in enumerate(stamps) if lower <= stamp <= upper]
     selected = {k: [values[i] for i in keep] for k, values in data.items() if k in ("timestamp", *FIELDS)}
     # Reject malformed rows before compact lots are multiplied by 100.
     for key in FIELDS:
@@ -28,7 +29,7 @@ def normalize_native(data, start, end):
     if any(wall(t).minute % 15 for t in (*rows, *invalid)):
         raise ValueError("NATIVE15_NOT_CLOSE_LABELLED")
     return [dict(combined([r], t, SOURCE, 1), source_proof=PROOF) for t, r in sorted(rows.items())], dict(
-        invalid=invalid, unfinished=len(stamps) - len(keep), source_count=1,
+        invalid=invalid, unfinished=sum(stamp > upper for stamp in stamps), source_count=1,
         completeness=PROOF, production_admitted=True,
     )
 

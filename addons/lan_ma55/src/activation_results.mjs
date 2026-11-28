@@ -1,6 +1,5 @@
 import { escapeHtml as esc, icon, price, quantity } from './presentation.mjs';
 import { PERIOD_LABEL, TIMEFRAMES } from './workbench_data.mjs';
-import { groupButton, industryGroups } from './industry_groups.mjs';
 
 const INTRADAY = TIMEFRAMES.slice(0, 4);
 export const STATE_LABEL = { ACTIVATED: '激活', INACTIVE: '未激活', PENDING: '待算', MISSING: '缺数据' };
@@ -49,8 +48,7 @@ export function activationResults(rows, access) {
 const when = time => time?.slice(5, 16) || '—';
 const isIntraday = timeframe => INTRADAY.includes(timeframe);
 
-export function resultsMarkup(frames, access, { timeframe, today, expanded, scope, scopeLabel,
-  nodes, paths, collapsed, details, eventId }) {
+export function resultsMarkup(frames, access, { timeframe, today, expanded, scopeLabel, details, eventId }) {
   const data = frames[timeframe];
   const useToday = today && isIntraday(timeframe);
   const list = useToday ? data.today : data.latest;
@@ -75,7 +73,6 @@ export function resultsMarkup(frames, access, { timeframe, today, expanded, scop
     <button type="button" data-result-window="today" aria-pressed="${today}">今日</button></div>` : '';
   const expand = list.length ? `<button type="button" data-act="expand-results" aria-expanded="${expanded}">
     ${expanded ? '收起' : '展开全部'}${icon('chevron')}</button>` : '';
-  const groups = industryGroups(list, item => item.row, nodes, paths, scope);
   const signalRow = ({ row, events }) => {
     const event = events.at(-1);
     const mode = event.mode === 'REPLAY' ? '补算' : event.mode === 'DELAYED' ? '延迟' : '';
@@ -95,12 +92,6 @@ export function resultsMarkup(frames, access, { timeframe, today, expanded, scop
       <button type="button" class="mr-icon-button mr-event-info" data-result-detail="${esc(row.symbol)}" aria-expanded="${open}"
         aria-label="${esc(row.name)} 确认详情${events.length > 1 ? `，共 ${events.length} 次` : ''}">${events.length > 1 ? `<small>${events.length}</small>` : ''}${icon('chevron')}</button>${detail}</div>`;
   };
-  const entries = groups.map(group => {
-    const closed = collapsed.has(group.key);
-    return `<div class="mr-activation-group">${groupButton(group, 'activation', closed)}
-      ${closed ? '' : group.items.map(signalRow).join('')}</div>`;
-  }).join('');
   return { tabs, controls: `<span class="mr-meta">${esc(meta)}</span>${toggle}${expand}`,
-    list: entries || `<span class="mr-meta">${esc(empty)}</span>`,
-    entries: groups.flatMap(group => collapsed.has(group.key) ? [] : group.items) };
+    list: list.length ? list.map(signalRow).join('') : `<span class="mr-meta">${esc(empty)}</span>`, entries: list };
 }

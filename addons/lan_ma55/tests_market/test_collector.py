@@ -47,6 +47,8 @@ def test_real_sdk_shape_and_one_bad_symbol_does_not_block_others(tmp_path):
 
 
 def test_missing_factor_is_not_explicit_empty(tmp_path):
+    stamp = as_ms("2026-11-12")
+    event = {"timestamp": stamp, "ex_factor": 1.2}
     c = source(
         tmp_path,
         lambda r: httpx.Response(
@@ -54,17 +56,67 @@ def test_missing_factor_is_not_explicit_empty(tmp_path):
             json={
                 "data": {
                     "600000.SH": [],
-                    "000001.SZ": [{"timestamp": 1, "ex_factor": -1}],
+                    "000001.SZ": [{"timestamp": stamp, "ex_factor": -1}],
+                    "920001.BJ": [event, event],
+                    "873001.BJ": None,
+                    "920179.BJ": [event, {**event, "ex_factor": 1.3}],
+                    "603893.SH": [{"ex_factor": 2}],
+                    "688071.SH": {"timestamp": stamp},
                 }
             },
         ),
     )
     try:
-        assert c.factors(["600000.SH", "000001.SZ", "688827.SH"]) == {
-            "600000.SH": [],
-            "000001.SZ": None,
-            "688827.SH": None,
+        result, errors = c.factor_responses([
+            "600000.SH", "000001.SZ", "688827.SH", "920001.BJ", "873001.BJ",
+            "920179.BJ", "603893.SH", "688071.SH",
+        ])
+        assert result["600000.SH"] == []
+        assert result["920001.BJ"] == [{"day": "2026-11-12", "ex_factor": 1.2}]
+        assert {s for s, events in result.items() if events is None} == errors.keys()
+        assert errors == {
+            "000001.SZ": "INVALID_FACTOR_EVENT",
+            "688827.SH": "FACTOR_KEY_MISSING",
+            "873001.BJ": "FACTOR_NULL_RESPONSE",
+            "920179.BJ": "CONFLICTING_FACTOR_EVENTS",
+            "603893.SH": "INVALID_FACTOR_EVENT",
+            "688071.SH": "INVALID_FACTOR_SCHEMA",
         }
+        assert c.metrics["http_requests"] == 1
+    finally:
+        c.close()
+
+
+def test_factor_invalid_envelope_does_not_fail_the_owner(tmp_path):
+    c = source(tmp_path, lambda request: httpx.Response(200, json={"unexpected": []}))
+    try:
+        assert c.factor_responses(["600000.SH"]) == ({"600000.SH": None}, {"600000.SH": "INVALID_FACTOR_ENVELOPE"})
+    finally:
+        c.close()
+
+
+def test_native_single_slot_uses_previous_completed_slot_without_admitting_it(tmp_path):
+    prior, target = "2026-11-26 15:00:00", "2026-11-27 09:45:00"
+    calls = []
+
+    def reply(request):
+        params = request.url.params
+        calls.append((params["start_time"], params["end_time"], params["count"]))
+        warm = params["start_time"] == str(as_ms(prior))
+        compact = dict(timestamp=[as_ms(prior), as_ms(target)] if warm else [as_ms(target)],
+                       open=["bad preceding row", 10] if warm else [10.000000000000002],
+                       low=[10, 10] if warm else [10.000000000000004], high=[11, 11] if warm else [11],
+                       close=[11, 11] if warm else [11], volume=[2, 2] if warm else [2])
+        return httpx.Response(200, json={"data": {"920001.BJ": compact}})
+
+    c = source(tmp_path, reply)
+    try:
+        _, errors = c.fetch(["920001.BJ"], target, target, count=1)
+        assert errors["920001.BJ"]["timestamps"] == [target]
+        bars, errors = c.fetch(["920001.BJ"], target, target, count=1, previous=prior)
+        assert errors == {} and list(bars["920001.BJ"]) == [target]
+        assert calls == [(str(as_ms(target)), str(as_ms(target)), "1"), (str(as_ms(prior)), str(as_ms(target)), "2")]
+        assert c.metrics["collection_requests"] == 2
     finally:
         c.close()
 
@@ -145,7 +197,7 @@ def test_native_partial_batch_distinguishes_omitted_and_explicit_empty(tmp_path)
     try:
         valid,errors=c.fetch(['600000.SH','000001.SZ'],at,at)
         assert valid=={'600000.SH':{}}
-        assert errors=={'000001.SZ':dict(code='SOURCE_UNAVAILABLE',timestamps=None)}
+        assert errors=={'000001.SZ':dict(code='SOURCE_SYMBOL_OMITTED',timestamps=None)}
         # Omission/empty alone carries no suspension or delisting identity.
         assert 'suspend' not in str(errors).lower()
     finally:

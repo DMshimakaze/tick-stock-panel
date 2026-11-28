@@ -1,7 +1,7 @@
 import { escapeHtml as esc, icon, kindBadge, kindOf, price, quantity, signed } from './presentation.mjs';
 import { normalizedTime, PERIOD_LABEL, statusText, TIMEFRAMES } from './workbench_data.mjs';
 import { frameActivation, matrixSignal, STATE_LABEL } from './activation_results.mjs';
-import { groupButton, industryPath } from './industry_groups.mjs';
+import { groupButtons, industryPath } from './industry_groups.mjs';
 
 export const short = value => normalizedTime(value).slice(0, 16) || '—';
 
@@ -41,36 +41,10 @@ function scopeButton(item, selected) {
   </div>`;
 }
 
-export function scopeButtons(scopes, selected, query, nodes, closed) {
+export function scopeButtons(scopes, selected, query, nodes) {
   const matches = scopes.slice(1).filter(scope => [scope.name, scope.key, ...(scope.aliases || []),
     ...industryPath(nodes, scope.key).map(node => node.name)].some(value => value.toLowerCase().includes(query)));
-  const industries = new Map(), unresolved = [];
-  for (const item of matches.filter(scope => scope.kind === 'industry')) {
-    const path = industryPath(nodes, item.key);
-    if (!path.length) unresolved.push(scopeButton(item, selected));
-    let children = industries;
-    for (const node of path) {
-      if (!children.has(node.key)) children.set(node.key, { node, children: new Map() });
-      const branch = children.get(node.key);
-      if (node.key === item.key) branch.item = item;
-      children = branch.children;
-    }
-  }
-  const tree = branches => [...branches.values()].map(({ node, item, children }) => {
-    if (!children.size) return scopeButton(item, selected);
-    const open = query || !closed.has(node.key);
-    return `<div class="mr-scope-branch"><button type="button" data-rail-group="${esc(node.key)}" aria-expanded="${Boolean(open)}">
-      ${icon('chevron')}${esc(node.name)}</button>${item ? scopeButton(item, selected) : ''}
-      ${open ? `<div class="mr-scope-children">${tree(children)}</div>` : ''}</div>`;
-  }).join('');
-  const sections = [
-    ['行业', tree(industries) + unresolved.join('')],
-    ['概念', matches.filter(item => item.kind === 'concept').map(item => scopeButton(item, selected)).join('')],
-    ['题材', matches.filter(item => item.kind === 'theme').map(item => scopeButton(item, selected)).join('')],
-    ['自定义组', matches.filter(item => item.kind === 'groups').map(item => scopeButton(item, selected)).join('')],
-  ];
-  return scopeButton(scopes[0], selected) + sections.map(([name, body]) => body ?
-    `<section aria-label="${name}" class="mr-scope-section"><h3>${name}</h3>${body}</section>` : '').join('');
+  return [scopes[0], ...matches].map(item => scopeButton(item, selected)).join('');
 }
 
 export function scopedRows(rows, scope, query) {
@@ -89,8 +63,10 @@ export function filterRows(rows, { state, period, order, reason }, access) {
         : 0) || a.symbol.localeCompare(b.symbol));
 }
 
-export function stockRows(groups, collapsed, selected, empty, access) {
+export function stockRows(rows, groups, collapsed, selected, empty, access) {
+  const visible = [];
   const rowMarkup = row => {
+    visible.push(row);
     const symbol = esc(row.symbol), name = esc(row.name);
     const top = row.levels?.pressures?.[0], ref = row.reference, change = ref?.change_pct;
     const cells = TIMEFRAMES.map(tf => {
@@ -110,9 +86,11 @@ export function stockRows(groups, collapsed, selected, empty, access) {
       ${cells}<td class="mr-price">${top ? `<small>${PERIOD_LABEL[top.timeframe]}</small> ${price(top.ma55, row.raw_tick)}
         <span class="mr-code">${signed(top.distance_pct)}</span>` : '—'}</td></tr>`;
   };
-  return groups.map(group => {
+  const renderGroups = items => items.map(group => {
     const closed = collapsed.has(group.key);
-    return `<tr class="mr-matrix-group"><th colspan="9">${groupButton(group, 'matrix', closed)}</th></tr>` +
-      (closed ? '' : group.items.map(rowMarkup).join(''));
-  }).join('') || `<tr><td class="mr-empty" colspan="9">${esc(empty)}</td></tr>`;
+    return `<tr class="mr-matrix-group" data-level="${group.level}"><th colspan="9">${groupButtons(group, closed)}</th></tr>` +
+      (closed ? '' : group.children ? renderGroups(group.children) : group.items.map(rowMarkup).join(''));
+  }).join('');
+  const markup = groups ? renderGroups(groups) : rows.map(rowMarkup).join('');
+  return { markup: markup || `<tr><td class="mr-empty" colspan="9">${esc(empty)}</td></tr>`, visible };
 }
