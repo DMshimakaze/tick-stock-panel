@@ -457,6 +457,7 @@ def test_completed_minute_reaches_analysis_before_older_daily_weekly_work(tmp_pa
 
     worker = worker_at(tmp_path, lambda _: httpx.Response(200, json={"active_id": None}))
     t, seen = "2026-11-27 15:01:15", []
+    worker.targets = dict.fromkeys(("15m", "daily"), "2026-11-27 15:00:00")
     with sqlite3.connect(":memory:") as db:
         db.execute("CREATE TABLE native15_timing(at TEXT,stage TEXT,symbols INTEGER,scan_ms REAL)")
         worker.owner = SimpleNamespace(conn=db)

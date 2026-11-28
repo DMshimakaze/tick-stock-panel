@@ -348,7 +348,10 @@ class Worker:
             return
         # At the close the daily/weekly replays can take much longer than the
         # new 15m result. Commit and publish the minutes before those replays.
-        minute = list(islice((s for s, frames in self.analyze_queue.items() if "15m" in frames), ANALYSIS_BATCH))
+        target = self.targets.get("15m")
+        minute = []
+        if target and target == self.targets.get("daily"):
+            minute = list(islice((s for s, frames in self.analyze_queue.items() if "15m" in frames), ANALYSIS_BATCH))
         symbols = minute or list(islice(self.analyze_queue, ANALYSIS_BATCH))
         grouped = defaultdict(list)
         for symbol in symbols:
