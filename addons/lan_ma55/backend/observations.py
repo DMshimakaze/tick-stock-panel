@@ -236,7 +236,10 @@ class Observations:
         info = self.market.instrument(symbol)
         factors, basis = self.reference_basis(symbol, info, target)
         if not schedule or not info:
-            return dict(symbol=symbol, timeframe=timeframe, bars=[], events=[], status="WAITING_INPUT", basis=basis)
+            reason = "METADATA_PENDING" if schedule else "WAITING_FOR_COMPLETED_TARGET"
+            detail = chart_diagnostic(self.market, self.daily, symbol, timeframe, schedules, {"status": reason})
+            return dict(symbol=symbol, timeframe=timeframe, bars=[], events=[], status=reason, basis=basis,
+                        expected_end=detail["target"], diagnostic=detail)
         end = schedule[-1]
         if anchor_event and anchor_event < end:
             pos = bisect_left(schedule, anchor_event)

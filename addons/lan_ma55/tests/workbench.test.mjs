@@ -459,6 +459,9 @@ test('grouped lists keep separate navigation, shared period and actionable missi
     find('[data-result-period="30m"]').click();
     const lens = find('[data-role="filter-period"]');
     assert.equal(lens.value, '30m');
+    find(`[data-stock="${first}"][data-tf="30m"][data-state="PENDING"]`).click();
+    await tick();
+    assert.match(find('[data-role="stock-diagnostic"]').textContent, /2026-11-20 15:00:00.*等待有效数据/s);
     lens.value = '15m'; lens.dispatchEvent(new dom.window.Event('change'));
     assert.equal(find('[data-result-period="15m"]').getAttribute('aria-pressed'), 'true');
   } finally { dispose(); dom.window.close(); }

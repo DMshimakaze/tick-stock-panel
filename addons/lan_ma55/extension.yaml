@@ -2,7 +2,7 @@ format: tick-extension-package
 format_version: 1
 id: lan.ma55
 display_name: MA55 板块观察
-version: 0.13.7
+version: 0.13.8
 extension_api_version: 1
 author: DMshimakaze
 description: 东财三级行业、概念和题材，六周期 MA55 结构与同页 K 线观察。

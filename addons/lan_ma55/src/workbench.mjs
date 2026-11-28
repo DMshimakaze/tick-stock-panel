@@ -207,8 +207,10 @@ export function mountWorkbench(el, ctx, { makeChart = createWorkbenchChart, inte
         data.event_invalidated ? '所选事件经复核已失效' : data.event_verified === false ? '所选事件待核实' : '',
       ].filter(Boolean).join(' · ') : reason || '等待完成 K 线';
       const awaitingView = source === 'focus' && !access.usable.includes(timeframe);
-      $('stock-diagnostic').innerHTML = chartDiagnosis(data.diagnostic || (awaitingView ? {
-        target: access.targets[timeframe] || data.expected_end, reason: 'WAITING_FOR_REVIEW',
+      const published = source === 'focus' && view?.rows.find(row => row.symbol === symbol)?.frames[timeframe];
+      const pending = awaitingView ? 'WAITING_FOR_REVIEW' : published?.activation?.state === 'PENDING' ? published.status : null;
+      $('stock-diagnostic').innerHTML = chartDiagnosis(data.diagnostic || (pending ? {
+        target: access.targets[timeframe] || data.expected_end, reason: pending,
         source: TIMEFRAMES.indexOf(timeframe) < 4 ? '15m' : 'daily',
       } : null));
       $('anchor').textContent = model.anchor < 0 ? '' : `${eventId ? '所选确认' : '参考时刻'} ${normalizedTime(anchor)}`;

@@ -214,6 +214,18 @@ def test_chart_diagnoses_current_gap_and_does_not_borrow_it_for_a_new_target(tmp
         assert detail["target"] == "2026-11-30 10:30:00"
 
 
+def test_chart_receipt_keeps_target_and_diagnosis_before_instrument_metadata(tmp_path):
+    sessions = ["2026-11-27"]
+    schedules, weeks = frame_schedules(sessions, "2026-11-27 15:03:00")
+    with NativeOwner(tmp_path / "metadata-pending.sqlite3") as owner:
+        observations = Observations(owner.market, DailyStore(owner.conn))
+        result = observations.chart(SYMBOL, "15m", sessions, schedules, weeks)
+        assert result["expected_end"] == "2026-11-27 15:00:00"
+        assert result["diagnostic"]["reason"] == "METADATA_PENDING"
+        assert result["diagnostic"]["last_bar"] is None
+        assert result["diagnostic"]["queue"] == "UNKNOWN"
+
+
 def test_required_history_is_planned_from_each_completed_frame(tmp_path):
     from addons.lan_ma55.backend.multiframe_input import MIN_HISTORY, replay_input, source_window
     from addons.lan_ma55.backend.native15_scheduler import task
